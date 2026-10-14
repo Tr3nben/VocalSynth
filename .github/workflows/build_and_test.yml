@@ -112,10 +112,10 @@ jobs:
       # Steinberg's own VST3 validator (VST3 SDK is MIT licensed). Built once per OS and cached.
       - name: Cache VST3 validator
         id: cache-vst3-validator
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
-          path: vst3sdk/build/bin/Release
-          key: vst3-validator-${{ runner.os }}-${{ env.VST3SDK_TAG }}
+          path: vst3sdk/build/bin
+          key: vst3-validator-v2-${{ runner.os }}-${{ env.VST3SDK_TAG }}
 
       - name: Build VST3 validator
         if: steps.cache-vst3-validator.outputs.cache-hit != 'true'
@@ -129,14 +129,19 @@ jobs:
 
       - name: VST3 validator
         run: |
-          validator=vst3sdk/build/bin/Release/validator
+          # bin/Release/validator on Linux/macOS, bin/validator.exe on Windows
+          validator=""
+          for candidate in vst3sdk/build/bin/Release/validator vst3sdk/build/bin/validator.exe; do
+            if [ -f "$candidate" ]; then validator="$candidate"; break; fi
+          done
+          test -n "$validator" || { echo "VST3 validator binary not found"; ls -R vst3sdk/build/bin; exit 1; }
           ${{ matrix.run-prefix }} "$validator" "$VST3_FX"
           ${{ matrix.run-prefix }} "$validator" "$VST3_Instrument"
 
       # clap-validator (free-audio). Built with cargo once per OS and cached.
       - name: Cache clap-validator
         id: cache-clap-validator
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: clap-validator-bin
           key: clap-validator-${{ runner.os }}-${{ env.CLAP_VALIDATOR_TAG }}
