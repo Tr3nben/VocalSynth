@@ -148,9 +148,11 @@ jobs:
 
       - name: Build clap-validator
         if: steps.cache-clap-validator.outputs.cache-hit != 'true'
+        # pwsh, because in Git Bash on Windows /usr/bin/link shadows MSVC's link.exe
+        shell: pwsh
         run: >
           cargo install --locked --git https://github.com/free-audio/clap-validator
-          --tag "$CLAP_VALIDATOR_TAG" --root clap-validator-bin clap-validator
+          --tag "${{ env.CLAP_VALIDATOR_TAG }}" --root clap-validator-bin clap-validator
 
       # param-set-events / param-set-no-cookies are excluded until the plugin has a continuous
       # parameter: with only one bool parameter these two tests fail although the wrapper handles
