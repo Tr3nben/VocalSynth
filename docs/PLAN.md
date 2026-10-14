@@ -196,18 +196,20 @@ Gesamtdauer bis 1.0 (Windows): **ca. 7–10 Monate** bei 8–10 h/Woche.
 
 Ziel: ein leeres, aber valides Plugin, das auf allen drei CI-Plattformen baut und pluginval besteht.
 
-- [ ] Repo aus pamplejuce aufsetzen. JUCE 9.0.4 als Submodule pinnen, clap-juce-extensions einbinden.
-- [ ] Targets „VocalSynth FX“ und „VocalSynth Instrument“ anlegen, dazu Standalone. Formate VST3 + CLAP, AU nur im macOS-Build.
-- [ ] 4-Zeichen-Codes festlegen (Manufacturer mit mindestens einem Großbuchstaben) und als „nie ändern“ dokumentieren.
-- [ ] `core/` als eigene statische Bibliothek mit Catch2-Testprojekt und einem Dummy-Test anlegen.
-- [ ] CI-Pipeline:
-  - [ ] Linux, Windows und macOS bauen
-  - [ ] Unit-Tests ausführen
-  - [ ] pluginval laufen lassen (zuerst Level 5 mit `--skip-gui-tests`, Ziel Level 10)
-  - [ ] Steinberg-`validator` laufen lassen
-- [ ] Signing-Schritte nur ausführen, wenn Secrets gesetzt sind. So bleibt die CI für Forks grün.
+- [x] Repo nach dem Vorbild von pamplejuce aufsetzen (eigenes schlankes CMake). JUCE 9.0.4 als Submodule pinnen, clap-juce-extensions einbinden (gepinnt auf einen Commit nach 0.26.0, weil erst `main` JUCE 9 unterstützt).
+- [x] Targets „VocalSynth FX“ (VST3, CLAP, Standalone) und „VocalSynth Instrument“ (VST3, CLAP) anlegen, AU nur im macOS-Build.
+- [x] 4-Zeichen-Codes festlegen und als „nie ändern“ dokumentieren (`cmake/VocalSynthPlugin.cmake`): Manufacturer `Tr3n`, FX `VsFx`, Instrument `VsIn`, Bundle-IDs `com.tr3nben.vocalsynth.fx` / `.instrument`.
+- [x] `core/` als eigene statische Bibliothek mit Catch2-Testprojekt anlegen (erste echte Funktionen: Frequenz ↔ MIDI-Note, Cent-Abstand).
+- [x] CI-Pipeline:
+  - [x] Linux, Windows und macOS bauen
+  - [x] Unit-Tests ausführen (Core + Processor über Blockgrößen {1, 7, 64, 480, 512, 4096} und 44,1/48/96 kHz)
+  - [x] pluginval laufen lassen, direkt auf Level 10 inklusive GUI-Tests
+  - [x] Steinberg-`validator` laufen lassen
+  - [x] Zusätzlich: `clap-validator` für beide CLAPs (zwei Parameter-Tests vorerst ausgeschlossen, siehe Kommentar im Workflow) und `auval` auf macOS
+- [ ] Signing-Schritte nur ausführen, wenn Secrets gesetzt sind. So bleibt die CI für Forks grün. *(verschoben nach M8, Releases bis dahin unsigniert)*
 - [ ] Lizenz entscheiden (Abschnitt 6), dann `LICENSE` und `CONTRIBUTING.md` mit Lizenzhinweis anlegen.
 - [x] Projekt-Skill (`juce-audio-plugin-dev/SKILL.md`) an JUCE 9 / C++23 / CMake ≥ 3.25 angleichen.
+- [ ] Manuell: beide Plugins in FL Studio 2026 laden (CI-Artefakt „VocalSynth-Windows-…“) und prüfen, dass sie ohne Absturz laufen.
 
 **Lieferung:** CI-Artefakte (`.vst3`, `.clap`, Standalone).
 **Abnahme:** CI auf drei Plattformen grün. pluginval besteht Level ≥ 5 mit FX und Instrument. Das Plugin lädt in FL 2026 ohne Absturz.

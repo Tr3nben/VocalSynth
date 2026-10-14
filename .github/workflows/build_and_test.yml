@@ -2,8 +2,11 @@ name: Build & Test
 
 on:
   workflow_dispatch:
+  # Documentation-only changes don't need a full build
   push:
+    paths-ignore: ['**.md', 'docs/**', '.claude/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', '.claude/**']
 
 # Cancel running builds of the same branch when new commits arrive
 concurrency:
