@@ -1,0 +1,20 @@
+# Build output
+/build*/
+/Builds/
+/cmake-build-*/
+/out/
+
+# IDEs
+.vscode/
+.idea/
+.vs/
+*.code-workspace
+compile_commands.json
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tools downloaded locally (CI does the same)
+/pluginval*

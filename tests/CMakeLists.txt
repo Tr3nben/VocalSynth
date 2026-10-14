@@ -1,0 +1,29 @@
+include(FetchContent)
+
+FetchContent_Declare(Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG v3.9.1
+    GIT_SHALLOW TRUE
+    SYSTEM)
+FetchContent_MakeAvailable(Catch2)
+include(${catch2_SOURCE_DIR}/extras/Catch.cmake)
+
+# --- Core tests: pure C++, no JUCE ----------------------------------------------
+add_executable(VocalSynthCoreTests
+    core/PitchTests.cpp)
+target_link_libraries(VocalSynthCoreTests PRIVATE VocalSynthCore Catch2::Catch2WithMain)
+set_target_properties(VocalSynthCoreTests PROPERTIES FOLDER "Tests")
+catch_discover_tests(VocalSynthCoreTests DISCOVERY_MODE PRE_TEST)
+
+# --- Plugin tests: the processor without a host -------------------------------------
+# Compiles the shared plugin code with the FX target's JUCE definitions; both variants are
+# constructed directly (createPluginFilter is not part of the shared code).
+add_executable(VocalSynthPluginTests
+    plugin/TestMain.cpp
+    plugin/ProcessorTests.cpp)
+target_link_libraries(VocalSynthPluginTests PRIVATE VocalSynthPluginCode Catch2::Catch2)
+target_compile_definitions(VocalSynthPluginTests PRIVATE
+    $<TARGET_PROPERTY:VocalSynthFX,COMPILE_DEFINITIONS>
+    JUCE_MODAL_LOOPS_PERMITTED=1)
+set_target_properties(VocalSynthPluginTests PROPERTIES FOLDER "Tests")
+catch_discover_tests(VocalSynthPluginTests DISCOVERY_MODE PRE_TEST)

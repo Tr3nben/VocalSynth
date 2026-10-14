@@ -152,10 +152,10 @@ Eine Festlegung aus RESEARCH 5.2 gilt durchgehend: Die **Live-Analyse läuft im 
 
 ```
 VocalSynth/
-├─ CMakeLists.txt            # pamplejuce-basiert, C++23, CMake ≥ 3.25
+├─ CMakeLists.txt            # C++23, CMake ≥ 3.25 (nach dem Vorbild von pamplejuce)
 ├─ cmake/                    # Hilfsfunktionen, Versionierung
 ├─ JUCE/                     # Submodule, gepinnt auf Tag 9.0.4
-├─ modules/clap-juce-extensions/
+├─ modules/clap-juce-extensions/ # Submodule, gepinnt auf einen Commit nach 0.26.0 (JUCE-9-Support gibt es erst auf main)
 ├─ core/                     # VocalSynthCore (ohne GUI/Host)
 │  ├─ include/vocalsynth/    # Framer.h, PitchDetector.h, NoteSegmenter.h, ...
 │  └─ src/

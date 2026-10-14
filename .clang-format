@@ -1,0 +1,17 @@
+# Close to the JUCE coding standard
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: Latest
+ColumnLimit: 110
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+SpaceBeforeParens: NonEmptyParentheses
+PointerAlignment: Left
+AccessModifierOffset: -4
+NamespaceIndentation: None
+SortIncludes: CaseSensitive

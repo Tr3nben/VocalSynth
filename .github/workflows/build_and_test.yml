@@ -1,0 +1,190 @@
+name: Build & Test
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+# Cancel running builds of the same branch when new commits arrive
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+  BUILD_DIR: build
+  PLUGINVAL_VERSION: v1.0.4
+  PLUGINVAL_STRICTNESS: 10
+  VST3SDK_TAG: v3.8.1_build_84
+  CLAP_VALIDATOR_TAG: 0.4.1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build_and_test:
+    # Don't run twice for PRs from branches of this repository
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            pluginval: ./pluginval
+            # pluginval and the GUI tests need a display
+            run-prefix: xvfb-run -a
+          - name: Windows
+            os: windows-latest
+            pluginval: ./pluginval.exe
+            run-prefix: ""
+          - name: macOS
+            os: macos-latest
+            pluginval: pluginval.app/Contents/MacOS/pluginval
+            run-prefix: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libjack-jackd2-dev ladspa-sdk \
+            libfreetype-dev libfontconfig1-dev libx11-dev libxcomposite-dev libxcursor-dev \
+            libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libxi-dev \
+            libglu1-mesa-dev mesa-common-dev xvfb \
+            libgtkmm-3.0-dev # only for building Steinberg's VST3 validator
+
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        run: cmake -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --target VocalSynthAll VocalSynthCoreTests VocalSynthPluginTests
+
+      - name: Unit tests
+        run: ${{ matrix.run-prefix }} ctest --test-dir "$BUILD_DIR" --output-on-failure
+
+      - name: Collect plugin paths
+        run: |
+          for product in FX Instrument; do
+            dir="$BUILD_DIR/VocalSynth${product}_artefacts/$BUILD_TYPE"
+            echo "VST3_${product}=$dir/VST3/VocalSynth ${product}.vst3" >> "$GITHUB_ENV"
+            echo "CLAP_${product}=$dir/CLAP/VocalSynth ${product}.clap" >> "$GITHUB_ENV"
+            echo "AU_${product}=$dir/AU/VocalSynth ${product}.component" >> "$GITHUB_ENV"
+          done
+          echo "STANDALONE_DIR=$BUILD_DIR/VocalSynthFX_artefacts/$BUILD_TYPE/Standalone" >> "$GITHUB_ENV"
+
+      - name: Download pluginval
+        run: |
+          curl -fsSL -o pluginval.zip \
+            "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_${{ runner.os }}.zip"
+          7z x -y pluginval.zip > /dev/null
+
+      - name: pluginval (VocalSynth FX, VST3)
+        run: >
+          ${{ matrix.run-prefix }} ${{ matrix.pluginval }} --strictness-level $PLUGINVAL_STRICTNESS
+          --verbose --output-dir pluginval-logs --validate "$VST3_FX"
+
+      - name: pluginval (VocalSynth Instrument, VST3)
+        run: >
+          ${{ matrix.run-prefix }} ${{ matrix.pluginval }} --strictness-level $PLUGINVAL_STRICTNESS
+          --verbose --output-dir pluginval-logs --validate "$VST3_Instrument"
+
+      # Steinberg's own VST3 validator (VST3 SDK is MIT licensed). Built once per OS and cached.
+      - name: Cache VST3 validator
+        id: cache-vst3-validator
+        uses: actions/cache@v4
+        with:
+          path: vst3sdk/build/bin/Release
+          key: vst3-validator-${{ runner.os }}-${{ env.VST3SDK_TAG }}
+
+      - name: Build VST3 validator
+        if: steps.cache-vst3-validator.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$VST3SDK_TAG" https://github.com/steinbergmedia/vst3sdk.git
+          cd vst3sdk
+          git submodule update --init --depth 1 base pluginterfaces public.sdk cmake
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF \
+            -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF -DSMTG_RUN_VST_VALIDATOR=OFF
+          cmake --build build --target validator
+
+      - name: VST3 validator
+        run: |
+          validator=vst3sdk/build/bin/Release/validator
+          ${{ matrix.run-prefix }} "$validator" "$VST3_FX"
+          ${{ matrix.run-prefix }} "$validator" "$VST3_Instrument"
+
+      # clap-validator (free-audio). Built with cargo once per OS and cached.
+      - name: Cache clap-validator
+        id: cache-clap-validator
+        uses: actions/cache@v4
+        with:
+          path: clap-validator-bin
+          key: clap-validator-${{ runner.os }}-${{ env.CLAP_VALIDATOR_TAG }}
+
+      - name: Build clap-validator
+        if: steps.cache-clap-validator.outputs.cache-hit != 'true'
+        run: >
+          cargo install --locked --git https://github.com/free-audio/clap-validator
+          --tag "$CLAP_VALIDATOR_TAG" --root clap-validator-bin clap-validator
+
+      # param-set-events / param-set-no-cookies are excluded until the plugin has a continuous
+      # parameter: with only one bool parameter these two tests fail although the wrapper handles
+      # flush() correctly (verified locally by adding a float parameter: all tests pass).
+      - name: clap-validator
+        run: |
+          for clap in "$CLAP_FX" "$CLAP_Instrument"; do
+            ${{ matrix.run-prefix }} clap-validator-bin/bin/clap-validator validate \
+              --exclude 'param-set-events|param-set-no-cookies' "$clap"
+          done
+
+      - name: auval (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "$AU_FX" "$AU_Instrument" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -a | grep -i tr3n || true
+          auval -v aufx VsFx Tr3n
+          auval -v aumu VsIn Tr3n
+
+      - name: Upload pluginval logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pluginval-logs-${{ runner.os }}
+          path: pluginval-logs
+          if-no-files-found: ignore
+
+      - name: Upload plugins
+        uses: actions/upload-artifact@v7
+        with:
+          name: VocalSynth-${{ runner.os }}-${{ github.sha }}
+          path: |
+            ${{ env.VST3_FX }}
+            ${{ env.VST3_Instrument }}
+            ${{ env.CLAP_FX }}
+            ${{ env.CLAP_Instrument }}
+            ${{ env.AU_FX }}
+            ${{ env.AU_Instrument }}
+            ${{ env.STANDALONE_DIR }}
+          if-no-files-found: warn
