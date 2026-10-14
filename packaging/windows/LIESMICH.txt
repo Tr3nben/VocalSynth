@@ -1,0 +1,45 @@
+VocalSynth – Installation unter Windows
+=======================================
+
+Inhalt dieses Pakets
+--------------------
+  Install-VocalSynth.bat     installiert alles mit einem Doppelklick
+  Uninstall-VocalSynth.bat   entfernt alles wieder
+  VST3\                      VocalSynth FX.vst3, VocalSynth Instrument.vst3
+  CLAP\                      VocalSynth FX.clap, VocalSynth Instrument.clap
+  Standalone\                VocalSynth FX.exe (zum Testen ohne DAW)
+
+Installation
+------------
+1. ZIP-Datei komplett entpacken (Rechtsklick > "Alle extrahieren").
+2. Im entpackten Ordner "Install-VocalSynth.bat" doppelklicken und die
+   Administrator-Abfrage bestätigen.
+   - Mit Enter wird in den Standard-Ordner installiert:
+       C:\Program Files\Common Files\VST3\VocalSynth\
+       C:\Program Files\Common Files\CLAP\VocalSynth\
+   - Nutzt FL Studio bei dir einen eigenen VST3-Ordner, gib ihn an; dann
+     landet alles in <dein Ordner>\VocalSynth\.
+   - Falls Windows "Der Computer wurde durch Windows geschützt" meldet:
+     "Weitere Informationen" > "Trotzdem ausführen". Die Dateien sind noch
+     nicht signiert.
+3. FL Studio öffnen: Options > Manage plugins > "Find installed plugins".
+   FL Studio durchsucht auch Unterordner, der Ordner "VocalSynth" wird also
+   gefunden.
+
+Ausprobieren
+------------
+- VocalSynth FX: im Mixer auf den Insert legen, auf dem dein Mikrofon liegt.
+  Der Pegelbalken im Plugin zeigt, ob deine Stimme ankommt.
+- VocalSynth Instrument: im Channel Rack als Instrument laden.
+
+Stand: Meilenstein 0 (Grundgerüst). Die Plugins laden, reichen das Audio
+durch und zeigen den Eingangspegel. Tonhöhenerkennung und MIDI kommen in den
+nächsten Meilensteinen.
+
+Ohne Installationsskript
+------------------------
+Die beiden .vst3-Ordner aus "VST3\" einfach in einen Unterordner
+"VocalSynth" deines VST3-Ordners kopieren, z. B.
+  C:\Program Files\Common Files\VST3\VocalSynth\
+
+Projekt: https://github.com/Tr3nben/VocalSynth

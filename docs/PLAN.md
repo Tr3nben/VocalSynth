@@ -32,7 +32,7 @@ Annahme für alle Zeitangaben: **ein Solo-Hobby-Entwickler mit ca. 8–10 Stunde
   - Plugin-MIDI-Out
   - interne Engine
   - Capture/Drag & Drop, optional virtueller MIDI-Port
-- **Open Source** mit CI und pluginval. Lizenz voraussichtlich AGPLv3, die Entscheidung ist noch offen (siehe Abschnitt 6).
+- **Öffentlicher Quellcode** mit CI und pluginval. JUCE läuft unter der kostenlosen JUCE-Lizenz (Starter); die Lizenz des eigenen Codes ist noch offen (siehe Abschnitt 6).
 
 ### 1.2 Später (nach 1.0)
 
@@ -207,7 +207,9 @@ Ziel: ein leeres, aber valides Plugin, das auf allen drei CI-Plattformen baut un
   - [x] Steinberg-`validator` laufen lassen
   - [x] Zusätzlich: `clap-validator` für beide CLAPs (zwei Parameter-Tests vorerst ausgeschlossen, siehe Kommentar im Workflow) und `auval` auf macOS
 - [ ] Signing-Schritte nur ausführen, wenn Secrets gesetzt sind. So bleibt die CI für Forks grün. *(verschoben nach M8, Releases bis dahin unsigniert)*
-- [ ] Lizenz entscheiden (Abschnitt 6), dann `LICENSE` und `CONTRIBUTING.md` mit Lizenzhinweis anlegen.
+- [x] JUCE-Lizenz entscheiden: kostenlose JUCE-Lizenz (Starter) statt AGPLv3 (Entscheidung vom 2026-10-14).
+- [ ] Lizenz für den eigenen Code festlegen, dann `LICENSE` und `CONTRIBUTING.md` anlegen.
+- [x] Fertiges Windows-Paket aus der CI: ZIP mit `Install-VocalSynth.bat`, installiert nach `<VST3-Ordner>\VocalSynth\` und `<CLAP-Ordner>\VocalSynth\`.
 - [x] Projekt-Skill (`juce-audio-plugin-dev/SKILL.md`) an JUCE 9 / C++23 / CMake ≥ 3.25 angleichen.
 - [ ] Manuell: beide Plugins in FL Studio 2026 laden (CI-Artefakt „VocalSynth-Windows-…“) und prüfen, dass sie ohne Absturz laufen.
 
@@ -455,7 +457,7 @@ Ziel: Singen erzeugt in FL saubere Noten mit Bend.
 
 | Frage | Optionen | Empfehlung |
 |---|---|---|
-| **Lizenz** | AGPLv3 (JUCE kostenlos) oder kommerzielle JUCE-9-Lizenz (Starter kostenlos bis 20.000 USD, Indie, Pro) | **AGPLv3.** Passt zu Open Source, keine Kosten. Falls später ein Dual-Licensing denkbar ist, vor externen Beiträgen eine CLA einführen, sonst ist der Wechsel versperrt. |
+| **Lizenz** | AGPLv3 (JUCE kostenlos) oder kommerzielle JUCE-9-Lizenz (Starter kostenlos bis 20.000 USD, Indie, Pro) | **Entschieden (2026-10-14): JUCE über die kostenlose Starter-Lizenz.** Offen bleibt die Lizenz des eigenen Codes (z. B. MIT oder proprietär). Vor externen Beiträgen klären, ob eine CLA nötig ist. |
 | **FX- vs. Instrument-Target als Standard** | FX im Mic-Insert oder Instrument mit Sidechain | **Erst nach M1 entscheiden.** Bis dahin beide bauen. |
 | **CLAP-Priorität** | gleichrangig mit VST3 oder nur Zusatzformat | **Ab M0 mitbauen (kostet wenig), aber VST3 bleibt primär.** CLAP rückt nur auf, wenn T5 in FL besser abschneidet. |
 | **macOS-Zeitpunkt** | parallel oder nach dem Windows-Release | **Nach 1.0 (Windows).** CI baut macOS schon ab M0, damit nichts verrottet. Apple-Account (99 USD/Jahr) erst mit dem macOS-Release. |
@@ -468,7 +470,7 @@ Ziel: Singen erzeugt in FL saubere Noten mit Bend.
 
 ## 7. Nächste konkrete Schritte
 
-1. Lizenz entscheiden (Empfehlung: AGPLv3), dann `LICENSE` anlegen.
+1. Lizenz für den eigenen Code festlegen (JUCE läuft unter der kostenlosen Starter-Lizenz), dann `LICENSE` anlegen.
 2. pamplejuce als Vorlage übernehmen. JUCE auf Tag 9.0.4 pinnen. CMake-Targets „VocalSynth FX“ und „VocalSynth Instrument“ (VST3 + CLAP + Standalone) anlegen. Plugin-Codes festlegen.
 3. CI auf Linux, Windows und macOS grün bekommen: Build, Dummy-Unit-Test, pluginval Level 5, Steinberg-`validator`, Signing nur bei gesetzten Secrets.
 4. Testmuster-Modus (Noten, Pitchbend-Sweep, CC-Sweep, Blockgrößen-Histogramm, Sidechain-Pegel) für den M1-Spike bauen.

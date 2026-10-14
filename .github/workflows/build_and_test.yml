@@ -186,6 +186,8 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload plugins
+        # Windows gets a ready-to-install package instead (next steps)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v7
         with:
           name: VocalSynth-${{ runner.os }}-${{ github.sha }}
@@ -198,3 +200,27 @@ jobs:
             ${{ env.AU_Instrument }}
             ${{ env.STANDALONE_DIR }}
           if-no-files-found: warn
+
+      # One ZIP for users: VST3/ + CLAP/ + Standalone/ + Install-VocalSynth.bat, which installs
+      # into "<VST3 folder>\VocalSynth\" so FL Studio only has to rescan.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pkg="VocalSynth-$(tr -d '[:space:]' < VERSION)-Windows-${GITHUB_SHA::7}"
+          mkdir -p "dist/$pkg/VST3" "dist/$pkg/CLAP" "dist/$pkg/Standalone"
+          cp -R "$VST3_FX" "$VST3_Instrument" "dist/$pkg/VST3/"
+          cp "$CLAP_FX" "$CLAP_Instrument" "dist/$pkg/CLAP/"
+          cp "$STANDALONE_DIR"/*.exe "dist/$pkg/Standalone/"
+          cp packaging/windows/Install-VocalSynth.bat packaging/windows/Uninstall-VocalSynth.bat \
+             packaging/windows/LIESMICH.txt "dist/$pkg/"
+          (cd dist && 7z a -tzip "$pkg.zip" "$pkg" > /dev/null)
+          7z l "dist/$pkg.zip"
+          echo "PACKAGE_ZIP=dist/$pkg.zip" >> "$GITHUB_ENV"
+
+      - name: Upload package (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.PACKAGE_ZIP }}
+          archive: false
+          if-no-files-found: error

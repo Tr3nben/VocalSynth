@@ -113,6 +113,18 @@ Geplant sind außerdem `tools/` (Auswertung, Testmuster für den FL-Routing-Test
 
 ---
 
+## Einfach installieren (Windows)
+
+1. Im [Actions-Tab](https://github.com/Tr3nben/VocalSynth/actions) den neuesten grünen Lauf öffnen und unten bei „Artifacts“ die Datei **`VocalSynth-<Version>-Windows-<Commit>.zip`** herunterladen (dafür bei GitHub angemeldet sein).
+2. ZIP entpacken und **`Install-VocalSynth.bat`** doppelklicken. Das Skript kopiert beide Plugins in je einen eigenen Ordner `VocalSynth`:
+   - `C:\Program Files\Common Files\VST3\VocalSynth\` (oder in deinen eigenen VST3-Ordner, das Skript fragt danach)
+   - `C:\Program Files\Common Files\CLAP\VocalSynth\`
+3. In FL Studio: *Options → Manage plugins → Find installed plugins*.
+
+Details stehen in der `LIESMICH.txt` im Paket. Die Plugins sind noch nicht signiert; meldet Windows „Der Computer wurde durch Windows geschützt“, über „Weitere Informationen → Trotzdem ausführen“ starten.
+
+---
+
 ## Build
 
 Aus einem Code entstehen zwei Plugins:
@@ -178,6 +190,5 @@ Im Ordner [`.claude/skills/`](.claude/skills) liegen Skills für die Entwicklung
 
 ## Lizenz
 
-**Noch nicht festgelegt.**
-
-Wichtig für die Entscheidung: JUCE ist dual lizenziert, unter **AGPLv3** oder der kommerziellen JUCE-EULA. Wer JUCE kostenlos nutzt, muss das gesamte Plugin unter AGPLv3 veröffentlichen, und wer Binaries verteilt, muss den Quellcode bereitstellen. Eine permissive Lizenz wie MIT ginge mit JUCE nur, wenn eine kommerzielle JUCE-Lizenz erworben wird (oder mit einem anderen Framework wie iPlug2 oder DPF).
+- **JUCE:** wird unter der **kostenlosen JUCE-Lizenz (Starter)** genutzt, nicht unter AGPLv3. Laut [docs/RESEARCH.md](docs/RESEARCH.md) gilt sie bis 20.000 USD Jahresumsatz; maßgeblich ist die [JUCE-9-EULA](https://juce.com/legal/juce-9-licence/). Die Lizenz ist an den JUCE-Account gebunden, am Code und am Build ändert sich dadurch nichts. Wer VocalSynth selbst aus dem Quellcode baut und verteilt, braucht dafür eine eigene JUCE-Lizenz (oder nutzt JUCE unter AGPLv3).
+- **Eigener Code von VocalSynth:** Lizenz noch nicht festgelegt. Durch die JUCE-Lizenz ist das Projekt nicht mehr an AGPLv3 gebunden.
