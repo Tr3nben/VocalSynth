@@ -50,7 +50,7 @@ VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Ha
 3. Beim Ziel-Synth im **Channel Rack** denselben Port als **MIDI Input Port** einstellen. Native FL-Synths wie Sytrus oder FLEX haben keinen Input-Port, sie erreicht man über **Patcher**.
 4. Singen, beatboxen, spielen. Gelungene Takes über den Capture-Bereich per Drag & Drop ins Projekt ziehen.
 
-> **Ehrlicher Hinweis:** Ob VST3-MIDI-Out aus einem Mixer-Effekt in FL Studio 2026 zuverlässig funktioniert, ist **noch nicht verifiziert**. Es gibt widersprüchliche und teils negative Forenberichte, z. B. zu Scaler und einem JUCE-Arpeggiator. Deshalb steht in Meilenstein 0 ein Pflicht-Spike mit den Tests T1–T7 (siehe [docs/RESEARCH.md, Abschnitt 2.5](docs/RESEARCH.md#25-folgerungen-und-pflicht-spike-vor-der-architektur)).
+> **Ehrlicher Hinweis:** Ob VST3-MIDI-Out aus einem Mixer-Effekt in FL Studio 2026 zuverlässig funktioniert, ist **noch nicht verifiziert**. Es gibt widersprüchliche und teils negative Forenberichte, z. B. zu Scaler und einem JUCE-Arpeggiator. Deshalb ist Meilenstein 1 ein Pflicht-Spike (Go/No-go-Gate, siehe [docs/PLAN.md](docs/PLAN.md)) mit den Tests T1–T7 (siehe [docs/RESEARCH.md, Abschnitt 2.5](docs/RESEARCH.md#25-folgerungen-und-pflicht-spike-vor-der-architektur)).
 
 **Fallbacks, falls das Port-Routing nicht klappt:**
 - Variante als **Instrument** im Channel Rack (Mikrofon per Sidechain) statt als Effekt
