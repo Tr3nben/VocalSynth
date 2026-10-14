@@ -19,11 +19,17 @@ endif ()
 add_library(VocalSynthPluginCode INTERFACE)
 
 target_sources(VocalSynthPluginCode INTERFACE
+    ${CMAKE_SOURCE_DIR}/plugin/MidiOutputStage.h
+    ${CMAKE_SOURCE_DIR}/plugin/MidiOutputStage.cpp
     ${CMAKE_SOURCE_DIR}/plugin/Parameters.h
+    ${CMAKE_SOURCE_DIR}/plugin/PluginEditor.h
+    ${CMAKE_SOURCE_DIR}/plugin/PluginEditor.cpp
     ${CMAKE_SOURCE_DIR}/plugin/PluginProcessor.h
     ${CMAKE_SOURCE_DIR}/plugin/PluginProcessor.cpp
-    ${CMAKE_SOURCE_DIR}/plugin/PluginEditor.h
-    ${CMAKE_SOURCE_DIR}/plugin/PluginEditor.cpp)
+    ${CMAKE_SOURCE_DIR}/plugin/TestClipExporter.h
+    ${CMAKE_SOURCE_DIR}/plugin/TestClipExporter.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/VirtualMidiPort.h
+    ${CMAKE_SOURCE_DIR}/plugin/VirtualMidiPort.cpp)
 
 target_include_directories(VocalSynthPluginCode INTERFACE ${CMAKE_SOURCE_DIR}/plugin)
 

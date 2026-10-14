@@ -157,14 +157,10 @@ jobs:
           cargo install --locked --git https://github.com/free-audio/clap-validator
           --tag "${{ env.CLAP_VALIDATOR_TAG }}" --root clap-validator-bin clap-validator
 
-      # param-set-events / param-set-no-cookies are excluded until the plugin has a continuous
-      # parameter: with only one bool parameter these two tests fail although the wrapper handles
-      # flush() correctly (verified locally by adding a float parameter: all tests pass).
       - name: clap-validator
         run: |
           for clap in "$CLAP_FX" "$CLAP_Instrument"; do
-            ${{ matrix.run-prefix }} clap-validator-bin/bin/clap-validator validate \
-              --exclude 'param-set-events|param-set-no-cookies' "$clap"
+            ${{ matrix.run-prefix }} clap-validator-bin/bin/clap-validator validate "$clap"
           done
 
       - name: auval (macOS)
@@ -212,7 +208,7 @@ jobs:
           cp "$CLAP_FX" "$CLAP_Instrument" "dist/$pkg/CLAP/"
           cp "$STANDALONE_DIR"/*.exe "dist/$pkg/Standalone/"
           cp packaging/windows/Install-VocalSynth.bat packaging/windows/Uninstall-VocalSynth.bat \
-             packaging/windows/LIESMICH.txt "dist/$pkg/"
+             packaging/windows/LIESMICH.txt docs/FL-ROUTING.md "dist/$pkg/"
           (cd dist && 7z a -tzip "$pkg.zip" "$pkg" > /dev/null)
           7z l "dist/$pkg.zip"
           echo "PACKAGE_ZIP=dist/$pkg.zip" >> "$GITHUB_ENV"

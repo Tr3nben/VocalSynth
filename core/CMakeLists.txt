@@ -1,7 +1,14 @@
 # VocalSynthCore: real-time DSP building blocks without any JUCE, host or GUI dependency.
 # Everything here must be allocation-free after prepare() and safe to call on the audio thread.
 add_library(VocalSynthCore STATIC
-    src/Pitch.cpp)
+    include/vocalsynth/BlockSizeHistogram.h
+    include/vocalsynth/MonitorSynth.h
+    include/vocalsynth/Pitch.h
+    include/vocalsynth/TestPatternGenerator.h
+    include/vocalsynth/VsEvent.h
+    src/MonitorSynth.cpp
+    src/Pitch.cpp
+    src/TestPatternGenerator.cpp)
 
 target_include_directories(VocalSynthCore PUBLIC include)
 target_compile_features(VocalSynthCore PUBLIC cxx_std_23)

@@ -205,7 +205,7 @@ Ziel: ein leeres, aber valides Plugin, das auf allen drei CI-Plattformen baut un
   - [x] Unit-Tests ausführen (Core + Processor über Blockgrößen {1, 7, 64, 480, 512, 4096} und 44,1/48/96 kHz)
   - [x] pluginval laufen lassen, direkt auf Level 10 inklusive GUI-Tests
   - [x] Steinberg-`validator` laufen lassen
-  - [x] Zusätzlich: `clap-validator` für beide CLAPs (zwei Parameter-Tests vorerst ausgeschlossen, siehe Kommentar im Workflow) und `auval` auf macOS
+  - [x] Zusätzlich: `clap-validator` für beide CLAPs (seit M1 ohne Ausnahmen) und `auval` auf macOS
 - [ ] Signing-Schritte nur ausführen, wenn Secrets gesetzt sind. So bleibt die CI für Forks grün. *(verschoben nach M8, Releases bis dahin unsigniert)*
 - [x] JUCE-Lizenz entscheiden: kostenlose JUCE-Lizenz (Starter) statt AGPLv3 (Entscheidung vom 2026-10-14).
 - [ ] Lizenz für den eigenen Code festlegen, dann `LICENSE` und `CONTRIBUTING.md` anlegen.
@@ -220,10 +220,15 @@ Ziel: ein leeres, aber valides Plugin, das auf allen drei CI-Plattformen baut un
 
 Ziel: klären, auf welchem Weg MIDI zuverlässig von VocalSynth zum Klangerzeuger kommt. Erst danach wird der primäre Ausgabeweg festgelegt.
 
-- [ ] Testmodus im Plugin bauen (`tools/vs-spike` bzw. ein Parameter „Testmuster“):
-  - [ ] Notenfolge, Pitchbend-Sweep und CC-Sweep
-  - [ ] Pegelanzeige für ankommendes Audio, wichtig für T3
-  - [ ] Histogramm der Host-Blockgrößen über Atomics, angezeigt im UI
+- [x] Testmodus im Plugin bauen (als Parameter „Test Pattern“ statt eines eigenen `tools/vs-spike`; Design in `docs/M1-DESIGN.md`, Testbuild Version 0.1.0):
+  - [x] Notenfolge, Pitchbend-Sweep und CC-Sweep (Parameter für MIDI-Kanal, Tempo und CC-Nummer; Modus „All“ im Wechsel)
+  - [x] Pegelanzeige für ankommendes Audio, wichtig für T3 (dazu Anzeige der Eingangskanäle)
+  - [x] Histogramm der Host-Blockgrößen über Atomics, angezeigt im UI
+  - [x] Zähler der gesendeten MIDI-Nachrichten im UI („nicht gesendet“ vs. „nicht geroutet“) und Anzeige des geladenen Formats (VST3/CLAP, für T5)
+  - [x] Monitor-Ton im Plugin für T6 und virtueller MIDI-Port (Parameter „Virtual MIDI Out“) für T7
+  - [x] Test-`.mid` und Test-`.wav` zum Herausziehen per Drag & Drop
+  - [x] Keine hängenden Noten bei Musterwechsel, Bypass und Neustart der Verarbeitung (Unit-Tests über Blockgrößen {1, 7, 64, 480, 512, 4096})
+- [x] Testanleitung `docs/FL-ROUTING.md` mit Klickwegen für T1–T7, Zusatzchecks und Ergebnistabelle zum Ausfüllen.
 - [ ] T1–T7 nach RESEARCH 2.5 in FL 2026 (Windows, ASIO, 128–256 Samples) durchführen. Pro Test notieren, ob Note, Pitchbend und CC ankommen, mit Screenshot des Wrapper-Setups.
 - [ ] Zusatzchecks, die Capture und DSP absichern:
   - [ ] Drag & Drop einer Test-`.mid` in ein Pattern und einer `.wav` in die Playlist

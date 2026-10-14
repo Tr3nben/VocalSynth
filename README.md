@@ -4,8 +4,9 @@
 
 VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Hauptplattform ist Windows, macOS folgt später. Das Plugin macht aus einem Mikrofonsignal in Echtzeit MIDI: gesungene Töne werden zu Noten, Beatbox-Laute zu Drum-Triggern, Lautstärke und Vokale zu Controller-Daten. Vom Funktionsumfang her orientiert es sich an Vochlea Dubler 2.
 
-> **Status: Meilenstein 0 – Grundgerüst.**
-> Es gibt ein baubares, validiertes Plugin-Gerüst (Audio wird durchgereicht, Eingangspegel wird angezeigt), aber noch keine Analyse und kein MIDI. Grundlage sind die technische Recherche ([docs/RESEARCH.md](docs/RESEARCH.md)) und der Plan ([docs/PLAN.md](docs/PLAN.md)). Die Features unten beschreiben das Ziel, nicht den aktuellen Stand.
+> **Status: Meilenstein 1 – Testbuild für den FL-Studio-Routing-Test (Version 0.1.0).**
+> Das Plugin analysiert noch keine Stimme. Es erzeugt selbst festes Test-MIDI (Tonleiter, Pitchbend-Sweep, CC-Sweep) und kann es mit einem eingebauten Sinuston hörbar machen. Dazu kommen ein optionaler virtueller MIDI-Port, Test-Clips (`.mid`/`.wav`) zum Herausziehen per Drag & Drop, eine Pegelanzeige und eine Anzeige der Blockgrößen, die FL schickt. Damit wird in FL Studio 2026 geprüft, welcher MIDI-Weg funktioniert (Tests T1–T7). Anleitung und Ergebnistabelle: [docs/FL-ROUTING.md](docs/FL-ROUTING.md). Die Ergebnisse stehen noch aus.
+> Grundlage sind die technische Recherche ([docs/RESEARCH.md](docs/RESEARCH.md)) und der Plan ([docs/PLAN.md](docs/PLAN.md)). Die Features unten beschreiben das Ziel, nicht den aktuellen Stand.
 
 ---
 
@@ -50,7 +51,7 @@ VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Ha
 3. Beim Ziel-Synth im **Channel Rack** denselben Port als **MIDI Input Port** einstellen. Native FL-Synths wie Sytrus oder FLEX haben keinen Input-Port, sie erreicht man über **Patcher**.
 4. Singen, beatboxen, spielen. Gelungene Takes über den Capture-Bereich per Drag & Drop ins Projekt ziehen.
 
-> **Ehrlicher Hinweis:** Ob VST3-MIDI-Out aus einem Mixer-Effekt in FL Studio 2026 zuverlässig funktioniert, ist **noch nicht verifiziert**. Es gibt widersprüchliche und teils negative Forenberichte, z. B. zu Scaler und einem JUCE-Arpeggiator. Deshalb ist Meilenstein 1 ein Pflicht-Spike (Go/No-go-Gate, siehe [docs/PLAN.md](docs/PLAN.md)) mit den Tests T1–T7 (siehe [docs/RESEARCH.md, Abschnitt 2.5](docs/RESEARCH.md#25-folgerungen-und-pflicht-spike-vor-der-architektur)).
+> **Ehrlicher Hinweis:** Ob VST3-MIDI-Out aus einem Mixer-Effekt in FL Studio 2026 zuverlässig funktioniert, ist **noch nicht verifiziert**. Es gibt widersprüchliche und teils negative Forenberichte, z. B. zu Scaler und einem JUCE-Arpeggiator. Deshalb ist Meilenstein 1 ein Pflicht-Spike (Go/No-go-Gate, siehe [docs/PLAN.md](docs/PLAN.md)) mit den Tests T1–T7 (siehe [docs/RESEARCH.md, Abschnitt 2.5](docs/RESEARCH.md#25-folgerungen-und-pflicht-spike-vor-der-architektur)). Der Testbuild dafür ist fertig; wie man testet, steht in [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
 
 **Fallbacks, falls das Port-Routing nicht klappt:**
 - Variante als **Instrument** im Channel Rack (Mikrofon per Sidechain) statt als Effekt
@@ -105,11 +106,11 @@ VocalSynth/
 ├── core/                      # VocalSynthCore: DSP in reinem C++, ohne JUCE (headless testbar)
 ├── plugin/                    # Processor, Editor, Parameter, createPluginFilter
 ├── tests/                     # Catch2: core/ (DSP) und plugin/ (Processor ohne Host)
-├── docs/                      # RESEARCH.md, PLAN.md
+├── docs/                      # RESEARCH.md, PLAN.md, M1-DESIGN.md, FL-ROUTING.md
 └── .github/workflows/         # Build, Tests, pluginval, VST3- und CLAP-Validator
 ```
 
-Geplant sind außerdem `tools/` (Auswertung, Testmuster für den FL-Routing-Test) und `resources/` (Samples, Presets), siehe [docs/PLAN.md](docs/PLAN.md#24-verzeichnisstruktur-geplant).
+Geplant sind außerdem `tools/` (Auswertung) und `resources/` (Samples, Presets), siehe [docs/PLAN.md](docs/PLAN.md#24-verzeichnisstruktur-geplant).
 
 ---
 
@@ -120,6 +121,7 @@ Geplant sind außerdem `tools/` (Auswertung, Testmuster für den FL-Routing-Test
    - `C:\Program Files\Common Files\VST3\VocalSynth\` (oder in deinen eigenen VST3-Ordner, das Skript fragt danach)
    - `C:\Program Files\Common Files\CLAP\VocalSynth\`
 3. In FL Studio: *Options → Manage plugins → Find installed plugins*.
+4. Für den Routing-Test weiter mit [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
 
 Details stehen in der `LIESMICH.txt` im Paket. Die Plugins sind noch nicht signiert; meldet Windows „Der Computer wurde durch Windows geschützt“, über „Weitere Informationen → Trotzdem ausführen“ starten.
 
@@ -185,6 +187,8 @@ Im Ordner [`.claude/skills/`](.claude/skills) liegen Skills für die Entwicklung
 
 - [docs/RESEARCH.md](docs/RESEARCH.md): Marktanalyse, MIDI-Routing in FL Studio, DSP-/ML-Verfahren, Tech-Stack, Risiken
 - [docs/PLAN.md](docs/PLAN.md): Roadmap und Meilensteine
+- [docs/FL-ROUTING.md](docs/FL-ROUTING.md): Testanleitung für FL Studio (T1–T7) mit Ergebnistabelle
+- [docs/M1-DESIGN.md](docs/M1-DESIGN.md): technisches Design des M1-Testbuilds (englisch)
 
 ---
 

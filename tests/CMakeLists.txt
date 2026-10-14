@@ -10,7 +10,10 @@ include(${catch2_SOURCE_DIR}/extras/Catch.cmake)
 
 # --- Core tests: pure C++, no JUCE ----------------------------------------------
 add_executable(VocalSynthCoreTests
-    core/PitchTests.cpp)
+    core/BlockSizeHistogramTests.cpp
+    core/MonitorSynthTests.cpp
+    core/PitchTests.cpp
+    core/TestPatternGeneratorTests.cpp)
 target_link_libraries(VocalSynthCoreTests PRIVATE VocalSynthCore Catch2::Catch2WithMain)
 set_target_properties(VocalSynthCoreTests PROPERTIES FOLDER "Tests")
 catch_discover_tests(VocalSynthCoreTests DISCOVERY_MODE PRE_TEST)
@@ -20,7 +23,10 @@ catch_discover_tests(VocalSynthCoreTests DISCOVERY_MODE PRE_TEST)
 # constructed directly (createPluginFilter is not part of the shared code).
 add_executable(VocalSynthPluginTests
     plugin/TestMain.cpp
-    plugin/ProcessorTests.cpp)
+    plugin/MidiOutputStageTests.cpp
+    plugin/PluginEditorTests.cpp
+    plugin/ProcessorTests.cpp
+    plugin/TestClipExporterTests.cpp)
 target_link_libraries(VocalSynthPluginTests PRIVATE VocalSynthPluginCode Catch2::Catch2)
 target_compile_definitions(VocalSynthPluginTests PRIVATE
     $<TARGET_PROPERTY:VocalSynthFX,COMPILE_DEFINITIONS>
