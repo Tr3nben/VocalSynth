@@ -1,7 +1,7 @@
 ---
 name: juce-audio-plugin-dev
 description: >
-  Project rules for VocalSynth, a JUCE 8 / C++ VST3 plugin for FL Studio that turns live voice into
+  Project rules for VocalSynth, a JUCE 9 / C++23 VST3 plugin for FL Studio that turns live voice into
   MIDI (pitch tracking to notes, beatbox hits to drum triggers). Use for any work on the
   AudioProcessor, processBlock, DSP (pitch detection, onset detection, classification), parameters
   (APVTS), state save/restore, MIDI output, the editor/UI thread boundary, CMake/JUCE build setup,
@@ -120,9 +120,9 @@ with a `version` property, and migrate older versions on load. Loading must tole
 - Live feel: aim for <= 20 ms total from voice to sound (ASIO buffer + analysis window + synth).
   Report analysis delay in the UI or docs. Don't add audio latency through `setLatencySamples` just for analysis.
 
-## 5. Build (CMake + JUCE 8)
+## 5. Build (CMake + JUCE 9)
 
-- CMake >= 3.22, C++20 (C++17 is the JUCE 8 minimum). Pin JUCE to an exact tag (git submodule
+- CMake >= 3.22, C++23 (project standard). Pin JUCE to an exact tag (git submodule
   or `FetchContent`), never a moving branch.
 - `juce_add_plugin(VocalSynth COMPANY_NAME ... PLUGIN_MANUFACTURER_CODE Xxxx PLUGIN_CODE Xxxx
   FORMATS VST3 Standalone PRODUCT_NAME "VocalSynth" NEEDS_MIDI_OUTPUT TRUE IS_SYNTH FALSE
@@ -134,7 +134,7 @@ with a `version` property, and migrate older versions on load. Loading must tole
 - Put DSP in a separate static library target (e.g. `VocalSynthDSP`) shared by the plugin and the tests.
 - Windows output: `build/VocalSynth_artefacts/Release/VST3/VocalSynth.vst3`. `COPY_PLUGIN_AFTER_BUILD`
   copies it to `C:\Program Files\Common Files\VST3` and needs admin rights, so keep it off by default.
-- JUCE 8 is AGPLv3 or commercial-licensed. Check the license before distributing binaries.
+- JUCE 9 is AGPLv3 or commercial-licensed. Check the license before distributing binaries.
 
 ## 6. Testing
 
