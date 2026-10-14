@@ -12,7 +12,9 @@ description: >
 
 # VocalSynth: JUCE audio plugin development rules
 
-The plugin is an audio effect (FL mixer insert) that takes mic audio in and sends MIDI out.
+The plugin takes mic audio in and sends MIDI out. Two targets share one codebase: "VocalSynth FX"
+(audio effect, FL mixer insert) and "VocalSynth Instrument" (synth with sidechain input). Which one is
+the primary FL Studio path is decided by the M1 routing spike (see docs/PLAN.md, docs/RESEARCH.md 2.5).
 Correctness on the audio thread comes first, then latency, then features.
 
 ## 1. Real-time audio thread rules (non-negotiable)
@@ -122,7 +124,7 @@ with a `version` property, and migrate older versions on load. Loading must tole
 
 ## 5. Build (CMake + JUCE 9)
 
-- CMake >= 3.22, C++23 (project standard). Pin JUCE to an exact tag (git submodule
+- CMake >= 3.25, C++23 (project standard). Pin JUCE to an exact tag (git submodule
   or `FetchContent`), never a moving branch.
 - `juce_add_plugin(VocalSynth COMPANY_NAME ... PLUGIN_MANUFACTURER_CODE Xxxx PLUGIN_CODE Xxxx
   FORMATS VST3 Standalone PRODUCT_NAME "VocalSynth" NEEDS_MIDI_OUTPUT TRUE IS_SYNTH FALSE
@@ -160,8 +162,10 @@ with a `version` property, and migrate older versions on load. Loading must tole
   (e.g. 1). On the target channel-rack instrument, set the same **MIDI input port** (VST wrapper
   settings, or the port field in the channel's Miscellaneous settings for native generators). Several
   instruments can listen on one port, and MIDI channels separate the pitched notes from the drum triggers.
-- To record, arm recording of notes and play. FL records the incoming notes into the target
-  channel's pattern or piano roll.
+- Recording: plugin MIDI output is NOT reliably recordable directly in FL (see docs/RESEARCH.md 2.2).
+  Use VocalSynth's own capture + drag & drop of .mid/.wav; Patcher or a virtual port are workarounds.
+- VST3 MIDI out from FX plugins to channel-rack instruments is unverified in FL 2026; native FL synths
+  have no MIDI input port and need Patcher. Check docs/FL-ROUTING.md (after M1) before relying on it.
 - Check: changing block size/sample rate in Audio Settings mid-session, the "Use fixed size buffers" wrapper
   option on and off, bypass/disable while notes sound (no stuck notes), save and reload the project (state),
   automation of every parameter, multiple instances, and removing the plugin while audio runs.
