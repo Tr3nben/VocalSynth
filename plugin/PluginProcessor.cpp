@@ -3,8 +3,59 @@
 #include "Parameters.h"
 #include "PluginEditor.h"
 
+#include <cmath>
+
 namespace vocalsynth
 {
+
+int16_t monitorBendFor (int16_t bend, int rangeSemitones) noexcept
+{
+    if (rangeSemitones == static_cast<int> (MonitorSynth::bendRangeSemitones))
+        return bend;
+
+    // MonitorSynth reads value / 8192 * 2 semitones; the synth reads value / 8192 * range
+    const auto scaled = static_cast<double> (bend) * static_cast<double> (rangeSemitones)
+                        / MonitorSynth::bendRangeSemitones;
+    return static_cast<int16_t> (juce::jlimit (-8192L, 8191L, std::lround (scaled)));
+}
+
+namespace
+{
+/** Brings a saved state up to the current parameter layout before it is loaded. replaceState() keeps
+    the CURRENT value of every parameter the state does not mention (JUCE flushes the live values into
+    the missing children), so without this the result of loading an older state would depend on what
+    the instance was set to before. Missing parameters get their defaults instead.
+    M1 states (0.1.x) have no "source": M1 always played its test pattern, so such a state selects
+    Test Pattern when its pattern is not Off (the routing test the user saved keeps playing), else
+    Voice (the M2 default). */
+void migrateState (juce::ValueTree& state, const juce::Array<juce::AudioProcessorParameter*>& parameters)
+{
+    static const juce::Identifier paramType ("PARAM"), idProperty ("id"), valueProperty ("value");
+
+    const auto childFor = [&state] (const juce::String& id) { return state.getChildWithProperty (idProperty, id); };
+    const auto sourceMissing = ! childFor (params::source.getParamID()).isValid();
+    const auto savedPattern = childFor (params::testPattern.getParamID());
+    const auto patternIndex = savedPattern.isValid() ? juce::roundToInt ((double) savedPattern.getProperty (valueProperty, 0.0))
+                                                     : 0;
+
+    for (auto* parameter : parameters)
+    {
+        auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter);
+
+        if (ranged == nullptr || childFor (ranged->paramID).isValid())
+            continue;
+
+        auto child = juce::ValueTree (paramType);
+        child.setProperty (idProperty, ranged->paramID, nullptr);
+        child.setProperty (valueProperty, ranged->convertFrom0to1 (ranged->getDefaultValue()), nullptr);
+        state.appendChild (child, nullptr);
+    }
+
+    if (sourceMissing && patternIndex != static_cast<int> (TestPattern::off))
+        childFor (params::source.getParamID())
+            .setProperty (valueProperty, static_cast<int> (params::Source::testPattern), nullptr);
+}
+} // namespace
 
 VocalSynthProcessor::BusesProperties VocalSynthProcessor::makeBusesProperties (Variant v)
 {
@@ -36,6 +87,30 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
              && testTempoParam != nullptr && ccNumberParam != nullptr && monitorToneParam != nullptr
              && virtualMidiOutParam != nullptr);
 
+    sourceParam = apvts.getRawParameterValue (params::source.getParamID());
+    voiceRangeParam = apvts.getRawParameterValue (params::voiceRange.getParamID());
+    pitchAlgorithmParam = apvts.getRawParameterValue (params::pitchAlgorithm.getParamID());
+    keyParam = apvts.getRawParameterValue (params::key.getParamID());
+    scaleParam = apvts.getRawParameterValue (params::scale.getParamID());
+    stickinessParam = apvts.getRawParameterValue (params::stickiness.getParamID());
+    gateThresholdParam = apvts.getRawParameterValue (params::gateThreshold.getParamID());
+    minNoteLengthParam = apvts.getRawParameterValue (params::minNoteLength.getParamID());
+    octaveShiftParam = apvts.getRawParameterValue (params::octaveShift.getParamID());
+    bendModeParam = apvts.getRawParameterValue (params::bendMode.getParamID());
+    bendRangeParam = apvts.getRawParameterValue (params::bendRange.getParamID());
+    velocitySensitivityParam = apvts.getRawParameterValue (params::velocitySensitivity.getParamID());
+    legatoParam = apvts.getRawParameterValue (params::legato.getParamID());
+
+    jassert (sourceParam != nullptr && voiceRangeParam != nullptr && pitchAlgorithmParam != nullptr
+             && keyParam != nullptr && scaleParam != nullptr && stickinessParam != nullptr
+             && gateThresholdParam != nullptr && minNoteLengthParam != nullptr && octaveShiftParam != nullptr
+             && bendModeParam != nullptr && bendRangeParam != nullptr && velocitySensitivityParam != nullptr
+             && legatoParam != nullptr);
+
+    // Never resized: processBlock downmixes chunks of at most maxChunkSamples
+    monoBuffer.assign ((size_t) maxChunkSamples, 0.0f);
+    lastSource = getSource();
+
     midiOutput.setVirtualPort (&virtualMidiPort);
 }
 
@@ -45,12 +120,13 @@ const juce::String VocalSynthProcessor::getName() const
 }
 
 //==============================================================================
-void VocalSynthProcessor::prepareToPlay (double sampleRate, int)
+void VocalSynthProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
 {
     // All sample-rate dependent DSP state is (re)initialised here (see SKILL.md, Lifecycle).
     // midiOutput is NOT reset: it must still know which notes the downstream synth holds, so the
     // first processBlock after this can turn them off (flushPending, docs/M1-DESIGN.md 4.4).
     generator.prepare (sampleRate);
+    voicePipeline.prepare (sampleRate, maximumExpectedSamplesPerBlock); // allocates (allowed here)
     monitorSynth.setOutputEnabled (monitorToneParam->load (std::memory_order_relaxed) >= 0.5f);
     monitorSynth.prepare (sampleRate);
     currentSampleRate.store (sampleRate, std::memory_order_relaxed);
@@ -105,7 +181,11 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     if (numSamples <= 0)
         return;
 
+    // Settings are plain values built from the raw atomics: no locks, no allocation
+    const auto source = getSource();
     const auto settings = getTestPatternSettings();
+    const auto voiceSettings = getVoiceSettings();
+    const bool voiceMode = source == params::Source::voice;
 
     // The synth runs in every block (it keeps tracking held notes while muted, docs/M1-DESIGN.md 3.4).
     // Set the switch before anything else touches the synth, so a reset() (prepare/bypass) jumps the
@@ -113,12 +193,17 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     // Monitor Tone off).
     monitorSynth.setOutputEnabled (monitorToneParam->load (std::memory_order_relaxed) >= 0.5f);
 
-    if (flushPending.exchange (false, std::memory_order_relaxed))
+    // A source switch ends whatever the other source left sounding, then both sources restart
+    const bool sourceChanged = source != lastSource;
+    lastSource = source;
+
+    if (flushPending.exchange (false, std::memory_order_relaxed) || sourceChanged)
     {
         // Before anything of this block is generated, so the restarted pattern's first note-on at
         // offset 0 comes after these note-offs (docs/M1-DESIGN.md 4.4)
         midiOutput.flushAllNotes (0, midi);
         generator.reset();
+        voicePipeline.reset(); // silent; the note-offs came from midiOutput
 
         // Release instead of reset: if the tone is audible (Restart pattern), it fades out over
         // 60 ms or is retuned by the restarted pattern's first note-on, without a click.
@@ -129,9 +214,11 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const auto numInputs = getTotalNumInputChannels();
     const auto numOutputs = juce::jmin (getTotalNumOutputChannels(), buffer.getNumChannels());
 
+    const auto numInputChannels = juce::jmin (numInputs, buffer.getNumChannels());
+
     // Input metering for the UI (and for the M1 sidechain test), before the audio is touched
     float peak = 0.0f;
-    for (int ch = 0; ch < juce::jmin (numInputs, buffer.getNumChannels()); ++ch)
+    for (int ch = 0; ch < numInputChannels; ++ch)
         peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, numSamples));
 
     if (peak > inputPeak.load (std::memory_order_relaxed))
@@ -141,30 +228,87 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         buffer.clear (ch, 0, numSamples);
 
     // FX: the voice passes through unless muted. Instrument: the monitor tone is its only output.
+    // The buffer is cleared per chunk, after the chunk's input has been downmixed for the analysis.
     const bool muteDry = muteDryParam->load (std::memory_order_relaxed) >= 0.5f;
-
-    if (variant == Variant::instrument || muteDry)
-        buffer.clear();
+    const bool clearAudio = variant == Variant::instrument || muteDry;
 
     // Output layouts are mono or stereo (isBusesLayoutSupported)
     const auto numToneChannels = juce::jmin (numOutputs, maxToneChannels);
     std::array<float*, maxToneChannels> channels {};
+    const auto monitorBendRange = bendRangeSemitones (voiceSettings.bendRange);
 
     for (int start = 0; start < numSamples; start += maxChunkSamples)
     {
         const auto length = juce::jmin (maxChunkSamples, numSamples - start);
 
         events.clear();
-        generator.process (length, settings, events);
+
+        if (voiceMode)
+        {
+            // FX: main input bus. Instrument: its only input bus is the sidechain (M1, T3).
+            const auto* mono = downmixInput (buffer, numInputChannels, start, length);
+            voicePipeline.process (mono, length, voiceSettings, events);
+        }
+        else
+        {
+            generator.process (length, settings, events);
+        }
+
+        if (clearAudio)
+            buffer.clear (start, length);
+
         midiOutput.write (events, length, midi, start);
 
         for (int ch = 0; ch < numToneChannels; ++ch)
             channels[(size_t) ch] = buffer.getWritePointer (ch, start);
 
-        monitorSynth.process (events, channels.data(), numToneChannels, length);
+        // The monitor tone follows whatever the source sends. MonitorSynth bends +-2 semitones; the
+        // test patterns assume that, the voice bends use the selected Bend Range.
+        if (voiceMode && monitorBendRange != (int) MonitorSynth::bendRangeSemitones)
+        {
+            prepareMonitorEvents (monitorBendRange);
+            monitorSynth.process (monitorEvents, channels.data(), numToneChannels, length);
+        }
+        else
+        {
+            monitorSynth.process (events, channels.data(), numToneChannels, length);
+        }
     }
 
-    currentTestNote.store (generator.currentNote(), std::memory_order_relaxed);
+    currentTestNote.store (voiceMode ? -1 : generator.currentNote(), std::memory_order_relaxed);
+}
+
+const float* VocalSynthProcessor::downmixInput (const juce::AudioBuffer<float>& buffer, int numInputChannels,
+                                                int start, int length) noexcept
+{
+    if (numInputChannels <= 0 || length <= 0)
+        return nullptr;
+
+    jassert (length <= (int) monoBuffer.size());
+    auto* mono = monoBuffer.data();
+
+    juce::FloatVectorOperations::copy (mono, buffer.getReadPointer (0, start), length);
+
+    for (int ch = 1; ch < numInputChannels; ++ch)
+        juce::FloatVectorOperations::add (mono, buffer.getReadPointer (ch, start), length);
+
+    if (numInputChannels > 1)
+        juce::FloatVectorOperations::multiply (mono, 1.0f / (float) numInputChannels, length);
+
+    return mono;
+}
+
+void VocalSynthProcessor::prepareMonitorEvents (int rangeSemitones) noexcept
+{
+    monitorEvents.clear();
+
+    for (auto e : events)
+    {
+        if (e.type == VsEventType::pitchBend)
+            e.bend = monitorBendFor (e.bend, rangeSemitones);
+
+        monitorEvents.push (e); // same capacity as events: never full
+    }
 }
 
 void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -182,9 +326,11 @@ void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer
         // any more), and the pattern restarts from its beginning after un-bypass.
         midiOutput.flushAllNotes (0, midi);
         generator.reset();
+        voicePipeline.reset();
         monitorSynth.setOutputEnabled (monitorToneParam->load (std::memory_order_relaxed) >= 0.5f);
         monitorSynth.reset();
         flushPending.store (false, std::memory_order_relaxed);
+        lastSource = getSource(); // everything is flushed already
     }
 
     // Audio: the FX passes the voice through, the Instrument is silent
@@ -227,6 +373,42 @@ TestPatternSettings VocalSynthProcessor::getTestPatternSettings() const noexcept
     return s;
 }
 
+VoiceSettings VocalSynthProcessor::getVoiceSettings() const noexcept
+{
+    const auto index = [] (const std::atomic<float>* param) noexcept
+    { return juce::roundToInt (param->load (std::memory_order_relaxed)); };
+    const auto value = [] (const std::atomic<float>* param) noexcept
+    { return param->load (std::memory_order_relaxed); };
+
+    VoiceSettings s;
+    s.range = static_cast<VoiceRange> (index (voiceRangeParam));
+    s.algorithm = static_cast<PitchAlgorithm> (index (pitchAlgorithmParam));
+    s.key = index (keyParam);
+    s.scale = static_cast<Scale> (index (scaleParam));
+    s.stickinessPercent = value (stickinessParam);
+    s.gateThresholdDb = value (gateThresholdParam);
+    s.minNoteLengthMs = value (minNoteLengthParam);
+    s.octaveShift = index (octaveShiftParam);
+    s.bendMode = static_cast<BendMode> (index (bendModeParam));
+    s.bendRange = static_cast<BendRange> (index (bendRangeParam));
+    s.velocitySensitivityPercent = value (velocitySensitivityParam);
+    s.legato = value (legatoParam) >= 0.5f;
+    s.channel = index (midiChannelParam);
+    return sanitise (s);
+}
+
+params::Source VocalSynthProcessor::getSource() const noexcept
+{
+    const auto index = juce::roundToInt (sourceParam->load (std::memory_order_relaxed));
+    return static_cast<params::Source> (juce::jlimit (0, params::numSources - 1, index));
+}
+
+double VocalSynthProcessor::getVoiceLatencyMs() const noexcept
+{
+    const auto rate = getCurrentSampleRate();
+    return VoicePipeline::computeAlgorithmicLatencyMs (rate > 0.0 ? rate : 48000.0, getVoiceSettings().range);
+}
+
 VirtualMidiPort::Status VocalSynthProcessor::getVirtualMidiStatus() const noexcept
 {
     return virtualMidiPort.getStatus();
@@ -260,7 +442,9 @@ void VocalSynthProcessor::setStateInformation (const void* data, int sizeInBytes
     {
         if (xml->hasTagName (apvts.state.getType()))
         {
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            auto state = juce::ValueTree::fromXml (*xml);
+            migrateState (state, AudioProcessor::getParameters());
+            apvts.replaceState (state);
 
             // The values changed outside any host automation: tell the host to re-read them.
             // CLAP maps this to params->rescan (CLAP_PARAM_RESCAN_VALUES), which the CLAP spec

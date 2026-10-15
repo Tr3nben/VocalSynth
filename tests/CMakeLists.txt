@@ -13,7 +13,18 @@ add_executable(VocalSynthCoreTests
     core/BlockSizeHistogramTests.cpp
     core/MonitorSynthTests.cpp
     core/PitchTests.cpp
-    core/TestPatternGeneratorTests.cpp)
+    core/TestPatternGeneratorTests.cpp
+    # M2 pitch -> MIDI (docs/M2-DESIGN.md 6)
+    core/TestSignals.h
+    core/InputConditionerTests.cpp
+    core/DecimatorTests.cpp
+    core/FramerTests.cpp
+    core/PitchDetectorTests.cpp
+    core/PitchPostProcessorTests.cpp
+    core/ScaleQuantizerTests.cpp
+    core/NoteSegmenterTests.cpp
+    core/BendGeneratorTests.cpp
+    core/VoicePipelineTests.cpp)
 target_link_libraries(VocalSynthCoreTests PRIVATE VocalSynthCore Catch2::Catch2WithMain)
 set_target_properties(VocalSynthCoreTests PROPERTIES FOLDER "Tests")
 catch_discover_tests(VocalSynthCoreTests DISCOVERY_MODE PRE_TEST)
@@ -24,6 +35,7 @@ catch_discover_tests(VocalSynthCoreTests DISCOVERY_MODE PRE_TEST)
 add_executable(VocalSynthPluginTests
     plugin/TestMain.cpp
     plugin/MidiOutputStageTests.cpp
+    plugin/ParameterTests.cpp
     plugin/PluginEditorTests.cpp
     plugin/ProcessorTests.cpp
     plugin/TestClipExporterTests.cpp)

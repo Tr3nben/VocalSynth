@@ -7,13 +7,21 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace vocalsynth
 {
 
-/** M1 routing test build UI (docs/M1-DESIGN.md 4.6): test-pattern controls, diagnostics for the
-    FL Studio checks T1-T7 (sent counters, block-size histogram, virtual port status, input channels,
-    plugin format) and drag sources for the test clips.
+/** M2 UI (docs/M2-DESIGN.md 4.3), for FX and Instrument alike. Two pages:
+
+    - "Voice" (default): tuner (note name in FL convention C5 = 60, cents needle, Hz, confidence bar +
+      voiced LED), sounding note, analysis latency in ms, the voice settings (Source, Voice Range,
+      Algorithm, Key, Scale, Bend Mode, Bend Range, Stickiness, Gate, Min Note, Velocity Sens., Octave,
+      Legato) and an input meter with the gate line.
+    - "Test & Routing": the M1 routing test build controls and diagnostics (docs/M1-DESIGN.md 4.6):
+      test pattern, MIDI channel, tempo, CC, monitor tone, virtual MIDI, mute dry, sent counters,
+      block-size histogram, drag sources for the test clips.
+
     Runs on the message thread; reads the processor only through atomics/accessors from a Timer. */
 class VocalSynthEditor final : public juce::AudioProcessorEditor,
                                public juce::DragAndDropContainer,
@@ -26,8 +34,27 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
 
-    /** "VST3", "CLAP", ... as shown in the header (wrapperType_Undefined means CLAP, see 4.6). */
+    static constexpr int defaultWidth = 940;
+    static constexpr int defaultHeight = 470;
+
+    enum class Page
+    {
+        voice,
+        testAndRouting
+    };
+
+    /** Shows one page and hides the other's controls (also used by the tests). */
+    void showPage (Page page);
+    Page getPage() const noexcept { return currentPage; }
+
+    /** "VST3", "CLAP", ... as shown in the header (wrapperType_Undefined means CLAP, see M1-DESIGN 4.6). */
     static juce::String getFormatName (juce::AudioProcessor::WrapperType wrapperType);
+
+    /** Note name as FL Studio's piano roll shows it (MIDI note 60 = C5, 69 = A5), "-" for an invalid note. */
+    static juce::String getNoteName (int midiNote);
+
+    /** "24.2 ms" etc. for the latency display. */
+    static juce::String formatLatency (double milliseconds);
 
 private:
     /** A labelled box that, when dragged, exports a file and starts an external file drag
@@ -51,13 +78,73 @@ private:
         bool isPressed = false;
     };
 
+    /** Tuner: note name, Hz, cents needle (-50..+50), confidence bar and voiced LED. Painted from the
+        last snapshot the editor's timer handed it. */
+    class TunerDisplay final : public juce::Component
+    {
+    public:
+        /** active = false while source = Test Pattern (the analysis does not run, the tuner is greyed). */
+        void setSnapshot (const VoiceAnalysisSnapshot& snapshot, bool active);
+        void paint (juce::Graphics& g) override;
+
+    private:
+        VoiceAnalysisSnapshot shown;
+        bool isActive = true;
+    };
+
     void timerCallback() override;
     void updateStatusTexts();
+    void updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot);
+    void layoutVoicePage (juce::Rectangle<int> area);
+    void layoutTestPage (juce::Rectangle<int> area);
+    void paintInputMeter (juce::Graphics& g);
+    void paintHistogram (juce::Graphics& g);
 
     VocalSynthProcessor& vsProcessor;
     const juce::String formatName;
+    Page currentPage = Page::voice;
 
-    // Controls
+    // Page switch
+    juce::TextButton voicePageButton { "Voice" };
+    juce::TextButton testPageButton { "Test & Routing" };
+
+    //==============================================================================
+    // Voice page
+    TunerDisplay tuner;
+    juce::Label sourceLabel { {}, "Source" };
+    juce::ComboBox sourceBox;
+    juce::Label voiceRangeLabel { {}, "Voice Range" };
+    juce::ComboBox voiceRangeBox;
+    juce::Label algorithmLabel { {}, "Algorithm" };
+    juce::ComboBox algorithmBox;
+    juce::Label keyLabel { {}, "Key" };
+    juce::ComboBox keyBox;
+    juce::Label scaleLabel { {}, "Scale" };
+    juce::ComboBox scaleBox;
+    juce::Label bendModeLabel { {}, "Bend Mode" };
+    juce::ComboBox bendModeBox;
+    juce::Label bendRangeLabel { {}, "Bend Range" };
+    juce::ComboBox bendRangeBox;
+
+    juce::Label stickinessLabel { {}, "Stickiness" };
+    juce::Slider stickinessSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxLeft };
+    juce::Label gateLabel { {}, "Gate" };
+    juce::Slider gateSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxLeft };
+    juce::Label minNoteLabel { {}, "Min Note" };
+    juce::Slider minNoteSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxLeft };
+    juce::Label velocityLabel { {}, "Velocity Sens." };
+    juce::Slider velocitySlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxLeft };
+    juce::Label octaveLabel { {}, "Octave" };
+    juce::Slider octaveSlider { juce::Slider::IncDecButtons, juce::Slider::TextBoxLeft };
+    juce::ToggleButton legatoButton { "Legato" };
+
+    juce::Label soundingNoteLabel;
+    juce::Label latencyLabel;
+    juce::Label voiceHintLabel;
+    juce::Label meterCaptionLabel;
+
+    //==============================================================================
+    // Test & Routing page (M1 controls)
     juce::Label patternLabel { {}, "Test pattern" };
     juce::ComboBox patternBox;
     juce::Label channelLabel { {}, "MIDI channel" };
@@ -73,7 +160,6 @@ private:
     juce::TextButton restartButton { "Restart pattern" };
     juce::TextButton resetHistogramButton { "Reset" };
 
-    // Displays
     juce::Label inputChannelsLabel;
     juce::Label testNoteLabel;
     juce::Label sampleRateLabel;
@@ -83,20 +169,27 @@ private:
     FileDragSource midiDragSource;
     FileDragSource wavDragSource;
 
-    // Created after the combo box has its items, so the attachment can select the current one
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> patternAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> channelAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> tempoAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> ccAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> monitorToneAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> virtualMidiAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> muteDryAttachment;
+    /** Components of each page (shown/hidden by showPage()). */
+    std::vector<juce::Component*> voicePageComponents;
+    std::vector<juce::Component*> testPageComponents;
+
+    // Created after the combo boxes have their items, so the attachments can select the current one
+    using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    std::vector<std::unique_ptr<ComboBoxAttachment>> comboBoxAttachments;
+    std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
+    std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
 
     juce::TooltipWindow tooltipWindow { this, 600 };
 
-    juce::Rectangle<int> meterBounds;
+    juce::Rectangle<int> voiceMeterBounds; ///< input meter with gate line (Voice page)
+    juce::Rectangle<int> testMeterBounds;  ///< input peak meter (Test & Routing page)
     juce::Rectangle<int> histogramBounds;
-    float displayedLevel = 0.0f; // linear gain, decays smoothly
+    float displayedLevel = 0.0f; // linear peak gain, decays smoothly
+    float meterRmsDb = -100.0f;  // analysis RMS (gate input) of the newest snapshot
+    float meterGateDb = -45.0f;  // gateThreshold
+    bool meterGateOpen = false;
     BlockSizeHistogram::Snapshot histogram;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VocalSynthEditor)
