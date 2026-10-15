@@ -257,7 +257,7 @@ Ziel: klären, auf welchem Weg MIDI zuverlässig von VocalSynth zum Klangerzeuge
 Ziel: Singen erzeugt in FL saubere Noten mit Bend.
 
 - [ ] `Framer`, `InputConditioner` und `Decimator` mit Blockgrößen-Invarianztests.
-- [ ] `Yin` und `Mpm` hinter einem gemeinsamen Interface. Range-Presets: Bass, Tenor, Sopran, Pfeifen.
+- [ ] `Yin` und `Mpm` hinter einem gemeinsamen Interface. Stimmlage als Dropdown wie bei Auto-Tune (Bass, Baritone, Tenor, Alto, Soprano, Whistle, Wide; Standard Tenor), Details in `docs/M2-SPEC.md`.
 - [ ] `NoteSegmenter`: Gate mit Hysterese, Median, Oktav-Lock, Stickiness-Regler, minimale Notenlänge, Velocity aus der Onset-Energie.
 - [ ] `ScaleQuantizer` mit Skalen-Snap am Anfang oder immer und `BendGenerator` (Anchored/True, Range ±2/±12/±48, Ratenbegrenzung).
 - [ ] Legato/Retrigger-Schalter. `MidiOutputStage` mit Stuck-Note-Guard.
