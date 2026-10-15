@@ -256,13 +256,18 @@ Ziel: klären, auf welchem Weg MIDI zuverlässig von VocalSynth zum Klangerzeuge
 
 Ziel: Singen erzeugt in FL saubere Noten mit Bend.
 
-- [ ] `Framer`, `InputConditioner` und `Decimator` mit Blockgrößen-Invarianztests.
-- [ ] `Yin` und `Mpm` hinter einem gemeinsamen Interface. Stimmlage als Dropdown wie bei Auto-Tune (Bass, Baritone, Tenor, Alto, Soprano, Whistle, Wide; Standard Tenor), Details in `docs/M2-SPEC.md`.
-- [ ] `NoteSegmenter`: Gate mit Hysterese, Median, Oktav-Lock, Stickiness-Regler, minimale Notenlänge, Velocity aus der Onset-Energie.
-- [ ] `ScaleQuantizer` mit Skalen-Snap am Anfang oder immer und `BendGenerator` (Anchored/True, Range ±2/±12/±48, Ratenbegrenzung).
-- [ ] Legato/Retrigger-Schalter. `MidiOutputStage` mit Stuck-Note-Guard.
-- [ ] Ein minimales UI zeigt Tuner, aktuelle Note und Latenz in ms (Fenster + Gate + Stickiness).
-- [ ] `vs-eval` misst den Pitch-Teil des Korpus und vergleicht YIN mit MPM.
+Umgesetzt in Version 0.2.0 (Vorgabe `docs/M2-SPEC.md`, Design `docs/M2-DESIGN.md`).
+
+- [x] `Framer`, `InputConditioner` und `Decimator` mit Blockgrößen-Invarianztests.
+- [x] `Yin` und `Mpm` hinter einem gemeinsamen Interface. Stimmlage als Dropdown wie bei Auto-Tune (Bass, Baritone, Tenor, Alto, Soprano, Whistle, Wide; Standard Tenor), Details in `docs/M2-SPEC.md`.
+- [x] `NoteSegmenter`: Gate mit Hysterese, Median, Oktav-Lock, Stickiness-Regler, minimale Notenlänge, Velocity aus der Onset-Energie.
+- [x] `ScaleQuantizer` (Snap immer; „nur am Notenanfang“ ist verschoben) und `BendGenerator` (Anchored/True, Range ±2/±12/±24/±48, Ratenbegrenzung).
+- [x] Legato/Retrigger-Schalter. `MidiOutputStage` mit Stuck-Note-Guard.
+- [x] Ein minimales UI zeigt Tuner, aktuelle Note und Latenz in ms (Fenster + Gate + Stickiness). Dazu alle M2-Regler im Reiter „Voice“; die M1-Testelemente liegen im Reiter „Test & Routing“.
+- [x] `vs-eval` misst den Pitch-Teil des Korpus und vergleicht YIN mit MPM (Werkzeug fertig, synthetischer Korpus aus den Tests; echte Gesangsaufnahmen fehlen noch).
+- [x] Testanleitung `docs/M2-TESTING.md` (Deutsch) und Windows-Paket 0.2.0 mit der Anleitung.
+- [ ] Test durch den Nutzer in FL Studio 2026 (Checkliste in `docs/M2-TESTING.md`), danach Standardwerte (YIN/MPM, Gate, Stickiness) festlegen.
+- [ ] Gesangsaufnahmen des Nutzers als Korpus (`tests/corpus/`) und Abnahme der Korpus-Kriterien unten.
 - [ ] Stretch: Note-On beim Onset mit vorläufiger Tonhöhe, danach Korrektur per Bend (RESEARCH 5.4).
 
 **Abnahme** (gesetzte Projektziele, keine gemessenen Fakten):

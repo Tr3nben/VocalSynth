@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 using vocalsynth::Variant;
@@ -21,6 +22,12 @@ void setParameter (VocalSynthProcessor& p, const juce::ParameterID& id, float no
     auto* param = p.getParameters().getParameter (id.getParamID());
     REQUIRE (param != nullptr);
     param->setValueNotifyingHost (normalisedValue);
+}
+
+/** The M1 tests check the test pattern, which only runs with source = Test Pattern (M2 default: Voice). */
+void useTestPatternSource (VocalSynthProcessor& p)
+{
+    setParameter (p, vocalsynth::params::source, 1.0f); // choice index 1 of 2
 }
 
 void fillWithSine (juce::AudioBuffer<float>& buffer, double sampleRate, int startSample)
@@ -141,12 +148,19 @@ TEST_CASE ("Processing is independent of sample rate and block size", "[plugin][
     const auto blockSize = GENERATE (1, 7, 64, 480, 512, 4096);
     CAPTURE (sampleRate, blockSize);
 
-    SECTION ("FX passes the voice through unchanged and emits no MIDI yet")
+    SECTION ("FX passes the voice through unchanged; test pattern Off emits no MIDI")
     {
         VocalSynthProcessor fx (Variant::fx);
+        useTestPatternSource (fx);
         const auto r = runSine (fx, sampleRate, blockSize);
         CHECK (r.maxDifferenceFromInput == 0.0f);
         CHECK (r.midiEvents == 0);
+    }
+
+    SECTION ("FX in Voice mode passes the voice through unchanged")
+    {
+        VocalSynthProcessor fx (Variant::fx);
+        CHECK (runSine (fx, sampleRate, blockSize).maxDifferenceFromInput == 0.0f);
     }
 
     SECTION ("FX with Mute Dry outputs silence")
@@ -154,11 +168,17 @@ TEST_CASE ("Processing is independent of sample rate and block size", "[plugin][
         VocalSynthProcessor fx (Variant::fx);
         setParameter (fx, vocalsynth::params::muteDry, 1.0f);
         CHECK (runSine (fx, sampleRate, blockSize).maxOutput == 0.0f);
+
+        useTestPatternSource (fx);
+        CHECK (runSine (fx, sampleRate, blockSize).maxOutput == 0.0f);
     }
 
     SECTION ("Instrument outputs silence until the internal engine exists")
     {
         VocalSynthProcessor instrument (Variant::instrument);
+        CHECK (runSine (instrument, sampleRate, blockSize).maxOutput == 0.0f); // Voice, Monitor Tone off
+
+        useTestPatternSource (instrument);
         const auto r = runSine (instrument, sampleRate, blockSize);
         CHECK (r.maxOutput == 0.0f);
         CHECK (r.midiEvents == 0);
@@ -225,8 +245,10 @@ float getPlainValue (VocalSynthProcessor& p, const juce::ParameterID& id)
     return param->convertFrom0to1 (param->getValue());
 }
 
+/** Selects a test pattern and source = Test Pattern (the M1 tests below expect pattern MIDI). */
 void setPattern (VocalSynthProcessor& p, vocalsynth::TestPattern pattern)
 {
+    setPlainValue (p, vocalsynth::params::source, (float) static_cast<int> (vocalsynth::params::Source::testPattern));
     setPlainValue (p, vocalsynth::params::testPattern, (float) static_cast<int> (pattern));
 }
 
@@ -259,7 +281,8 @@ public:
         buffer.setSize (2, maxBlockSize);
     }
 
-    /** Processes one block of n samples. The input is a quiet 220 Hz sine unless silentInput. */
+    /** Processes one block of n samples. The input is a 220 Hz sine (peak 0.5) unless silentInput or
+        inputSignal (channel, absolute position) is set. */
     void block (int n, bool bypassed = false)
     {
         buffer.setSize (2, n, false, false, true);
@@ -267,10 +290,11 @@ public:
         for (int ch = 0; ch < 2; ++ch)
             for (int i = 0; i < n; ++i)
                 buffer.setSample (ch, i,
-                                  silentInput ? 0.0f
-                                              : 0.5f
-                                                    * (float) std::sin (juce::MathConstants<double>::twoPi
-                                                                        * 220.0 * (double) (position + i) / rate));
+                                  inputSignal != nullptr ? inputSignal (ch, position + i)
+                                  : silentInput          ? 0.0f
+                                                         : 0.5f
+                                                      * (float) std::sin (juce::MathConstants<double>::twoPi
+                                                                          * 220.0 * (double) (position + i) / rate));
 
         midi.clear();
         lastBlock.clear();
@@ -329,6 +353,7 @@ public:
     VocalSynthProcessor& p;
     const double rate;
     bool silentInput = false;
+    std::function<float (int channel, int64_t position)> inputSignal;
 
     juce::AudioBuffer<float> buffer;
     juce::MidiBuffer midi;
@@ -778,6 +803,7 @@ TEST_CASE ("Monitor tone is audible only when enabled", "[plugin][audio]")
     SECTION ("Instrument: Monitor Tone on but pattern Off is silent")
     {
         VocalSynthProcessor instrument (Variant::instrument);
+        setPattern (instrument, vocalsynth::TestPattern::off);
         setParameter (instrument, vocalsynth::params::monitorTone, 1.0f);
         HostRunner host (instrument, 48000.0, blockSize);
         host.run (24000, blockSize);
@@ -952,4 +978,429 @@ TEST_CASE ("State of the M1 parameters survives save and restore", "[plugin][sta
     CHECK (settings.channel == 10);
     CHECK (settings.ccNumber == 74);
     CHECK (settings.bpm == Catch::Approx (137.5).margin (0.001));
+}
+
+//==============================================================================
+// M2 pitch -> MIDI integration (docs/M2-DESIGN.md 4.2). These tests are structural: they never depend on
+// what the pitch detection finds (that is tested in the core tests), only on how the processor feeds the
+// VoicePipeline and routes its events.
+//==============================================================================
+
+namespace
+{
+
+using vocalsynth::VoicePipeline;
+using vocalsynth::VoiceRange;
+namespace params = vocalsynth::params;
+
+void setSource (VocalSynthProcessor& p, params::Source source)
+{
+    setPlainValue (p, params::source, (float) static_cast<int> (source));
+}
+
+/** Stereo test input: two tones with silence around them, different level per channel so the downmix
+    (average of the channels) matters. */
+float voiceTestSignal (int channel, int64_t position, double sampleRate)
+{
+    const auto t = (double) position / sampleRate;
+    const auto level = channel == 0 ? 0.4 : 0.2;
+    double f = 0.0;
+
+    if (t >= 0.05 && t < 0.45)
+        f = 220.0;
+    else if (t >= 0.6 && t < 0.9)
+        f = 330.0;
+
+    if (f <= 0.0)
+        return 0.0f;
+
+    return (float) (level * std::sin (juce::MathConstants<double>::twoPi * f * t));
+}
+
+/** VoiceSettings::operator== compares floats, which -Wfloat-equal (JUCE's warning set) flags in this TU. */
+bool sameSettings (const vocalsynth::VoiceSettings& a, const vocalsynth::VoiceSettings& b)
+{
+    return a.range == b.range && a.algorithm == b.algorithm && a.key == b.key && a.scale == b.scale
+           && juce::exactlyEqual (a.stickinessPercent, b.stickinessPercent)
+           && juce::exactlyEqual (a.gateThresholdDb, b.gateThresholdDb)
+           && juce::exactlyEqual (a.minNoteLengthMs, b.minNoteLengthMs) && a.octaveShift == b.octaveShift
+           && a.bendMode == b.bendMode && a.bendRange == b.bendRange
+           && juce::exactlyEqual (a.velocitySensitivityPercent, b.velocitySensitivityPercent)
+           && a.legato == b.legato && a.channel == b.channel;
+}
+
+TimedMessage toTimedMessage (const juce::MidiMessage& m, int64_t position)
+{
+    TimedMessage t;
+    t.position = position;
+    t.size = juce::jmin (m.getRawDataSize(), 3);
+
+    for (int i = 0; i < t.size; ++i)
+        t.bytes[(size_t) i] = m.getRawData()[i];
+
+    return t;
+}
+
+/** What the processor must send for a mono signal: the same VoicePipeline, fed directly in 4096-sample
+    calls (the pipeline is block-size invariant), its events converted to MIDI at absolute positions. */
+std::vector<TimedMessage> runReferencePipeline (double sampleRate, const vocalsynth::VoiceSettings& settings,
+                                                int64_t totalSamples, vocalsynth::VoiceAnalysisSnapshot& snapshot)
+{
+    VoicePipeline pipeline;
+    pipeline.prepare (sampleRate, 4096);
+
+    std::vector<TimedMessage> messages;
+    std::vector<float> mono (4096);
+    vocalsynth::VsEventBuffer<1024> events;
+
+    for (int64_t start = 0; start < totalSamples; start += 4096)
+    {
+        const auto n = (int) juce::jmin ((int64_t) 4096, totalSamples - start);
+
+        for (int i = 0; i < n; ++i)
+            mono[(size_t) i] = (voiceTestSignal (0, start + i, sampleRate) + voiceTestSignal (1, start + i, sampleRate))
+                               * 0.5f;
+
+        events.clear();
+        pipeline.process (mono.data(), n, settings, events);
+
+        for (const auto& e : events)
+        {
+            const auto position = start + e.sampleOffset;
+            const auto ch = (int) e.channel;
+
+            switch (e.type)
+            {
+                case vocalsynth::VsEventType::noteOn:
+                    messages.push_back (toTimedMessage (juce::MidiMessage::noteOn (ch, e.data1, (juce::uint8) e.data2), position));
+                    break;
+                case vocalsynth::VsEventType::noteOff:
+                    messages.push_back (toTimedMessage (juce::MidiMessage::noteOff (ch, e.data1), position));
+                    break;
+                case vocalsynth::VsEventType::pitchBend:
+                    messages.push_back (toTimedMessage (juce::MidiMessage::pitchWheel (ch, e.bend + 8192), position));
+                    break;
+                case vocalsynth::VsEventType::controlChange:
+                    messages.push_back (toTimedMessage (juce::MidiMessage::controllerEvent (ch, e.data1, e.data2), position));
+                    break;
+            }
+        }
+    }
+
+    snapshot = pipeline.getSnapshot();
+    return messages;
+}
+
+} // namespace
+
+TEST_CASE ("Voice settings are built from the parameters", "[plugin][voice]")
+{
+    VocalSynthProcessor p (Variant::fx);
+
+    SECTION ("defaults equal the core defaults (channel 1)")
+    {
+        CHECK (p.getSource() == params::Source::voice);
+        CHECK (sameSettings (p.getVoiceSettings(), vocalsynth::VoiceSettings {}));
+    }
+
+    SECTION ("every parameter maps onto its field")
+    {
+        setPlainValue (p, params::voiceRange, 0.0f);
+        setPlainValue (p, params::pitchAlgorithm, 1.0f);
+        setPlainValue (p, params::key, 9.0f);
+        setPlainValue (p, params::scale, 6.0f);
+        setPlainValue (p, params::stickiness, 12.0f);
+        setPlainValue (p, params::gateThreshold, -30.0f);
+        setPlainValue (p, params::minNoteLength, 200.0f);
+        setPlainValue (p, params::octaveShift, -2.0f);
+        setPlainValue (p, params::bendMode, 2.0f);
+        setPlainValue (p, params::bendRange, 1.0f);
+        setPlainValue (p, params::velocitySensitivity, 25.0f);
+        setPlainValue (p, params::legato, 1.0f);
+        setPlainValue (p, params::midiChannel, 7.0f);
+        setSource (p, params::Source::testPattern);
+
+        const auto s = p.getVoiceSettings();
+        CHECK (p.getSource() == params::Source::testPattern);
+        CHECK (s.range == VoiceRange::bass);
+        CHECK (s.algorithm == vocalsynth::PitchAlgorithm::mpm);
+        CHECK (s.key == 9);
+        CHECK (s.scale == vocalsynth::Scale::blues);
+        CHECK (s.stickinessPercent == Catch::Approx (12.0f).margin (0.01));
+        CHECK (s.gateThresholdDb == Catch::Approx (-30.0f).margin (0.01));
+        CHECK (s.minNoteLengthMs == Catch::Approx (200.0f).margin (0.01));
+        CHECK (s.octaveShift == -2);
+        CHECK (s.bendMode == vocalsynth::BendMode::trueBend);
+        CHECK (s.bendRange == vocalsynth::BendRange::semitones12);
+        CHECK (s.velocitySensitivityPercent == Catch::Approx (25.0f).margin (0.01));
+        CHECK (s.legato);
+        CHECK (s.channel == 7);
+        CHECK (sameSettings (s, vocalsynth::sanitise (s)));
+    }
+}
+
+TEST_CASE ("Analysis latency is reported to the UI, not to the host", "[plugin][voice]")
+{
+    VocalSynthProcessor p (Variant::fx);
+
+    // Before the first prepareToPlay: 48 kHz, Tenor
+    CHECK (juce::exactlyEqual (p.getVoiceLatencyMs(), VoicePipeline::computeAlgorithmicLatencyMs (48000.0, VoiceRange::tenor)));
+
+    const auto sampleRate = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (sampleRate);
+    p.prepareToPlay (sampleRate, 512);
+    CHECK (p.getLatencySamples() == 0);
+
+    for (int r = 0; r < vocalsynth::numVoiceRanges; ++r)
+    {
+        const auto range = static_cast<VoiceRange> (r);
+        CAPTURE (r);
+        setPlainValue (p, params::voiceRange, (float) r);
+        const auto expected = VoicePipeline::computeAlgorithmicLatencyMs (sampleRate, range);
+        CHECK (juce::exactlyEqual (p.getVoiceLatencyMs(), expected));
+        CHECK (expected > 0.0);
+    }
+
+    CHECK (VoicePipeline::computeAlgorithmicLatencyMs (sampleRate, VoiceRange::tenor) <= VoicePipeline::tenorLatencyBudgetMs);
+    CHECK (VoicePipeline::computeAlgorithmicLatencyMs (sampleRate, VoiceRange::bass) <= VoicePipeline::bassLatencyBudgetMs);
+    CHECK (p.getLatencySamples() == 0);
+}
+
+TEST_CASE ("Voice mode sends exactly the VoicePipeline's events for the downmixed input", "[plugin][voice][realtime]")
+{
+    const auto sampleRate = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto variant = GENERATE (Variant::fx, Variant::instrument);
+    const auto blockSize = GENERATE (1, 7, 64, 480, 512, 4096, 10000);
+    CAPTURE (sampleRate, variant == Variant::fx ? "fx" : "instrument", blockSize);
+
+    VocalSynthProcessor p (variant);
+    setPlainValue (p, params::midiChannel, 5.0f);
+    setPlainValue (p, params::bendMode, 2.0f);  // True: also routes pitch bends
+    setPlainValue (p, params::bendRange, 1.0f); // +-12
+    setPlainValue (p, params::monitorTone, 1.0f);
+    setPattern (p, vocalsynth::TestPattern::all);
+    setSource (p, params::Source::voice); // the pattern must be ignored in Voice mode
+
+    const auto totalSamples = (int64_t) std::llround (1.2 * sampleRate);
+    vocalsynth::VoiceAnalysisSnapshot expectedSnapshot;
+    const auto expected = runReferencePipeline (sampleRate, p.getVoiceSettings(), totalSamples, expectedSnapshot);
+
+    HostRunner host (p, sampleRate, blockSize);
+    host.inputSignal = [sampleRate] (int ch, int64_t pos) { return voiceTestSignal (ch, pos, sampleRate); };
+    host.run (totalSamples, blockSize);
+
+    CHECK (host.badOffsets == 0);
+    CHECK (host.unsortedEvents == 0);
+    CHECK (host.nonFiniteSamples == 0);
+    CHECK (host.messages == expected);
+    CHECK (p.getCurrentTestNote() == -1);
+
+    // The UI snapshot is the pipeline's state after the last analysed frame, whatever the block split
+    const auto snapshot = p.getVoiceSnapshot();
+    CHECK (snapshot.frameCounter == expectedSnapshot.frameCounter);
+    CHECK (snapshot.frameCounter > 0);
+    CHECK (juce::exactlyEqual (snapshot.frequencyHz, expectedSnapshot.frequencyHz));
+    CHECK (juce::exactlyEqual (snapshot.confidence, expectedSnapshot.confidence));
+    CHECK (juce::exactlyEqual (snapshot.rmsDb, expectedSnapshot.rmsDb));
+    CHECK (snapshot.voiced == expectedSnapshot.voiced);
+    CHECK (snapshot.activeNote == expectedSnapshot.activeNote);
+
+    const auto r = checkPairing (host.messages);
+    CHECK (r.duplicateNoteOns == 0);
+    CHECK (r.orphanNoteOffs == 0);
+    CHECK (r.controlChanges == 0); // the CC sweep of the pattern is not running
+
+    for (const auto& m : host.messages)
+        CHECK (m.toMidiMessage().getChannel() == 5);
+
+    // Monitor Tone follows the sung notes: silent before the first note-on (the dry voice is muted in
+    // the Instrument; in the FX it passes through, so only check the Instrument)
+    if (variant == Variant::instrument && r.noteOns == 0)
+        CHECK (host.maxOutput == 0.0f);
+
+    SECTION ("switching to Test Pattern ends every voice note and starts the pattern at the block start")
+    {
+        setSource (p, params::Source::testPattern);
+        host.block (blockSize);
+
+        const auto blockStart = host.position - blockSize;
+        bool seenNoteOn = false;
+
+        for (const auto& t : host.lastBlock)
+        {
+            const auto m = t.toMidiMessage();
+
+            if (! seenNoteOn)
+            {
+                CHECK (t.position == blockStart);
+                CHECK ((m.isNoteOff() || m.isPitchWheel() || m.isNoteOn()));
+            }
+
+            if (m.isNoteOn() && ! seenNoteOn)
+            {
+                seenNoteOn = true;
+                CHECK (m.getNoteNumber() == 60); // the "all" pattern restarted from its beginning
+            }
+        }
+
+        CHECK (seenNoteOn);
+
+        if (blockSize < 9000) // the first note lasts 9000 samples at 120 bpm
+            CHECK (p.getCurrentTestNote() == 60);
+
+        setPattern (p, vocalsynth::TestPattern::off);
+        host.block (blockSize);
+        const auto after = checkPairing (host.messages);
+        CHECK (after.stillActive == 0);
+        CHECK (after.duplicateNoteOns == 0);
+        CHECK (after.orphanNoteOffs == 0);
+        CHECK (after.bendCentredAtEnd);
+    }
+
+    SECTION ("bypass ends every voice note")
+    {
+        host.block (blockSize, true);
+        const auto after = checkPairing (host.messages);
+        CHECK (after.stillActive == 0);
+        CHECK (after.orphanNoteOffs == 0);
+        CHECK (after.bendCentredAtEnd);
+        CHECK (p.getVoiceSnapshot().activeNote == -1);
+        CHECK_FALSE (p.getVoiceSnapshot().voiced);
+    }
+}
+
+TEST_CASE ("Voice mode with silence sends no MIDI", "[plugin][voice][realtime]")
+{
+    const auto sampleRate = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto blockSize = GENERATE (1, 7, 64, 480, 512, 4096, 10000);
+    CAPTURE (sampleRate, blockSize);
+
+    VocalSynthProcessor p (Variant::instrument);
+    setPlainValue (p, params::monitorTone, 1.0f);
+    setPlainValue (p, params::testPattern, (float) static_cast<int> (vocalsynth::TestPattern::notes)); // ignored
+
+    HostRunner host (p, sampleRate, blockSize);
+    host.silentInput = true;
+    host.run (host.seconds (1.0), blockSize);
+
+    CHECK (host.messages.empty());
+    CHECK (host.maxOutput == 0.0f);
+    CHECK (p.getMidiSentCounts().noteOns == 0);
+    CHECK (p.getCurrentTestNote() == -1);
+
+    // The analysis runs (frames are counted) and reports silence
+    const auto snapshot = p.getVoiceSnapshot();
+    CHECK (snapshot.frameCounter > 0);
+    CHECK_FALSE (snapshot.voiced);
+    CHECK (snapshot.activeNote == -1);
+    CHECK (snapshot.frequencyHz == 0.0f);
+}
+
+TEST_CASE ("Test Pattern mode does not run the voice analysis", "[plugin][voice]")
+{
+    VocalSynthProcessor p (Variant::fx);
+    setPattern (p, vocalsynth::TestPattern::notes);
+    HostRunner host (p, 48000.0, 512);
+    host.run (24000, 512); // 220 Hz sine input
+
+    CHECK (p.getVoiceSnapshot().frameCounter == 0);
+    CHECK (p.getCurrentTestNote() >= 0);
+}
+
+TEST_CASE ("Switching from Test Pattern to Voice flushes the pattern notes", "[plugin][voice][midi]")
+{
+    const auto blockSize = GENERATE (1, 64, 512, 10000);
+    CAPTURE (blockSize);
+
+    VocalSynthProcessor p (Variant::fx);
+    setPattern (p, vocalsynth::TestPattern::pitchBend);
+    HostRunner host (p, 48000.0, blockSize);
+    host.run (2560, blockSize); // note 60 held, bend > 0
+    REQUIRE (p.getCurrentTestNote() == 60);
+    REQUIRE_FALSE (checkPairing (host.messages).bendCentredAtEnd);
+
+    setSource (p, params::Source::voice);
+    host.silentInput = true;
+    host.block (blockSize);
+
+    const auto& b = host.lastBlock;
+    REQUIRE (b.size() == 2);
+    const auto blockStart = host.position - blockSize;
+    CHECK (b[0].toMidiMessage().isNoteOff());
+    CHECK (b[0].toMidiMessage().getNoteNumber() == 60);
+    CHECK (b[0].position == blockStart);
+    CHECK (b[1].toMidiMessage().isPitchWheel());
+    CHECK (b[1].toMidiMessage().getPitchWheelValue() == 8192);
+    CHECK (b[1].position == blockStart);
+    CHECK (p.getCurrentTestNote() == -1);
+
+    // Silence in Voice mode: nothing more
+    const auto count = host.messages.size();
+    host.run (host.seconds (0.5), blockSize);
+    CHECK (host.messages.size() == count);
+
+    const auto r = checkPairing (host.messages);
+    CHECK (r.stillActive == 0);
+    CHECK (r.bendCentredAtEnd);
+}
+
+TEST_CASE ("Voice settings changes and restarts never leave a note hanging", "[plugin][voice][midi]")
+{
+    const auto blockSize = GENERATE (7, 480, 4096);
+    CAPTURE (blockSize);
+
+    VocalSynthProcessor p (Variant::fx);
+    setPlainValue (p, params::bendMode, 1.0f); // Anchored
+    HostRunner host (p, 48000.0, blockSize);
+    host.inputSignal = [] (int, int64_t pos)
+    { return 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 196.0 * (double) pos / 48000.0); };
+
+    // Changes that flush in the pipeline (range, key, scale, algorithm, channel) and ones that do not
+    const std::function<void()> changes[] = {
+        [&] { setPlainValue (p, params::voiceRange, 0.0f); },
+        [&] { setPlainValue (p, params::key, 2.0f); },
+        [&] { setPlainValue (p, params::scale, 1.0f); },
+        [&] { setPlainValue (p, params::pitchAlgorithm, 1.0f); },
+        [&] { setPlainValue (p, params::midiChannel, 3.0f); },
+        [&] { setPlainValue (p, params::octaveShift, 2.0f); },
+        [&] { setPlainValue (p, params::legato, 1.0f); },
+        [&] { setPlainValue (p, params::gateThreshold, -60.0f); },
+        [&] { p.reset(); },
+        [&] { p.prepareToPlay (48000.0, blockSize); },
+        [&] { p.requestFlush(); },
+    };
+
+    for (const auto& change : changes)
+    {
+        host.run (host.seconds (0.25), blockSize);
+        change();
+    }
+
+    host.run (host.seconds (0.25), blockSize);
+    setSource (p, params::Source::testPattern); // pattern Off: flushes and stays silent
+    host.block (blockSize);
+
+    CHECK (host.badOffsets == 0);
+    CHECK (host.unsortedEvents == 0);
+
+    const auto r = checkPairing (host.messages);
+    CHECK (r.duplicateNoteOns == 0);
+    CHECK (r.orphanNoteOffs == 0);
+    CHECK (r.stillActive == 0);
+    CHECK (r.bendCentredAtEnd);
+    CHECK (r.noteOns == r.noteOffs);
+}
+
+TEST_CASE ("Monitor tone bends are rescaled to the selected bend range", "[plugin][voice][audio]")
+{
+    using vocalsynth::monitorBendFor;
+
+    CHECK (monitorBendFor (0, 12) == 0);
+    CHECK (monitorBendFor (1234, 2) == 1234);   // +-2: unchanged (test patterns, Bend Range +-2)
+    CHECK (monitorBendFor (-8192, 2) == -8192);
+    CHECK (monitorBendFor (683, 12) == 4098);   // ~1 semitone at +-12 -> ~1 semitone at +-2
+    CHECK (monitorBendFor (-683, 12) == -4098);
+    CHECK (monitorBendFor (171, 48) == 4104);   // ~1 semitone at +-48
+    CHECK (monitorBendFor (2000, 12) == 8191);  // > 2 semitones: clamped
+    CHECK (monitorBendFor (-2000, 24) == -8192);
 }

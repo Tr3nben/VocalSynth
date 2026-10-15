@@ -22,6 +22,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set_property(GLOBAL PROPERTY USE_FOLDERS YES)
 
 option(VOCALSYNTH_BUILD_TESTS "Build the unit tests" ON)
+option(VOCALSYNTH_BUILD_TOOLS "Build the JUCE-free command-line tools (vs-eval)" ON)
 
 # --- Dependencies (pinned submodules, see .gitmodules) -----------------------
 add_subdirectory(JUCE)
@@ -37,4 +38,9 @@ include(cmake/VocalSynthPlugin.cmake)
 if (VOCALSYNTH_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif ()
+
+# --- Tools: JUCE-free CLIs (after the tests, so they can register ctest entries) ---
+if (VOCALSYNTH_BUILD_TOOLS)
+    add_subdirectory(tools/vs-eval)
 endif ()

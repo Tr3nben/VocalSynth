@@ -8,6 +8,8 @@ Inhalt dieses Pakets
   VST3\                      VocalSynth FX.vst3, VocalSynth Instrument.vst3
   CLAP\                      VocalSynth FX.clap, VocalSynth Instrument.clap
   Standalone\                VocalSynth FX.exe (zum Testen ohne DAW)
+  M2-TESTING.md              Anleitung: Singen -> MIDI in FL Studio testen
+  FL-ROUTING.md              Anleitung zum MIDI-Routing-Test (Version 0.1.0)
 
 Installation
 ------------
@@ -26,47 +28,53 @@ Installation
    FL Studio durchsucht auch Unterordner, der Ordner "VocalSynth" wird also
    gefunden.
 
-Was ist das für eine Version? (0.1.0, Meilenstein 1)
+Was ist das für eine Version? (0.2.0, Meilenstein 2)
 ----------------------------------------------------
-Das ist ein TESTBUILD für den FL-Studio-Routing-Test. Er analysiert deine
-Stimme noch nicht. Stattdessen erzeugt das Plugin selbst festes Test-MIDI,
-damit wir herausfinden, auf welchem Weg MIDI in FL Studio 2026 bei einem
-Synth ankommt (Tests T1 bis T7).
+Ab dieser Version wird deine Stimme zu MIDI: Du singst oder summst ins
+Mikrofon, VocalSynth erkennt die Tonhöhe und schickt Noten (und auf Wunsch
+Pitchbend) über den MIDI-Port von FL Studio an einen Synth.
 
-Die Schritt-für-Schritt-Anleitung mit allen Klickwegen und einer Tabelle
-zum Ausfüllen liegt als FL-ROUTING.md in diesem ZIP (mit dem Editor
-öffnen) und steht auch auf GitHub:
-  https://github.com/Tr3nben/VocalSynth/blob/master/docs/FL-ROUTING.md
+Die Anleitung zum Testen mit allen Klickwegen, der Erklärung jedes
+Reglers und einer Checkliste liegt als M2-TESTING.md in diesem ZIP (mit
+dem Editor öffnen) und steht auch auf GitHub:
+  https://github.com/Tr3nben/VocalSynth/blob/master/docs/M2-TESTING.md
 
-Der Testmodus im Plugin (beide Varianten, englisch beschriftet):
-  Test Pattern       Off / Notes (Tonleiter) / Pitch Bend (Sweep) /
-                     CC Sweep / All (alles im Wechsel). Standard: Off.
-  MIDI Channel       MIDI-Kanal 1-16 für das Test-MIDI.
-  Test tempo (BPM)   Tempo des Testmusters (60-200 BPM, Standard 120).
-                     Läuft unabhängig vom FL-Tempo und ohne Play-Taste.
-  CC Number          Controller für den CC Sweep (Standard 1 = Mod-Rad).
-  Monitor Tone       Sinuston im Plugin spielt das Muster hörbar ab,
-                     ganz ohne MIDI-Routing (Test T6).
-  Virtual MIDI Out   Virtueller MIDI-Port "VocalSynth FX" bzw.
-                     "VocalSynth Instrument" für Windows (Test T7).
-                     Braucht Windows 11 mit Windows MIDI Services.
-                     Status im Plugin: off / open / failed.
-  Restart pattern    Muster neu starten, nach jeder Routing-Änderung.
-  Drag test MIDI/WAV Test-Clip (.mid bzw. .wav) mit der Maus nach FL
-                     ziehen.
-Außerdem zeigt das Plugin Eingangspegel, Zähler der gesendeten MIDI-
-Nachrichten, Samplerate und die Blockgrößen, die FL schickt.
+Kurz: VocalSynth FX auf den Mixer-Insert mit deinem Mikrofon legen, im
+Zahnrad-Menü (VST wrapper settings > MIDI) "Output port" z. B. auf 1
+stellen, beim Synth (z. B. Vital) "Input port" ebenfalls auf 1. Im
+Plugin-Reiter "Voice": Source = Voice, Voice Range = Tenor (oder deine
+Stimmlage), dann singen.
+
+Hinweis: FL Studio nimmt das MIDI eines Plugins nicht in die Piano Roll
+auf. Die eigene Aufnahme mit Drag & Drop kommt in Meilenstein 3.
+
+Das Plugin-Fenster hat zwei Reiter (englisch beschriftet):
+  Voice              Stimmgerät (Notenname wie in FL: C5 = Note 60),
+                     gesendete Note, Latenz in ms, Eingangspegel mit
+                     Gate-Linie und die Einstellungen: Source, Voice
+                     Range, Algorithm, Key, Scale, Bend Mode, Bend Range,
+                     Stickiness, Gate, Min Note, Velocity Sens., Octave,
+                     Legato.
+  Test & Routing     Testmodus und Routing-Schalter aus Version 0.1.0
+                     (das Testmuster läuft nur mit Source = Test
+                     Pattern): Test pattern, MIDI channel
+                     (gilt auch für die Stimme), Test tempo (BPM),
+                     CC number, Monitor Tone (Sinuston spielt die Noten
+                     ohne Routing hörbar ab, auch die gesungenen),
+                     Virtual MIDI Out, Mute Dry, Restart pattern,
+                     Drag test MIDI/WAV, Zähler der gesendeten MIDI-
+                     Nachrichten und die Blockgrößen, die FL schickt.
+                     Anleitung dazu: FL-ROUTING.md (liegt im ZIP).
 
 Ausprobieren
 ------------
 - VocalSynth FX: im Mixer auf den Insert legen, auf dem dein Mikrofon liegt.
   Der Pegelbalken im Plugin zeigt, ob deine Stimme ankommt.
-- VocalSynth Instrument: im Channel Rack als Instrument laden.
-- Schnelltest ohne Routing: "Test Pattern" auf "Notes" und "Monitor Tone"
-  einschalten. Du hörst eine Sinus-Tonleiter direkt aus dem Plugin.
-- Für alles Weitere: Anleitung FL-ROUTING.md (liegt im ZIP).
-
-Tipp: Fang leise an, der Pitch-Bend-Sweep ist auf Dauer anstrengend.
+- Schnelltest ohne Routing: im Reiter "Test & Routing" "Monitor Tone"
+  einschalten und singen. Du hörst einen Sinuston, der deine Noten spielt.
+- VocalSynth Instrument: im Channel Rack als Instrument laden; das
+  Mikrofon kommt dann über den Sidechain-Eingang (siehe FL-ROUTING.md, T3).
+- Kopfhörer benutzen, damit der Synth nicht ins Mikrofon zurückläuft.
 
 Ohne Installationsskript
 ------------------------

@@ -4,9 +4,10 @@
 
 VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Hauptplattform ist Windows, macOS folgt später. Das Plugin macht aus einem Mikrofonsignal in Echtzeit MIDI: gesungene Töne werden zu Noten, Beatbox-Laute zu Drum-Triggern, Lautstärke und Vokale zu Controller-Daten. Vom Funktionsumfang her orientiert es sich an Vochlea Dubler 2.
 
-> **Status: Meilenstein 1 – Testbuild für den FL-Studio-Routing-Test (Version 0.1.0).**
-> Das Plugin analysiert noch keine Stimme. Es erzeugt selbst festes Test-MIDI (Tonleiter, Pitchbend-Sweep, CC-Sweep) und kann es mit einem eingebauten Sinuston hörbar machen. Dazu kommen ein optionaler virtueller MIDI-Port, Test-Clips (`.mid`/`.wav`) zum Herausziehen per Drag & Drop, eine Pegelanzeige und eine Anzeige der Blockgrößen, die FL schickt. Damit wird in FL Studio 2026 geprüft, welcher MIDI-Weg funktioniert (Tests T1–T7). Anleitung und Ergebnistabelle: [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
-> **Ergebnis (2026-10-15):** VocalSynth FX auf dem Mikro-Insert schickt Noten, Pitchbend und CC über einen MIDI-Port an jeden VST3-Synth. Das ist der Hauptweg. Als Nächstes kommt Meilenstein 2: echte Tonhöhenerkennung aus der Stimme.
+> **Status: Meilenstein 2 – Singen wird zu MIDI (Version 0.2.0, Testbuild).**
+> Das Plugin erkennt die Tonhöhe deiner Stimme in Echtzeit (YIN oder MPM) und schickt saubere MIDI-Noten, auf Wunsch mit Pitchbend, über den MIDI-Port von FL Studio an einen Synth. Einstellbar sind Stimmlage (Bass bis Sopran, Whistle, Wide; Standard Tenor), Tonart und Skala, Stickiness, Gate, Mindest-Notenlänge, Velocity, Oktave, Legato sowie Bend-Modus und Bend-Range. Das Fenster zeigt ein Stimmgerät (Notennamen wie in FL, C5 = 60), die gesendete Note und die Analyse-Latenz in ms (Tenor ca. 24 ms, Bass ca. 39 ms). Der Testmodus aus M1 bleibt im Reiter „Test & Routing“ erreichbar.
+> **Noch offen:** der Test durch den Nutzer in FL Studio 2026 (Anleitung: [docs/M2-TESTING.md](docs/M2-TESTING.md)) und die Feinabstimmung mit echten Gesangsaufnahmen. FL nimmt Plugin-MIDI nicht in die Piano Roll auf; die eigene Aufnahme mit Drag & Drop kommt in Meilenstein 3.
+> **M1-Ergebnis (2026-10-15):** VocalSynth FX auf dem Mikro-Insert schickt Noten, Pitchbend und CC über einen MIDI-Port an jeden VST3-Synth. Das ist der Hauptweg ([docs/FL-ROUTING.md](docs/FL-ROUTING.md)).
 > Grundlage sind die technische Recherche ([docs/RESEARCH.md](docs/RESEARCH.md)) und der Plan ([docs/PLAN.md](docs/PLAN.md)). Die Features unten beschreiben das Ziel, nicht den aktuellen Stand.
 
 ---
@@ -107,11 +108,12 @@ VocalSynth/
 ├── core/                      # VocalSynthCore: DSP in reinem C++, ohne JUCE (headless testbar)
 ├── plugin/                    # Processor, Editor, Parameter, createPluginFilter
 ├── tests/                     # Catch2: core/ (DSP) und plugin/ (Processor ohne Host)
-├── docs/                      # RESEARCH.md, PLAN.md, M1-DESIGN.md, FL-ROUTING.md
+├── tools/vs-eval/             # Auswertung der Tonhöhenerkennung auf WAV-Dateien (JSON-Metriken, YIN vs. MPM)
+├── docs/                      # RESEARCH.md, PLAN.md, M1-/M2-Design, FL-ROUTING.md, M2-TESTING.md
 └── .github/workflows/         # Build, Tests, pluginval, VST3- und CLAP-Validator
 ```
 
-Geplant sind außerdem `tools/` (Auswertung) und `resources/` (Samples, Presets), siehe [docs/PLAN.md](docs/PLAN.md#24-verzeichnisstruktur-geplant).
+Geplant ist außerdem `resources/` (Samples, Presets), siehe [docs/PLAN.md](docs/PLAN.md#24-verzeichnisstruktur-geplant).
 
 ---
 
@@ -122,7 +124,7 @@ Geplant sind außerdem `tools/` (Auswertung) und `resources/` (Samples, Presets)
    - `C:\Program Files\Common Files\VST3\VocalSynth\` (oder in deinen eigenen VST3-Ordner, das Skript fragt danach)
    - `C:\Program Files\Common Files\CLAP\VocalSynth\`
 3. In FL Studio: *Options → Manage plugins → Find installed plugins*.
-4. Für den Routing-Test weiter mit [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
+4. Singen → MIDI testen: [docs/M2-TESTING.md](docs/M2-TESTING.md) (liegt auch im ZIP). Der Routing-Test aus M1: [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
 
 Details stehen in der `LIESMICH.txt` im Paket. Die Plugins sind noch nicht signiert; meldet Windows „Der Computer wurde durch Windows geschützt“, über „Weitere Informationen → Trotzdem ausführen“ starten.
 
@@ -137,7 +139,7 @@ Aus einem Code entstehen zwei Plugins:
 | **VocalSynth FX** | Effekt für den Mixer-Insert (Mikro rein, MIDI raus) | VST3, CLAP, Standalone, AU (macOS) |
 | **VocalSynth Instrument** | Instrument mit Sidechain-Eingang | VST3, CLAP, AU (macOS) |
 
-Welches davon in FL Studio der Hauptweg wird, entscheidet der Routing-Test in Meilenstein 1.
+Seit dem Routing-Test in Meilenstein 1 ist **VocalSynth FX** auf dem Mikro-Insert der Hauptweg; die Instrument-Variante bleibt als Alternative.
 
 **Voraussetzungen**
 - CMake ≥ 3.25 und Ninja (oder ein anderer CMake-Generator)
@@ -190,6 +192,8 @@ Im Ordner [`.claude/skills/`](.claude/skills) liegen Skills für die Entwicklung
 - [docs/PLAN.md](docs/PLAN.md): Roadmap und Meilensteine
 - [docs/FL-ROUTING.md](docs/FL-ROUTING.md): Testanleitung für FL Studio (T1–T7) mit Ergebnistabelle
 - [docs/M1-DESIGN.md](docs/M1-DESIGN.md): technisches Design des M1-Testbuilds (englisch)
+- [docs/M2-SPEC.md](docs/M2-SPEC.md) und [docs/M2-DESIGN.md](docs/M2-DESIGN.md): Vorgabe und technisches Design von M2, Pitch → MIDI (englisch)
+- [docs/M2-TESTING.md](docs/M2-TESTING.md): Testanleitung für Singen → MIDI in FL Studio, mit Erklärung aller Regler und Checkliste
 
 ---
 
