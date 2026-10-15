@@ -71,7 +71,7 @@ TEST_CASE ("M2 parameters exist with the spec IDs, ranges and defaults", "[plugi
 
     checkChoice (p, source, { "Voice", "Test Pattern" }, 0);
     checkChoice (p, voiceRange, { "Bass", "Baritone", "Tenor", "Alto", "Soprano", "Whistle", "Wide" }, 2);
-    checkChoice (p, pitchAlgorithm, { "YIN", "MPM" }, 0);
+    checkChoice (p, pitchAlgorithm, { "YIN", "MPM" }, 1);
     checkChoice (p, key, { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 0);
     checkChoice (p, scale,
                  { "Chromatic", "Major", "Natural Minor", "Harmonic Minor", "Major Pentatonic", "Minor Pentatonic",
@@ -140,6 +140,38 @@ TEST_CASE ("M2 value texts carry no unit (the label does)", "[plugin][parameters
     CHECK (gate.convertFrom0to1 (gate.getValueForText ("-30.0")) == Catch::Approx (-30.0f));
 }
 
+TEST_CASE ("Bend Range text -> value round-trips, also for UTF-8 text read as Latin-1 (CLAP)", "[plugin][parameters]")
+{
+    using namespace vocalsynth;
+    using namespace vocalsynth::params;
+    VocalSynthProcessor p (Variant::fx);
+    auto& range = getParameter (p, bendRange);
+
+    for (int i = 0; i < numBendRanges; ++i)
+    {
+        CAPTURE (i);
+        const auto value = range.convertTo0to1 ((float) i);
+        const auto text = range.getText (value, 0);
+        CHECK (text == bendRangeChoices[i]);
+        CHECK (juce::roundToInt (range.convertFrom0to1 (range.getValueForText (text))) == i);
+
+        // What the CLAP wrapper passes for a UTF-8 host string: juce::String (const char*) byte by byte
+        const auto utf8 = text.toStdString();
+        juce::String latin1;
+        for (const auto c : utf8)
+            latin1 += juce::String::charToString ((juce::juce_wchar) (unsigned char) c);
+        CHECK (juce::roundToInt (range.convertFrom0to1 (range.getValueForText (latin1))) == i);
+
+        const auto semitones = juce::String (bendRangeSemitones (static_cast<BendRange> (i)));
+        CHECK (bendRangeIndexFromText (semitones) == i);
+        CHECK (bendRangeIndexFromText ("+-" + semitones) == i);
+    }
+
+    CHECK (bendRangeIndexFromText ("") == 0);
+    CHECK (bendRangeIndexFromText ("nonsense") == 0);
+    CHECK (bendRangeIndexFromText ("7") == 0);
+}
+
 TEST_CASE ("State of the M2 parameters survives save and restore", "[plugin][parameters][state]")
 {
     using namespace vocalsynth::params;
@@ -150,7 +182,7 @@ TEST_CASE ("State of the M2 parameters survives save and restore", "[plugin][par
         VocalSynthProcessor p (variant);
         setPlainValue (p, source, 1.0f);
         setPlainValue (p, voiceRange, 6.0f);
-        setPlainValue (p, pitchAlgorithm, 1.0f);
+        setPlainValue (p, pitchAlgorithm, 0.0f);
         setPlainValue (p, key, 9.0f);
         setPlainValue (p, scale, 8.0f);
         setPlainValue (p, stickiness, 12.5f);
@@ -169,7 +201,7 @@ TEST_CASE ("State of the M2 parameters survives save and restore", "[plugin][par
 
     CHECK (getPlainValue (restored, source) == Catch::Approx (1.0f));
     CHECK (getPlainValue (restored, voiceRange) == Catch::Approx (6.0f));
-    CHECK (getPlainValue (restored, pitchAlgorithm) == Catch::Approx (1.0f));
+    CHECK (getPlainValue (restored, pitchAlgorithm) == Catch::Approx (0.0f));
     CHECK (getPlainValue (restored, key) == Catch::Approx (9.0f));
     CHECK (getPlainValue (restored, scale) == Catch::Approx (8.0f));
     CHECK (getPlainValue (restored, stickiness) == Catch::Approx (12.5f).margin (0.001));

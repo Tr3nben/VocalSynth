@@ -10,16 +10,16 @@ namespace vocalsynth
 
 StickinessParams NoteSegmenter::stickinessFromPercent (double percent) noexcept
 {
-    const auto u = (percent == percent ? std::clamp (percent, 0.0, 100.0) : 50.0) / 100.0; // NaN -> default
+    const auto u = (std::isnan (percent) ? 50.0 : std::clamp (percent, 0.0, 100.0)) / 100.0; // NaN -> default
     return { 0.4 * u, 10.0 + 50.0 * u };
 }
 
 uint8_t NoteSegmenter::velocityFor (double onsetRmsDb, double gateThresholdDb, double sensitivityPercent) noexcept
 {
-    const auto s = (sensitivityPercent == sensitivityPercent ? std::clamp (sensitivityPercent, 0.0, 100.0) : 70.0)
+    const auto s = (std::isnan (sensitivityPercent) ? 70.0 : std::clamp (sensitivityPercent, 0.0, 100.0))
                    / 100.0;
     const auto rel = (onsetRmsDb - gateThresholdDb) / velocityRangeDb;
-    const auto x = rel == rel ? std::clamp (rel, 0.0, 1.0) : 0.0;
+    const auto x = std::isnan (rel) ? 0.0 : std::clamp (rel, 0.0, 1.0);
     const auto full = static_cast<double> (minFullVelocity) + static_cast<double> (127 - minFullVelocity) * x;
     const auto velocity = std::lround ((1.0 - s) * static_cast<double> (fixedVelocity) + s * full);
     return static_cast<uint8_t> (std::clamp (velocity, 1L, 127L));
@@ -43,6 +43,8 @@ void NoteSegmenter::reset() noexcept
     changeTimerRunning = false;
     changeTimerStart = 0;
     lastFrameVoiced = false;
+    noteLevelDb = PitchFrame::silenceDb;
+    noteLevelSample = 0;
 }
 
 void NoteSegmenter::setSettings (const VoiceSettings& settings) noexcept
@@ -104,7 +106,16 @@ void NoteSegmenter::processIdleFrame (const PitchFrame& frame, bool strong, doub
 
     const auto velocity = velocityFor (static_cast<double> (onsetMaxRmsDb), static_cast<double> (gateThresholdDb),
                                        velocitySensitivityPercent);
-    startNote (q, outputNote, velocity, p, absoluteSample, sampleOffset, bend, out);
+    startNote (q, outputNote, velocity, onsetMaxRmsDb, p, absoluteSample, sampleOffset, bend, out);
+}
+
+bool NoteSegmenter::isPitchReliable (const PitchFrame& frame, int64_t absoluteSample) noexcept
+{
+    const auto elapsedSeconds = static_cast<double> (absoluteSample - noteLevelSample) / sampleRate;
+    const auto fallen = static_cast<double> (noteLevelDb) - levelFallDbPerSecond * std::max (0.0, elapsedSeconds);
+    noteLevelDb = std::max (frame.rmsDb, static_cast<float> (std::max (fallen, static_cast<double> (PitchFrame::silenceDb))));
+    noteLevelSample = absoluteSample;
+    return frame.confidence >= confidenceOn && frame.rmsDb >= noteLevelDb - bendHoldDropDb;
 }
 
 void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double p, int64_t absoluteSample,
@@ -123,12 +134,18 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
     auto candidate = -1;
     auto changeWanted = false;
 
+    // Only a frame with confidence >= confidenceOn may ask for a note change (start or keep the T_min
+    // timer); weaker frames only hold the note. Detector octave errors mostly come with confidence in
+    // [confidenceOff, confidenceOn) (YIN fallback and inconsistent frames are capped there, a tone
+    // below the range reads as 2 f0 at 0.56-0.79), and the octave guard does not check such frames
+    // (PitchPostProcessor::guardMinConfidence): a held A2 followed by a G2 below the Tenor range
+    // became a G3. A note can only start on strong frames, so a change needs the same.
     if (weak)
     {
         candidate = quantizer.quantize (p, activeQuantisedNote);
         const auto q = static_cast<double> (activeQuantisedNote);
         const auto advantage = std::abs (p - q) - std::abs (p - static_cast<double> (candidate));
-        changeWanted = candidate != activeQuantisedNote
+        changeWanted = candidate != activeQuantisedNote && frame.confidence >= confidenceOn
                        && advantage >= 2.0 * hysteresisSemitones - stickinessEpsilonSemitones;
 
         if (changeWanted && ! isPlayable (candidate + 12 * octaveShift))
@@ -150,6 +167,7 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
     lastFrameVoiced = true;
     unvoicedFrames = 0;
     const auto residualCents = 100.0 * (p - static_cast<double> (activeQuantisedNote));
+    const auto reliable = isPitchReliable (frame, absoluteSample);
 
     // Octave shift changed while the note is held: immediate change to the same q (no T_min, no
     // minNoteLength), with the usual legato/retrigger order.
@@ -162,7 +180,10 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
     if (! changeWanted)
     {
         changeTimerRunning = false;
-        bend.update (residualCents, absoluteSample, sampleOffset, activeChannel, out);
+
+        if (reliable)
+            bend.update (residualCents, absoluteSample, sampleOffset, activeChannel, out);
+
         return;
     }
 
@@ -178,12 +199,15 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
         return;
     }
 
-    bend.update (residualCents, absoluteSample, sampleOffset, activeChannel, out);
+    if (reliable)
+        bend.update (residualCents, absoluteSample, sampleOffset, activeChannel, out);
 }
 
-void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, double p, int64_t absoluteSample,
-                               int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept
+void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float levelDb, double p,
+                               int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept
 {
+    noteLevelDb = levelDb;
+    noteLevelSample = absoluteSample;
     activeQuantisedNote = q;
     activeOutputNote = outputNote;
     activeChannel = channel;
@@ -208,7 +232,7 @@ void NoteSegmenter::changeNote (int q, int outputNote, const PitchFrame& frame, 
     if (! legato)
         out.push (VsEvent::makeNoteOff (sampleOffset, oldChannel, oldNote));
 
-    startNote (q, outputNote, velocity, p, absoluteSample, sampleOffset, bend, out);
+    startNote (q, outputNote, velocity, frame.rmsDb, p, absoluteSample, sampleOffset, bend, out);
 
     if (legato)
         out.push (VsEvent::makeNoteOff (sampleOffset, oldChannel, oldNote));

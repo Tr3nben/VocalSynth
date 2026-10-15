@@ -20,10 +20,13 @@ Beides ist über PR #1 in `master` gemergt.
 - **Plugin-Codes** (nie ändern): Hersteller `Tr3n`, FX `VsFx`, Instrument `VsIn`, Bundle-IDs `com.tr3nben.vocalsynth.fx/.instrument`.
 - **Stimme des Nutzers:** Tenor. Stimmlage muss trotzdem per Dropdown wählbar sein (wie bei Auto-Tune).
 
-## Als Nächstes: M2 – Singen wird zu MIDI (v0.2.0)
+## Aktuell: M2 – Singen wird zu MIDI (v0.2.0)
 
-- Branch: `m2-pitch-to-midi` (von `master`).
-- Verbindliche Vorgabe: [docs/M2-SPEC.md](M2-SPEC.md).
+- Branch: `m2-pitch-to-midi` (von `master`). Vorgabe: [docs/M2-SPEC.md](M2-SPEC.md), Design: [docs/M2-DESIGN.md](M2-DESIGN.md).
+- Stand: implementiert, lokal alle Gates grün (235 ctest, pluginval 10, VST3-Validator, clap-validator), Review-Befunde
+  behoben. Standard-Algorithmus nach Auswertung: MPM. Wartet auf den Test des Nutzers in FL Studio
+  (Anleitung: [docs/M2-TESTING.md](M2-TESTING.md)).
+- Danach: M3 (Aufnahme + Drag & Drop, nötig weil FL Plugin-MIDI nicht aufnimmt).
 
 ## Arbeitsweise (vom Nutzer gewünscht)
 

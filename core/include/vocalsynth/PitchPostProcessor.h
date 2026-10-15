@@ -16,6 +16,15 @@ namespace vocalsynth
        - rmsDb: passed through from the NEWEST frame (a level has no outliers; keeps the gate fast).
        The filter output lags its input by medianLength / 2 frames (1 hop for 3). Before medianLength
        frames were seen, the missing history counts as unvoiced (0 Hz, confidence 0).
+       Consistency: if the newest two frames both have confidence >= guardMinConfidence and their
+       pitches differ by more than maxSpreadCents, the output confidence is capped at
+       inconsistentMaxConfidence (below NoteSegmenter::confidenceOn): such a frame holds a note but
+       never starts one. Around a pitch jump the median otherwise takes the first, still mixed frame
+       of the new pitch (158 Hz instead of 165 Hz after an octave leap from 82 Hz) and starts the
+       wrong note, which only changes after T_min + minNoteLength. Only the newest two frames are
+       compared, so a bad first (partly filled) onset frame delays the onset by at most the one hop
+       that the latency model already counts for the median. Steady pitch, vibrato and glissandi
+       change by far less than 50 cents per hop (2 ms).
     2. Octave guard on the median output. "Voiced" for the guard means frequencyHz > 0 and
        confidence >= guardMinConfidence (YIN reports low-confidence pitches of noise; they must not set a
        reference that would then "correct" the next real onset). Frames below it pass through unchanged,
@@ -37,7 +46,12 @@ public:
     static constexpr double octaveConfirmMs = 25.0;
     static constexpr double octaveMemoryMs = 60.0;
     static constexpr double octaveToleranceSemitones = 1.0;
-    static constexpr float guardMinConfidence = 0.6f; ///< == NoteSegmenter::confidenceOff (weak voiced)
+    /** == NoteSegmenter::confidenceOn (strong voiced). Only strong frames set or keep the reference: at
+        an onset the first, partly filled windows can be weakly voiced in the wrong octave, and as a
+        reference they would make the guard "correct" the right octave that follows (pipeline tests). */
+    static constexpr float guardMinConfidence = 0.8f;
+    static constexpr double maxSpreadCents = 50.0;
+    static constexpr float inconsistentMaxConfidence = 0.75f;
 
     /** frameRateHz = analysis frames per second (analysis rate / hop). Converts the ms constants to
         frames (rounded up, at least 1). Calls reset(). */
@@ -45,6 +59,13 @@ public:
 
     /** Forgets the median history and the octave reference. */
     void reset() noexcept;
+
+    /** Forgets only the octave reference (and a running suspect count), keeps the median history. The
+        VoicePipeline calls it when the NoteSegmenter ends a note: the next onset is a new note that may
+        start in any octave. Without it, a new note an octave away that starts within octaveMemoryMs of
+        the release (an octave leap whose transition frames released the note, or staccato) was first
+        "corrected" into the old octave and only changed after octaveConfirmMs + T_min. */
+    void forgetOctaveReference() noexcept;
 
     /** 3 or 5 (other values: clamped to [1, maxMedianLength] and made odd). Calls reset(). */
     void setMedianLength (int length) noexcept;

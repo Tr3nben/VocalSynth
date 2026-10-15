@@ -1,8 +1,11 @@
+#include "vocalsynth/Decimator.h"
+#include "vocalsynth/Framer.h"
 #include "vocalsynth/NoteSegmenter.h"
 #include "vocalsynth/Pitch.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -50,8 +53,7 @@ struct SegmenterRig
     std::vector<TimedEvent> events;
 
     explicit SegmenterRig (VoiceSettings s = {}, double sr = 48000.0, int block = 512)
-        : sampleRate (sr), hop (static_cast<int> (std::lround (std::floor (sr / 16000.0) * std::lround (sr / std::floor (sr / 16000.0) * 0.002)))),
-          blockSize (block)
+        : sampleRate (sr), hop (hostHopFor (sr)), blockSize (block)
     {
         segmenter.prepare (sampleRate);
         bend.prepare (sampleRate, static_cast<double> (hop) / sampleRate);
@@ -64,6 +66,13 @@ struct SegmenterRig
         settings = sanitise (s);
         segmenter.setSettings (settings);
         bend.setMode (settings.bendMode, settings.bendRange);
+    }
+
+    /** Host samples per hop as the pipeline produces them: decimation factor * analysis-rate hop. */
+    static int hostHopFor (double sr)
+    {
+        const auto factor = Decimator::factorFor (sr);
+        return factor * Framer::hopSamplesFor (sr / static_cast<double> (factor));
     }
 
     int offsetOf (int64_t position) const { return static_cast<int> (position % blockSize); }
@@ -350,6 +359,54 @@ TEST_CASE ("NoteSegmenter: gate hysteresis and confidence on/off while a note is
     }
 }
 
+TEST_CASE ("NoteSegmenter: weak frames hold the note but never change it", "[notesegmenter]")
+{
+    // Detector octave errors mostly come with confidence in [confidenceOff, confidenceOn), and the octave
+    // guard does not check such frames: a held A2 followed by a G2 below the Tenor range (read as G3 at
+    // 0.6-0.79) used to change to an octave-high G3 after T_min.
+    VoiceSettings s;
+    s.minNoteLengthMs = 20.0f;
+    SegmenterRig rig (s);
+    rig.frames (voicedAt (45.0), 50);
+    REQUIRE (rig.noteOns().size() == 1);
+
+    SECTION ("weak frames far from the note: held, no change, no bend")
+    {
+        rig.frame (voicedAt (55.0, NoteSegmenter::confidenceOff));
+        rig.framesFor (voicedAt (55.0, 0.79f), 500.0);
+        CHECK (rig.noteOns().size() == 1);
+        CHECK (rig.noteOffs().empty());
+        CHECK (rig.segmenter.getActiveNote() == 45);
+        CHECK (rig.segmenter.isFrameVoiced());
+    }
+
+    SECTION ("weak frames break the T_min run of strong ones")
+    {
+        const auto tMin = NoteSegmenter::stickinessFromPercent (50.0).minChangeMs;
+        const auto almost = rig.framesIn (tMin) - 2;
+
+        for (int i = 0; i < 20; ++i)
+        {
+            rig.frames (voicedAt (55.0), almost);
+            rig.frame (voicedAt (55.0, 0.75f));
+        }
+
+        CHECK (rig.noteOns().size() == 1);
+        CHECK (rig.segmenter.getActiveNote() == 45);
+    }
+
+    SECTION ("strong frames still change the note after T_min")
+    {
+        rig.framesFor (voicedAt (55.0, NoteSegmenter::confidenceOn), 200.0);
+        const auto ons = rig.noteOns();
+        REQUIRE (ons.size() == 2);
+        CHECK (ons[1].event.data1 == 55);
+    }
+
+    rig.flush();
+    checkMidiInvariants (rig.events);
+}
+
 TEST_CASE ("NoteSegmenter: release after releaseFrames unvoiced frames, gaps shorter than that are bridged",
            "[notesegmenter]")
 {
@@ -544,16 +601,22 @@ TEST_CASE ("NoteSegmenter: change waits for minNoteLength as well as T_min", "[n
 
 TEST_CASE ("NoteSegmenter: vibrato of +-50 cents gives one note", "[notesegmenter]")
 {
-    const auto percent = GENERATE (25.0f, 50.0f, 100.0f);
-    const auto centre = GENERATE (60.0, 60.15, 59.85);
+    // One note needs the peak |p - q| = 0.5 + |centre offset| to stay below 0.5 + h, i.e. h > |offset|:
+    // 25 % (h = 0.1) only for a centred vibrato, 50 % (h = 0.2) and 100 % (h = 0.4) also 15 cents off.
+    const auto [percent, centre] = GENERATE (table<float, double> ({ { 25.0f, 60.0 },
+                                                                      { 50.0f, 60.0 },
+                                                                      { 50.0f, 60.15 },
+                                                                      { 50.0f, 59.85 },
+                                                                      { 100.0f, 60.0 },
+                                                                      { 100.0f, 60.15 },
+                                                                      { 100.0f, 59.85 } }));
     const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
     auto s = withStickiness (percent);
     s.bendMode = BendMode::trueBend;
     SegmenterRig rig (s, sr);
     CAPTURE (percent, centre, sr);
 
-    // 2 s of 5.5 Hz vibrato; with h >= 0.1 the change threshold (>= 0.6 st) is never reached even with
-    // the centre 15 cents off the note
+    // 2 s of 5.5 Hz vibrato: the change threshold 0.5 + h is never reached
     const auto hopSeconds = static_cast<double> (rig.hop) / sr;
     const auto n = rig.framesIn (2000.0);
 
@@ -621,9 +684,15 @@ TEST_CASE ("NoteSegmenter: stickiness in scales with gaps uses the midpoint betw
         REQUIRE (rig.noteOns().size() == 1);
         CHECK (rig.noteOns()[0].event.data1 == 66);
         rig.frames (unvoiced(), 50);
-        rig.frames (voicedAt (65.0), 20); // F between E and F#: tie -> lower (E)
+        // F lies between E and F#. Not an exact tie: PitchFrame carries float Hz, so MIDI 65.0 comes back
+        // ~1e-6 st off (exact ties are tested in ScaleQuantizerTests). Just below / above F instead.
+        rig.frames (voicedAt (64.9), 20);
         REQUIRE (rig.noteOns().size() == 2);
         CHECK (rig.noteOns()[1].event.data1 == 64);
+        rig.frames (unvoiced(), 50);
+        rig.frames (voicedAt (65.1), 20);
+        REQUIRE (rig.noteOns().size() == 3);
+        CHECK (rig.noteOns()[2].event.data1 == 66);
     }
 }
 
@@ -1168,12 +1237,27 @@ TEST_CASE ("NoteSegmenter: MIDI invariants under random frame sequences and sett
     CHECK (rig.bend.getLastValue() == 0);
     CHECK (maxSounding == 1);
 
-    // Every note lasts at least minNoteLength apart from shift-forced endings and flushes; at least the
-    // offsets are within any block and bends are centred at every note-off
+    // Offsets lie inside the block, and after the events of a frame without a sounding note the bend is
+    // back at the centre (note end / flush -> bend centre in the same frame)
+    int sounding = 0;
+    int lastBend = 0;
+
     for (std::size_t i = 0; i < rig.events.size(); ++i)
     {
         const auto& e = rig.events[i];
         REQUIRE (e.event.sampleOffset >= 0);
         REQUIRE (e.event.sampleOffset < rig.blockSize);
+
+        if (e.event.type == VsEventType::noteOn)
+            ++sounding;
+        else if (e.event.type == VsEventType::noteOff)
+            --sounding;
+        else if (e.event.type == VsEventType::pitchBend)
+            lastBend = e.event.bend;
+
+        const auto lastOfFrame = i + 1 == rig.events.size() || rig.events[i + 1].position != e.position;
+
+        if (lastOfFrame && sounding == 0)
+            REQUIRE (lastBend == 0);
     }
 }

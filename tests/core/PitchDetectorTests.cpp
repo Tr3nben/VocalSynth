@@ -267,12 +267,20 @@ TEST_CASE ("PitchDetector: sines and saws within +-10 cents through the front en
                 checkAccurate (analyseThroughFrontEnd (detector, hostRate, test::sine (hostRate, f0, 0.06), range, 0.04), f0,
                                toleranceCentsFor (f0));
 
-                // Naive (aliasing) saw at the host rate: the decimator removes what would fold into the
-                // band from the analysis rate's point of view. Above ~1 kHz the naive saw's own host-rate
-                // aliases (e.g. harmonic 43 of 1118 Hz at 48 kHz folds to 74 Hz) are in-band, so it is
-                // not a valid test signal there (TestSignals.h); use the band-limited one instead.
-                const auto saw = f0 <= 1047.0 ? test::saw (hostRate, f0, 0.06) : bandLimitedSaw (hostRate, f0, 0.06);
-                checkAccurate (analyseThroughFrontEnd (detector, hostRate, saw, range, 0.04), f0, toleranceCentsFor (f0));
+                // Band-limited saw at the host rate (harmonics up to the host Nyquist): the decimator
+                // removes what would fold into the band from the analysis rate's point of view.
+                checkAccurate (analyseThroughFrontEnd (detector, hostRate, bandLimitedSaw (hostRate, f0, 0.06), range, 0.04),
+                               f0, toleranceCentsFor (f0));
+
+                // Naive (aliasing) saw at the host rate, only in the middle of the range: its own host-rate
+                // aliases are in-band and inharmonic unless the period is a whole number of host samples
+                // (e.g. harmonic 43 of 1118 Hz at 48 kHz folds to 74 Hz; 500 Hz at 44.1 kHz = 88.2
+                // samples). Near the range limits, where a period fills most of the analysis window, they
+                // move the estimate by up to +-17 cents, which the former clamp to [f0 min, f0 max] hid
+                // at the exact limits only (TestSignals.h). A real voice has no such aliases.
+                if (f0 > range.f0MinHz && f0 < range.f0MaxHz && f0 <= 1047.0)
+                    checkAccurate (analyseThroughFrontEnd (detector, hostRate, test::saw (hostRate, f0, 0.06), range, 0.04), f0,
+                                   toleranceCentsFor (f0));
             }
 }
 
@@ -468,6 +476,48 @@ TEST_CASE ("PitchDetector is deterministic and stateless between frames", "[pitc
         CHECK (detector.analyse (std::span<const float> (signal).first (8), tenor.f0MinHz, tenor.f0MaxHz).frequencyHz == 0.0f);
         CHECK (detector.analyse (window, 0.0, tenor.f0MaxHz).frequencyHz == 0.0f);
         CHECK (detector.analyse (window, 400.0, 300.0).frequencyHz == 0.0f);
+    }
+}
+
+TEST_CASE ("PitchDetector: a frame after a longer range gives the same result as a fresh detector", "[pitchdetector]")
+{
+    // Below-range tones in Tenor can leave YIN's chosen lag at maxLag (global-minimum fallback); the
+    // sub-multiple check then read d'(maxLag + 1), which this frame never wrote: 0 from prepare() in a
+    // fresh detector, a stale value after a Wide or Bass frame (f = 93.25 Hz: 207 Hz vs 0 Hz).
+    const auto& tenor = voiceRangeInfo (VoiceRange::tenor);
+    const auto& wide = voiceRangeInfo (VoiceRange::wide);
+
+    for (const auto fa : analysisRates)
+    {
+        const auto tenorWindow = static_cast<std::size_t> (Framer::windowSamplesFor (fa, tenor.f0MinHz));
+        const auto wideWindow = static_cast<std::size_t> (Framer::windowSamplesFor (fa, wide.f0MinHz));
+        const auto wideSignal = test::saw (fa, 60.0, 2.0 * wideWindow / fa);
+
+        for (const auto algorithm : { PitchAlgorithm::yin, PitchAlgorithm::mpm })
+        {
+            int differences = 0;
+
+            for (double f = 80.0; f < 110.0; f += 0.25)
+                for (const auto h2 : { 0.5, 1.0, 3.0 })
+                {
+                    const auto signal = test::harmonicStack (fa, f, 2.0 * tenorWindow / fa + 0.01, 1, 8, 0.5f, h2);
+
+                    for (std::size_t start = 0; start < tenorWindow; start += 61)
+                    {
+                        const auto window = std::span<const float> (signal).subspan (start, tenorWindow);
+                        Detectors fresh (fa), used (fa);
+                        used.get (algorithm).analyse (std::span<const float> (wideSignal).first (wideWindow), wide.f0MinHz,
+                                                      wide.f0MaxHz);
+
+                        if (! (fresh.get (algorithm).analyse (window, tenor.f0MinHz, tenor.f0MaxHz)
+                               == used.get (algorithm).analyse (window, tenor.f0MinHz, tenor.f0MaxHz)))
+                            ++differences;
+                    }
+                }
+
+            CAPTURE (fa, nameOf (algorithm));
+            CHECK (differences == 0);
+        }
     }
 }
 

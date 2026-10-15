@@ -146,6 +146,9 @@ struct AnalysisFrameInfo
     is then needed. All other changes take effect at the next frame. The very first call after reset()
     never flushes. A call with numSamples <= 0 does nothing (settings are not consumed).
 
+    Note context: whenever a note ends (release, flush, settings flush), the PitchPostProcessor forgets its
+    octave reference, so the next onset is never "corrected" into the octave of the previous note.
+
     Event capacity: one call emits at most maxEventsForSamples (numSamples) =
     maxEventsPerFlush + maxEventsPerHop * ceil (numSamples / getHopInputSamples()) events
     (< 1024 for numSamples <= 4096 at any rate >= 8 kHz). Events that do not fit are dropped.

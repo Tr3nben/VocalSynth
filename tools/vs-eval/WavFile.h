@@ -15,9 +15,9 @@ struct WavData
     std::vector<float> mono; ///< channels averaged, -1..1
 };
 
-/** Reads PCM 16/24/32-bit integer and 32-bit float WAV files (WAVE_FORMAT_PCM, _IEEE_FLOAT and
+/** Reads PCM 8/16/24/32-bit integer and 32/64-bit float WAV files (WAVE_FORMAT_PCM, _IEEE_FLOAT and
     _EXTENSIBLE with those subformats), any channel count (downmixed to mono by averaging). Skips unknown
-    chunks. Returns false and sets error on failure. */
+    chunks (odd sizes padded), tolerates a truncated data chunk. Returns false and sets error on failure. */
 bool readWav (const std::string& path, WavData& out, std::string& error);
 
 /** Writes a mono 32-bit float WAV (used to dump the synthetic corpus). Returns false on failure. */

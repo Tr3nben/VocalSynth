@@ -117,7 +117,7 @@ constexpr const VoiceRangeInfo& voiceRangeInfo (VoiceRange range) noexcept
 struct VoiceSettings
 {
     VoiceRange range = VoiceRange::tenor;
-    PitchAlgorithm algorithm = PitchAlgorithm::yin;
+    PitchAlgorithm algorithm = PitchAlgorithm::mpm; ///< default chosen by the vs-eval comparison (docs/M2-DESIGN.md 10)
     int key = 0;                             ///< 0..11 = C, C#, ..., B
     Scale scale = Scale::chromatic;
     float stickinessPercent = 50.0f;         ///< 0..100

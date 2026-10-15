@@ -170,8 +170,8 @@ neighbour (`tauMin - 1`, `tauMax + 1`, both always computed). A dip still fallin
 still rising there means f0 < f0min; one that is better at `tauMin - 1` means f0 > f0max: the frame is
 unvoiced. Without this rule a 60 Hz tone in Bass reads as a confident 65 Hz (YIN `d'` at the last lag is
 already below the threshold) and a 1.1 kHz whistle in Soprano reads as its octave below. Because both
-neighbours exist, parabolic interpolation is always possible; the result is clamped to [f0min, f0max]
-(it can only leave the range by less than one lag). `rmsDb` = RMS of the
+neighbours exist, parabolic interpolation is always possible; the result is reported as measured
+within `rangeToleranceSemitones` (0.5) of [f0min, f0max], NOT clamped to the limits (see 10, item 2). `rmsDb` = RMS of the
 newest `ceil(fa / f0min)` samples (one period of f0 min: reacts faster than the whole window, so onsets and
 releases pass the gate sooner), floor -120 dB. Below `silenceFloorDb = -90 dB` the frame is unvoiced
 without searching.
@@ -181,7 +181,7 @@ without searching.
 Integration length `Wi = W - maxLag = maxLag`; `d(tau) = sum_{j<Wi} (x[j] - x[j+tau])^2`, tau = 1..maxLag;
 cumulative mean normalised `d'` (`d'(0) = 1`). First tau in [tauMin, tauMax] with `d' < 0.15`, then down to
 its local minimum; else the global minimum of `d'` in range; then the edge rule. Parabolic interpolation on
-`d'`. `confidence = clamp(1 - d'(tau), 0, 1)`. Octave behaviour: the first-dip rule avoids sub-octave
+the raw `d` (10, item 2). `confidence = clamp(1 - d'(tau), 0, 1)`. Octave behaviour: the first-dip rule avoids sub-octave
 errors; an octave-UP error needs `d'(T/2) < 0.15`, i.e. for `sin f0 + a sin 2 f0` roughly `a > 3.6`
 (`d'(T/2) ~ 2 / (1 + a^2)`), so the "3x 2nd harmonic" test has margin (0.2 vs 0.15) but not much. Pink
 noise is harmless for YIN: its `d` grows monotonically with tau, so `d' >= 1`.
@@ -321,10 +321,11 @@ note numbers differ.
 - Reset to centre on note-off (`noteEnded`) and on every flush.
 - Monitor tone: `MonitorSynth` (M1) interprets bends as a fixed +-2 semitones, so with True bend and a
   +-12/24/48 range the monitor tone would not follow the singing that the MIDI describes (spec: "monitor
-  tone follows the sung notes"). Fix (owner D, section 7): add
-  `void MonitorSynth::setPitchBendRangeSemitones (double semitones) noexcept` (default 2, clamp 1..48, M1
-  behaviour unchanged) and have the processor set it from `bendRange` every block in Voice mode and back
-  to 2 in Test Pattern mode (the M1 patterns assume +-2).
+  tone follows the sung notes"). As implemented (owner D, section 10 item 9): `MonitorSynth` keeps its
+  fixed +-2 semitones (M1 behaviour unchanged, no setter); in Voice mode the processor rescales every
+  bend it passes to the monitor with `monitorBendFor (bend, bendRangeSemitones (settings.bendRange))`
+  (value * range / 2), so monitor bends up to +-2 semitones follow the MIDI exactly and larger ones are
+  clamped at +-2 semitones (MIDI output unaffected). Test Pattern mode passes bends unchanged.
 
 ### 3.10 `VoicePipeline` (owner C; interface frozen for D)
 
@@ -463,7 +464,7 @@ All `juce::ParameterID {id, 1}`, appended **after** the M1 parameters (M1 IDs, o
 |---|---|---|---|
 | `source` | choice | Voice, Test Pattern | Voice |
 | `voiceRange` | choice | Bass, Baritone, Tenor, Alto, Soprano, Whistle, Wide | Tenor |
-| `pitchAlgorithm` | choice | YIN, MPM | YIN (re-decided by vs-eval) |
+| `pitchAlgorithm` | choice | YIN, MPM | MPM (decided by vs-eval, section 10) |
 | `key` | choice | C .. B | C |
 | `scale` | choice | Chromatic, Major, Natural Minor, Harmonic Minor, Major Pentatonic, Minor Pentatonic, Blues, Dorian, Mixolydian | Chromatic |
 | `stickiness` | float | 0..100 % | 50 |
@@ -497,9 +498,14 @@ version hints, types, ranges, defaults, choice names, the enum mapping, texts an
   other source left, then both sources restart). In Test Pattern mode the pipeline is not processed. Voice
   mode does not run the test generator.
 - `processBlockBypassed`: as M1 plus `voicePipeline.reset()`.
-- Monitor tone in Voice mode plays the pipeline's events (same `MonitorSynth`), with
-  `setPitchBendRangeSemitones (bendRangeSemitones (settings.bendRange))` (3.9); 2 in Test Pattern mode.
+- Monitor tone in Voice mode plays the pipeline's events (same `MonitorSynth`), with each bend rescaled
+  by `monitorBendFor (bend, bendRangeSemitones (settings.bendRange))` and clamped at +-2 semitones (3.9);
+  unchanged in Test Pattern mode.
 - Keep latency 0 (`setLatencySamples` is not called).
+- State load (`setStateInformation`): parameters missing from the saved state get their defaults
+  (JUCE's `replaceState()` alone keeps their current values, so the result depended on the instance's
+  settings before the load). An M1 state (0.1.x, no `source`) selects Test Pattern if its `testPattern`
+  is not Off (the saved routing test keeps playing), else Voice.
 - UI accessors: `VoiceAnalysisSnapshot getVoiceSnapshot() const noexcept` (forwards to the pipeline's
   seqlock), `double getVoiceLatencyMs() const noexcept` =
   `VoicePipeline::computeAlgorithmicLatencyMs (getCurrentSampleRate(), current range)` (48 kHz before the
@@ -618,7 +624,7 @@ independent of sample rate and block size", 220 Hz) now produce notes; set `sour
 | **A** core front-end | `core/*/InputConditioner.*`, `core/*/Decimator.*`, `core/*/Framer.*`, `core/*/PitchDetector.*` (Yin + Mpm), `core/*/PitchPostProcessor.*`, `tests/core/InputConditionerTests.cpp`, `DecimatorTests.cpp`, `FramerTests.cpp`, `PitchDetectorTests.cpp`, `PitchPostProcessorTests.cpp` |
 | **B** core note logic | `core/*/ScaleQuantizer.*`, `core/*/NoteSegmenter.*`, `core/*/BendGenerator.*`, `tests/core/ScaleQuantizerTests.cpp`, `NoteSegmenterTests.cpp`, `BendGeneratorTests.cpp` |
 | **C** pipeline + eval (after A and B) | `core/*/VoicePipeline.*`, `tests/core/VoicePipelineTests.cpp`, `tools/vs-eval/*` (except its CMakeLists.txt) |
-| **D** plugin + UI + docs | `plugin/PluginProcessor.*`, `plugin/PluginEditor.*`, `plugin/Parameters.h` (from now on), `core/*/MonitorSynth.*` + `tests/core/MonitorSynthTests.cpp` (bend range setter, 3.9), `tests/plugin/*` (incl. `ParameterTests.cpp`), `VERSION` (0.2.0), `docs/M2-TESTING.md` (German), `packaging/windows/LIESMICH.txt` (CRLF), `README.md` status, `docs/PLAN.md` M2 checkboxes, `.github/workflows/build_and_test.yml` (add docs/M2-TESTING.md to the Windows package) |
+| **D** plugin + UI + docs | `plugin/PluginProcessor.*`, `plugin/PluginEditor.*`, `plugin/Parameters.h` (from now on), `core/*/MonitorSynth.*` + `tests/core/MonitorSynthTests.cpp` (monitor bend range, 3.9), `tests/plugin/*` (incl. `ParameterTests.cpp`), `VERSION` (0.2.0), `docs/M2-TESTING.md` (German), `packaging/windows/LIESMICH.txt` (CRLF), `README.md` status, `docs/PLAN.md` M2 checkboxes, `.github/workflows/build_and_test.yml` (add docs/M2-TESTING.md to the Windows package) |
 | design (done) | `core/*/VoiceSettings.h`, `tests/core/TestSignals.h` (complete and shared by A, B, C: frozen; extra helpers go into the test file that needs them), `docs/M2-DESIGN.md`, all CMake files (`CMakeLists.txt`, `core/`, `tests/`, `tools/vs-eval/`) |
 
 Rules: everything is registered in CMake already; nobody edits CMake files. Public interfaces in the
@@ -670,10 +676,97 @@ Checked against docs/M2-SPEC.md. Fixed in the design, headers, stubs, CMake and 
    ("50 %" + label "%"). IDs, types, ranges and defaults were already per spec and are unchanged.
    `tests/plugin/ParameterTests.cpp` added and registered (the open issue "choice counts not checked").
 7. **Monitor tone and bend range**: was an "accepted limitation"; it contradicts the spec's "monitor tone
-   follows the sung notes" for True bend with ranges > +-2. Assigned to D with a defined setter (3.9).
+   follows the sung notes" for True bend with ranges > +-2. Assigned to D (3.9); implemented as a
+   rescale in the processor with a clamp at +-2 semitones instead of a MonitorSynth setter (section 10,
+   item 9).
 8. **Interface gaps**: `getFrameCentreDelayInputSamples()` for vs-eval; latency budget constants for the
    tests; NoteSegmenter octave-shift-to-out-of-range rule; plugin test file pre-registered;
    TestSignals.h frozen so A/B/C do not need each other's files.
 9. **Real-time / robustness**: conditioner flushes denormal-range memories; CPU test uses min-of-3 runs
    per block so it does not fail while other agents build on the same 4 cores; Whistle accuracy above
    1047 Hz relaxed to +-25 cents (beyond the spec's 65-1047 Hz requirement).
+
+## 10. Implementation notes (changes made while implementing and integrating)
+
+The headers are authoritative; this list records where the implementation departs from sections 3-6.
+No interface that D or vs-eval use changed.
+
+1. **Decimator (3.3):** taps designed for 62 dB with the cutoff at 0.49 fa (tap counts unchanged:
+   27/39/63/75/147). The 60 dB / 0.5 fa design reached only 58.9-60.5 dB at 0.65 fa; now >= 60.7 dB,
+   passband deviation -0.05..+0.01 dB.
+2. **Detectors (3.5):**
+   - The scan starts at `max(2, tauMin / 2)` so a tone above f0 max is rejected instead of being read an
+     octave down; the chosen lag must still lie in [tauMin, tauMax]. The low edge reaches
+     `rangeToleranceSemitones = 0.5` below f0 min (lags up to ~3 % beyond W/2; window and latency
+     unchanged), so a tone a few cents flat on the lowest note is not cut by the edge rule. Results more
+     than half a semitone outside the range are unvoiced, others are reported as measured. (They were
+     clamped to [f0 min, f0 max] at first; with limits a few cents inside a note, Tenor 523 Hz < C5 =
+     523.25 Hz, Alto 147 Hz > D3 = 146.83 Hz, that made A2 sung 10-40 cents flat read as exactly
+     110 Hz and C5 always -0.8 cents: the tuner and True bend could not follow the edge notes.)
+   - YIN never reads d'(maxLag + 1) (not computed for this frame): at maxLag the sampled d' is used, so
+     the result does not depend on an earlier frame of a longer range.
+   - YIN interpolates the period on the raw d(tau) of the three lags around the minimum (recomputed), not
+     on d': the normalisation tilt biased short periods (Soprano/Wide at 1047 Hz read 10-14 cents sharp,
+     which the clamp had hidden at f0 max). The confidence still uses d'.
+   - The front-end accuracy test uses band-limited saws at all three test pitches; the naive saw (its
+     host-rate aliases are in-band and inharmonic, +-17 cents near the limits at 44.1 kHz) only in the
+     middle of the range.
+   - Threshold and key-maximum comparisons use the interpolated peak values (matters for short Whistle
+     periods).
+   - Level step: a frame is unvoiced if the newest period's level and the whole window differ by more than
+     `maxLevelStepDb = 6` (the window straddles an onset or a release; both lag functions are biased there).
+   - YIN: the confidence uses the sampled d' when the parabola fit is implausible (vertex < 0); a
+     sub-multiple check (`subMultipleRatio` 1.5, `subMultipleSlack` 0.02) prefers T/2 or T/3 over 2T or 3T;
+     frames from the global-minimum fallback get at most `fallbackMaxConfidence = 0.75` (can hold a note,
+     never start one). Partly filled onset windows otherwise started notes an octave low.
+3. **Post-processor (3.6):** only strong frames (`guardMinConfidence = 0.8` = NoteSegmenter::confidenceOn)
+   set or keep the octave reference; if the newest two strong frames differ by more than
+   `maxSpreadCents = 50`, the confidence is capped at `inconsistentMaxConfidence = 0.75`. New
+   `forgetOctaveReference()`, called by the VoicePipeline whenever a note ends (release, flush).
+4. **NoteSegmenter / bend (3.8, 3.9):** a held note freezes the bend on weak frames (confidence below
+   confidenceOn) and on frames more than `bendHoldDropDb = 3` below the note's level (level follower falling
+   at `levelFallDbPerSecond = 20`); at releases the pitch drifts sharp and used to send a bend spike before
+   every note-off. `static_assert`s tie the new thresholds to confidenceOn/Off.
+5. **VoicePipeline (3.10):** settings are re-applied only when they change (1-sample host blocks).
+6. **Measured onset -> note-on latency** (worst of 44.1/48/96 kHz x 8 onset phases x both algorithms,
+   `tests/core/VoicePipelineTests.cpp`), all below the model of 3.11: Bass/Wide 34.4 ms (model 39.05),
+   Baritone 28.4 (31.6), Tenor 21.9 (24.2), Alto 16.7 (18.9), Soprano 13.4 (15.2), Whistle 7.9 (8.6).
+   CPU worst block 3.1 % (YIN) / 4.1 % (MPM) of a 128-sample block at 48 kHz, 6.6 % at 44.1 kHz.
+7. **vs-eval (5):** reads 8/16/24/32-bit integer and 32/64-bit float WAV; the range is taken from the
+   file-name prefix (`bass_...`); the synthetic corpus also has voice-like items (formants, vibrato,
+   jitter, 10-30 dB SNR). The note F1 gate (>= 0.85) applies to notes after a rest only; legato changes
+   arrive ~57 ms late (stickiness T_min 35 ms at 50 % plus analysis), so with +-50 ms most of them cannot
+   match. Overall F1 is still reported. Results of the self-test corpus:
+
+   | Metric | YIN | MPM |
+   |---|---|---|
+   | Raw pitch accuracy (+-50 cents) | 0.9928 | 0.9945 |
+   | Octave error rate | 0.0000 | 0.0000 |
+   | Note F1, all / after a rest / legato | 0.785 / 0.977 / 0.130 | 0.811 / 0.985 / 0.210 |
+   | Mean onset latency | 25.0 ms | 20.7 ms |
+   | Notes on noise / breath / silence | 0 | 0 |
+
+   **Default algorithm: MPM** (better or equal on every metric, ~4 ms faster onsets, no passing notes in
+   Bass legato glides). `VoiceSettings {}.algorithm` and `params::defaultPitchAlgorithmIndex` changed
+   together.
+   Since weak frames no longer change a held note (item 9), note changes wait for strong frames
+   (~2 ms later on average, mean change delay 61 / 59 ms): note F1 all / after a rest / legato is now
+   0.767 / 0.977 / 0.052 (YIN) and 0.799 / 0.985 / 0.158 (MPM), mean onset latency 24.5 / 20.4 ms; pitch
+   metrics unchanged. MPM stays the default.
+8. **Tests (6):** Whistle saws are tested up to 1047 Hz (spec limit); above it the 3rd/4th harmonics fall
+   into the decimator transition band and YIN reads up to 29 cents off. `TestSignals.h` gained
+   `toneSequence` and `midiToHz` (existing helpers unchanged).
+9. **Known limitations:**
+   - YIN at 44.1 kHz: a tone just below the range (59.6 Hz in Bass) that stops abruptly (< 10 ms) can give
+     one short ghost note at the release; not with a >= 10 ms fade or with MPM. Below-range saws can also
+     give weak in-range YIN frames (confidence ~0.65, below the 0.80 needed to start a note). Such weak
+     frames hold a note but never change it (NoteSegmenter: a change needs confidence >= confidenceOn),
+     so a held A2 followed by G2 / F#2 below the Tenor range stays A2 instead of jumping to G3 / F#3.
+   - A tone further below the range with a 3x 2nd harmonic (F2 / E2 in Tenor, 87 / 82 Hz) can read as
+     2 f0 with confidence >= 0.8 in MPM: its period does not fit the window, 2 f0 is the best in-range
+     periodicity. Then a note an octave high can still start (or a held note change to it).
+   - Denormal mode: the plugin runs with flush-to-zero, core tests and vs-eval do not. At 96 kHz around an
+     onset after silence the raw f0 can differ by ~1 % in a few frames (note events identical, single bend
+     values can differ). The plugin test compares against a reference run with `juce::ScopedNoDenormals`.
+   - MonitorSynth keeps +-2 semitone bends; the processor rescales bends for it (`monitorBendFor()`), so
+     monitor bends beyond +-2 semitones are clamped (MIDI output is unaffected; stated in M2-TESTING.md).

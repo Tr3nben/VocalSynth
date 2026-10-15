@@ -2,6 +2,7 @@
 
 #include "vocalsynth/BendGenerator.h"
 #include "vocalsynth/PitchDetector.h"
+#include "vocalsynth/PitchPostProcessor.h"
 #include "vocalsynth/ScaleQuantizer.h"
 #include "vocalsynth/VoiceSettings.h"
 #include "vocalsynth/VsEvent.h"
@@ -39,13 +40,20 @@ struct StickinessParams
       * octaveShift changed so that q + 12 * shift != output note: immediate note change (same q, no T_min,
         no minNoteLength). (On a not-weak frame the change waits for the next weak one: a note that is
         being released is not retriggered.)
-      * candidate n = quantizer.quantize (p, q). Change condition: n != q and
+      * candidate n = quantizer.quantize (p, q). Change condition: n != q, confidence >= confidenceOn
+        (a weak frame below confidenceOn only holds the note: detector octave errors live there, and
+        the octave guard does not check such frames) and
         |p - q| - |p - n| >= 2 h (chromatic neighbours: |p - q| >= 0.5 + h). The condition must hold on
         consecutive frames for >= T_min (timer starts at the first frame where it holds, restarts when it
         fails; n may differ between those frames), AND the current note must have lasted
         >= minNoteLength. Then change to quantizer.quantize (p, q) of this frame. A frame whose candidate
         wins but whose shifted output note would be outside 0..127 counts as not weak-voiced.
-      * otherwise bend.update (100 * (p - q)).
+      * otherwise bend.update (100 * (p - q)) if the frame's pitch is reliable: confidence >= confidenceOn
+        and rmsDb >= noteLevelDb - bendHoldDropDb, where noteLevelDb follows the note's level (set at
+        the note start, rises at once, falls by levelFallDbPerSecond on absolute samples). Weak or
+        decaying frames hold the note but freeze the bend: when the sound ends, the analysis window
+        reaches past it and the pitch drifts (YIN up to +75 cents in the last frames before the
+        note-off), which in True mode was a bend spike right before every release.
     - note on, not weak-voiced: after releaseFrames consecutive such frames AND a note age
       >= minNoteLength -> note-off; back to idle. Until then the note is held (no bend updates).
     minNoteLength never delays a note-on: it only bounds note duration (deferred note-off and change).
@@ -72,6 +80,16 @@ public:
     static constexpr int minFullVelocity = 20;      ///< velocity at the gate with 100 % sensitivity
     static constexpr int fixedVelocity = 100;       ///< velocity with 0 % sensitivity
     static constexpr int maxEventsPerFrame = 3;
+    static constexpr float bendHoldDropDb = 3.0f;          ///< see "reliable" above
+    static constexpr double levelFallDbPerSecond = 20.0;   ///< level follower for bendHoldDropDb
+
+    // Thresholds of other modules that are defined relative to these (kept in sync at compile time)
+    static_assert (YinPitchDetector::fallbackMaxConfidence >= confidenceOff
+                   && YinPitchDetector::fallbackMaxConfidence < confidenceOn);
+    static_assert (PitchPostProcessor::inconsistentMaxConfidence >= confidenceOff
+                   && PitchPostProcessor::inconsistentMaxConfidence < confidenceOn);
+    static_assert (PitchPostProcessor::guardMinConfidence >= confidenceOn  // == without -Wfloat-equal
+                   && PitchPostProcessor::guardMinConfidence <= confidenceOn);
 
     /** h = 0.4 * u semitones, T_min = 10 + 50 * u ms with u = clamp (percent, 0, 100) / 100.
         0 % -> (0, 10 ms), 50 % (default) -> (0.2, 35 ms), 100 % -> (0.4, 60 ms). */
@@ -122,8 +140,10 @@ private:
                            BendGenerator& bend, VsEventSink out) noexcept;
     void processNoteFrame (const PitchFrame& frame, bool weak, double p, int64_t absoluteSample, int sampleOffset,
                            BendGenerator& bend, VsEventSink out) noexcept;
-    void startNote (int q, int outputNote, uint8_t velocity, double p, int64_t absoluteSample, int sampleOffset,
-                    BendGenerator& bend, VsEventSink out) noexcept;
+    void startNote (int q, int outputNote, uint8_t velocity, float levelDb, double p, int64_t absoluteSample,
+                    int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
+    /** Updates the level follower with this frame; true if the frame's pitch may drive the bend. */
+    bool isPitchReliable (const PitchFrame& frame, int64_t absoluteSample) noexcept;
     void changeNote (int q, int outputNote, const PitchFrame& frame, double p, int64_t absoluteSample,
                      int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
     void endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
@@ -152,6 +172,8 @@ private:
     bool changeTimerRunning = false;
     int64_t changeTimerStart = 0;
     bool lastFrameVoiced = false;
+    float noteLevelDb = PitchFrame::silenceDb;  ///< level follower of the active note (bend hold)
+    int64_t noteLevelSample = 0;                ///< absolute sample of the last follower update
 };
 
 } // namespace vocalsynth

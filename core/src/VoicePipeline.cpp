@@ -101,9 +101,12 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
         postProcessor.reset();
     }
 
+    // Applied only on a change (cheap compare): with 1-sample host blocks this runs per sample
+    if (! hasLastSettings || ! (s == lastSettings))
+        applySettings (s);
+
     lastSettings = s;
     hasLastSettings = true;
-    applySettings (s);
     const auto framesBefore = frameCounter;
 
     const auto& range = voiceRangeInfo (s.range);
@@ -120,8 +123,13 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
         const auto hopSample = samplePosition + i;
         const auto raw = detector.analyse (framer.getWindow(), range.f0MinHz, range.f0MaxHz);
         lastFrame = postProcessor.process (raw);
+        const auto noteWasActive = segmenter.getActiveNote() >= 0;
         segmenter.processFrame (lastFrame, hopSample, i, bend, out);
         ++frameCounter;
+
+        // A released note ends the octave context: the next onset may start in any octave
+        if (noteWasActive && segmenter.getActiveNote() < 0)
+            postProcessor.forgetOctaveReference();
 
         if (frameObserver != nullptr)
             frameObserver (frameObserverContext,
@@ -137,6 +145,7 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
 void VoicePipeline::flushToSink (int sampleOffset, VsEventSink out) noexcept
 {
     segmenter.flush (samplePosition + std::max (0, sampleOffset), std::max (0, sampleOffset), bend, out);
+    postProcessor.forgetOctaveReference();
     publishSnapshot();
 }
 

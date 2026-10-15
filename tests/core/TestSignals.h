@@ -224,4 +224,52 @@ inline float sineAmplitudeForRmsDb (double rmsDb)
     return static_cast<float> (std::sqrt (2.0) * std::pow (10.0, rmsDb / 20.0));
 }
 
+// --- Added for the pipeline tests and vs-eval (agent C) ----------------------------------------------
+
+/** One segment of toneSequence(): frequencyHz <= 0 means silence (the phase is kept). */
+struct ToneStep
+{
+    double frequencyHz = 0.0;
+    double seconds = 0.0;
+};
+
+/** Phase-continuous sequence of steady tones and rests (no click at a pitch step, so a legato step is
+    a clean pitch change). shape(phase 0..1) -> -1..1, e.g. sineShape or sawShape. Each step is rounded
+    to whole samples on its own, so step k starts at the sum of the rounded lengths before it. */
+template <typename ShapeFn>
+Signal toneSequence (double sampleRate, std::initializer_list<ToneStep> steps, float amplitude, ShapeFn&& shape)
+{
+    Signal out;
+    double phase = 0.0;
+
+    for (const auto& step : steps)
+    {
+        const auto n = numSamplesFor (step.seconds, sampleRate);
+
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            if (step.frequencyHz > 0.0)
+            {
+                out.push_back (amplitude * static_cast<float> (shape (phase)));
+                phase += step.frequencyHz / sampleRate;
+                phase -= std::floor (phase);
+            }
+            else
+            {
+                out.push_back (0.0f);
+            }
+        }
+    }
+
+    return out;
+}
+
+inline Signal toneSequence (double sampleRate, std::initializer_list<ToneStep> steps, float amplitude = 0.5f)
+{
+    return toneSequence (sampleRate, steps, amplitude, sineShape);
+}
+
+/** Frequency of a (fractional) MIDI note, 69 = A4 = 440 Hz (keeps the test signals free of core headers). */
+inline double midiToHz (double midiNote) { return 440.0 * std::exp2 ((midiNote - 69.0) / 12.0); }
+
 } // namespace vocalsynth::test

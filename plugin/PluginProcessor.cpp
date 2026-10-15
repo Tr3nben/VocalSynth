@@ -19,6 +19,44 @@ int16_t monitorBendFor (int16_t bend, int rangeSemitones) noexcept
     return static_cast<int16_t> (juce::jlimit (-8192L, 8191L, std::lround (scaled)));
 }
 
+namespace
+{
+/** Brings a saved state up to the current parameter layout before it is loaded. replaceState() keeps
+    the CURRENT value of every parameter the state does not mention (JUCE flushes the live values into
+    the missing children), so without this the result of loading an older state would depend on what
+    the instance was set to before. Missing parameters get their defaults instead.
+    M1 states (0.1.x) have no "source": M1 always played its test pattern, so such a state selects
+    Test Pattern when its pattern is not Off (the routing test the user saved keeps playing), else
+    Voice (the M2 default). */
+void migrateState (juce::ValueTree& state, const juce::Array<juce::AudioProcessorParameter*>& parameters)
+{
+    static const juce::Identifier paramType ("PARAM"), idProperty ("id"), valueProperty ("value");
+
+    const auto childFor = [&state] (const juce::String& id) { return state.getChildWithProperty (idProperty, id); };
+    const auto sourceMissing = ! childFor (params::source.getParamID()).isValid();
+    const auto savedPattern = childFor (params::testPattern.getParamID());
+    const auto patternIndex = savedPattern.isValid() ? juce::roundToInt ((double) savedPattern.getProperty (valueProperty, 0.0))
+                                                     : 0;
+
+    for (auto* parameter : parameters)
+    {
+        auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter);
+
+        if (ranged == nullptr || childFor (ranged->paramID).isValid())
+            continue;
+
+        auto child = juce::ValueTree (paramType);
+        child.setProperty (idProperty, ranged->paramID, nullptr);
+        child.setProperty (valueProperty, ranged->convertFrom0to1 (ranged->getDefaultValue()), nullptr);
+        state.appendChild (child, nullptr);
+    }
+
+    if (sourceMissing && patternIndex != static_cast<int> (TestPattern::off))
+        childFor (params::source.getParamID())
+            .setProperty (valueProperty, static_cast<int> (params::Source::testPattern), nullptr);
+}
+} // namespace
+
 VocalSynthProcessor::BusesProperties VocalSynthProcessor::makeBusesProperties (Variant v)
 {
     const auto stereo = juce::AudioChannelSet::stereo();
@@ -404,7 +442,9 @@ void VocalSynthProcessor::setStateInformation (const void* data, int sizeInBytes
     {
         if (xml->hasTagName (apvts.state.getType()))
         {
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            auto state = juce::ValueTree::fromXml (*xml);
+            migrateState (state, AudioProcessor::getParameters());
+            apvts.replaceState (state);
 
             // The values changed outside any host automation: tell the host to re-read them.
             // CLAP maps this to params->rescan (CLAP_PARAM_RESCAN_VALUES), which the CLAP spec

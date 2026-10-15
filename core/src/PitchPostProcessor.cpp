@@ -31,6 +31,13 @@ void PitchPostProcessor::reset() noexcept
     suspectFrames = 0;
 }
 
+void PitchPostProcessor::forgetOctaveReference() noexcept
+{
+    referenceHz = 0.0f;
+    suspectDirection = 0;
+    suspectFrames = 0;
+}
+
 void PitchPostProcessor::setMedianLength (int length) noexcept
 {
     length = std::clamp (length, 1, maxMedianLength);
@@ -69,6 +76,19 @@ PitchFrame PitchPostProcessor::process (const PitchFrame& input) noexcept
     out.frequencyHz = medianOf (frequencies, medianLength);
     out.confidence = medianOf (confidences, medianLength);
     out.rmsDb = input.rmsDb;
+
+    // Consistency: the newest two frames, if both confident, must agree (a pitch jump in progress)
+    {
+        const auto newest = (historyPos + medianLength - 1) % medianLength;
+        const auto previous = (historyPos + medianLength - 2) % medianLength;
+        const auto a = static_cast<double> (frequencies[static_cast<std::size_t> (newest)]);
+        const auto b = static_cast<double> (frequencies[static_cast<std::size_t> (previous)]);
+
+        if (medianLength > 1 && a > 0.0 && b > 0.0 && confidences[static_cast<std::size_t> (newest)] >= guardMinConfidence
+            && confidences[static_cast<std::size_t> (previous)] >= guardMinConfidence
+            && std::abs (1200.0 * std::log2 (a / b)) > maxSpreadCents)
+            out.confidence = std::min (out.confidence, inconsistentMaxConfidence);
+    }
 
     // 2. Octave guard
     if (! (out.frequencyHz > 0.0f) || out.confidence < guardMinConfidence)

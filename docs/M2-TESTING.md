@@ -102,7 +102,7 @@ Steht *Source* auf *Test Pattern*, ist das Stimmgerät grau: Dann wird die Stimm
 |---|---|---|
 | **Source** | **Voice**, Test Pattern | *Voice*: deine Stimme erzeugt das MIDI. *Test Pattern*: das feste Test-MIDI aus M1 (Muster im Reiter *Test & Routing*). Beim Umschalten werden alle Noten beendet. |
 | **Voice Range** | Bass, Baritone, **Tenor**, Alto, Soprano, Whistle, Wide | Deine Stimmlage, wie „Input Type“ bei Auto-Tune. Begrenzt die Tonhöhensuche: Bass 65–330 Hz, Baritone 82–392 Hz, **Tenor 110–523 Hz** (A3–C6 in FL-Notennamen), Alto 147–698 Hz, Soprano 196–1047 Hz, Whistle 500–2500 Hz (Pfeifen), Wide 65–1047 Hz (alle Stimmen). Tiefere Lagen brauchen ein längeres Analysefenster und haben mehr Latenz. Töne außerhalb der Lage werden ignoriert. |
-| **Algorithm** | **YIN**, MPM | Zwei Verfahren zur Tonhöhenerkennung. Beide ausprobieren; sag uns, welches bei deiner Stimme sauberer ist. |
+| **Algorithm** | YIN, **MPM** | Zwei Verfahren zur Tonhöhenerkennung. MPM ist Standard, weil es in unseren synthetischen Tests etwas schneller und sauberer war. Beide ausprobieren; sag uns, welches bei deiner Stimme sauberer ist. |
 | **Key** | **C**, C#, …, B | Grundton der Skala. |
 | **Scale** | **Chromatic**, Major, Natural Minor, Harmonic Minor, Major Pentatonic, Minor Pentatonic, Blues, Dorian, Mixolydian | Die gesungene Tonhöhe wird auf die nächste Note dieser Skala gerundet. *Chromatic* = jeder Halbton ist erlaubt. |
 | **Bend Mode** | **Off**, Anchored, True | *Off*: nur Noten. *Anchored*: kleine Abweichungen (±30 cents) werden ignoriert, erst bewusstes Wegziehen erzeugt Pitchbend. *True*: Pitchbend folgt der Stimme 1:1 (Vibrato und Schleifer hörbar). |
@@ -146,9 +146,9 @@ Wie in M1 (siehe [FL-ROUTING.md, Abschnitt 2](FL-ROUTING.md#2-das-testmenü-im-p
 
 ## 5. Test-Checkliste
 
-Wenn nicht anders angegeben: *Source = Voice*, *Voice Range = Tenor*, *Algorithm = YIN*, Rest Standard. Ergebnis
-pro Punkt notieren: **o.k.** / **teilweise** / **nein**, plus Bemerkung. Die Punkte 1–7 zuerst mit YIN, dann
-die wichtigsten (1, 2, 3, 7) noch einmal mit **MPM**.
+Wenn nicht anders angegeben: *Source = Voice*, *Voice Range = Tenor*, *Algorithm = MPM*, Rest Standard. Ergebnis
+pro Punkt notieren: **o.k.** / **teilweise** / **nein**, plus Bemerkung. Die Punkte 1–7 zuerst mit MPM, dann
+die wichtigsten (1, 2, 3, 7) noch einmal mit **YIN**.
 
 | Nr. | Test | So geht's | Erwartung |
 |---|---|---|---|

@@ -114,7 +114,7 @@ inline const juce::StringArray bendRangeChoices = detail::toStringArray (bendRan
 // Defaults (docs/M2-SPEC.md). They must equal the core VoiceSettings defaults, checked below.
 inline constexpr int defaultSourceIndex = static_cast<int> (Source::voice);
 inline constexpr int defaultVoiceRangeIndex = static_cast<int> (VoiceRange::tenor);
-inline constexpr int defaultPitchAlgorithmIndex = static_cast<int> (PitchAlgorithm::yin); // decided by vs-eval
+inline constexpr int defaultPitchAlgorithmIndex = static_cast<int> (PitchAlgorithm::mpm); // decided by vs-eval
 inline constexpr int defaultKeyIndex = 0;                                                 // C
 inline constexpr int defaultScaleIndex = static_cast<int> (Scale::chromatic);
 inline constexpr float defaultStickinessPercent = 50.0f;
@@ -138,6 +138,30 @@ static_assert (static_cast<int> (VoiceSettings {}.bendMode) == defaultBendModeIn
 static_assert (static_cast<int> (VoiceSettings {}.bendRange) == defaultBendRangeIndex);
 static_assert (detail::sameValue (VoiceSettings {}.velocitySensitivityPercent, defaultVelocitySensitivityPercent));
 static_assert (VoiceSettings {}.legato == defaultLegato);
+
+/** Bend Range text -> choice index. Accepts the exact choice names and anything that carries the semitone
+    number ("12", "+-12", the UTF-8 name read as Latin-1, ...): CLAP hosts pass UTF-8 text, which the
+    clap-juce-extensions wrapper turns into a juce::String byte by byte, so U+00B1 "12" arrives as
+    U+00C2 U+00B1 "12" and an exact match alone would map it to index 0 (found by clap-validator's
+    param-conversions test). Unknown text -> 0 (+-2), as JUCE's default does. */
+inline int bendRangeIndexFromText (const juce::String& text)
+{
+    if (const auto exact = bendRangeChoices.indexOf (text.trim()); exact >= 0)
+        return exact;
+
+    const auto digits = text.retainCharacters ("0123456789");
+
+    if (digits.isEmpty())
+        return 0;
+
+    const auto semitones = digits.getIntValue();
+
+    for (int i = 0; i < numBendRanges; ++i)
+        if (bendRangeSemitones (static_cast<BendRange> (i)) == semitones)
+            return i;
+
+    return 0;
+}
 
 inline constexpr float minTestTempo = 60.0f;
 inline constexpr float maxTestTempo = 200.0f;
@@ -209,8 +233,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (std::make_unique<juce::AudioParameterChoice> (bendMode, "Bend Mode", bendModeChoices,
                                                               defaultBendModeIndex));
 
-    layout.add (std::make_unique<juce::AudioParameterChoice> (bendRange, "Bend Range", bendRangeChoices,
-                                                              defaultBendRangeIndex));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        bendRange, "Bend Range", bendRangeChoices, defaultBendRangeIndex,
+        juce::AudioParameterChoiceAttributes().withValueFromStringFunction (bendRangeIndexFromText)));
 
     floatParameter (velocitySensitivity, "Velocity Sensitivity", minVelocitySensitivityPercent,
                     maxVelocitySensitivityPercent, defaultVelocitySensitivityPercent, "%", integerText);

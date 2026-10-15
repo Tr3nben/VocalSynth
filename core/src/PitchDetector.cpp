@@ -38,9 +38,9 @@ namespace
 /** Lag bounds of one analysis (docs/M2-DESIGN.md 3.5). */
 struct LagRange
 {
-    int maxLag = 0;  ///< lag function evaluated for tau <= maxLag
+    int maxLag = 0;  ///< lag function evaluated for tau <= maxLag (= tauMax + 1, the guard lag)
     int tauMin = 0;  ///< shortest period in the range: max (2, floor (fa / f0Max))
-    int tauMax = 0;  ///< longest period in the range: min (ceil (fa / f0Min), maxLag - 1)
+    int tauMax = 0;  ///< longest period accepted: ceil (fa / f0Min) extended by rangeToleranceSemitones
     int scanMin = 0; ///< selection starts here (edge rule above the range): max (2, tauMin / 2)
     bool valid = false;
 };
@@ -52,12 +52,28 @@ LagRange lagRangeFor (double fa, std::size_t windowSize, double f0MinHz, double 
     if (! (fa > 0.0) || ! (f0MinHz > 0.0) || ! (f0MaxHz > f0MinHz))
         return r;
 
-    r.maxLag = static_cast<int> (windowSize / 2);
+    // The window holds 2 * (ceil (fa / f0Min) + 1) samples (Framer). The candidates reach
+    // rangeToleranceSemitones below f0 min, so that a tone at f0 min that reads a few cents flat (a
+    // singer on the lowest note of the range, or the high-pass transient right after an onset) is
+    // still inside: with only the one guard lag of the window the lower edge used to be one lag
+    // (~6 cents at 82 Hz) below f0 min, and such frames were unvoiced (up to 7 ms extra onset latency at
+    // f0 min in the pipeline tests). The extension (about 3 %) comes out of YIN's integration length,
+    // never out of the window, so the latency model is unchanged.
+    const auto nominalMaxLag = static_cast<int> (windowSize / 2);
+    const auto tolerance = std::exp2 (PitchDetector::rangeToleranceSemitones / 12.0);
     r.tauMin = std::max (2, static_cast<int> (std::floor (fa / f0MaxHz)));
-    r.tauMax = std::min (static_cast<int> (std::ceil (fa / f0MinHz)), r.maxLag - 1);
+    r.tauMax = std::min (static_cast<int> (std::ceil (fa * tolerance / f0MinHz)), nominalMaxLag + nominalMaxLag / 16);
+    r.maxLag = r.tauMax + 1;
     r.scanMin = std::max (2, r.tauMin / 2);
-    r.valid = r.tauMin <= r.tauMax && r.tauMax + 1 <= r.maxLag;
+    r.valid = r.tauMin <= r.tauMax && r.maxLag < static_cast<int> (windowSize);
     return r;
+}
+
+/** Lag-function buffer length for windows up to maxWindow samples (see lagRangeFor: maxLag <=
+    maxWindow / 2 + maxWindow / 32 + 1). */
+std::size_t lagBufferSizeFor (int maxWindow) noexcept
+{
+    return static_cast<std::size_t> (maxWindow / 2 + maxWindow / 32 + 4);
 }
 
 /** Window to analyse: at most the prepared size (the newest samples if a caller passes more). */
@@ -72,6 +88,14 @@ float frameRmsDb (std::span<const float> window, double fa, double f0MinHz) noex
 {
     const auto n = std::min (window.size(), static_cast<std::size_t> (rmsSamplesFor (fa, f0MinHz)));
     return computeRmsDb (window.last (n));
+}
+
+/** True if the newest period (frameRmsDb) and the whole window differ by more than maxLevelStepDb:
+    the window straddles an onset or a release, where both lag functions are biased (see PitchDetector). */
+bool isLevelStep (std::span<const float> window, float frameRmsDb) noexcept
+{
+    const auto windowRmsDb = computeRmsDb (window);
+    return std::abs (frameRmsDb - windowRmsDb) > PitchDetector::maxLevelStepDb;
 }
 
 /** Plain float loops with four independent accumulators (breaks the add dependency chain; the
@@ -140,7 +164,10 @@ float parabolicVertexValue (float a, float b, float c) noexcept
     return static_cast<float> (static_cast<double> (b) - 0.25 * (static_cast<double> (a) - static_cast<double> (c)) * offset);
 }
 
-/** Applies the range tolerance and clamp to an interpolated period; 0 = outside the range. */
+/** Applies the range tolerance to an interpolated period; 0 = outside the range. A frequency inside the
+    tolerance is returned as measured, never clamped to the limit: some table limits sit a few cents
+    inside a note (Tenor f0 max 523 Hz < C5 = 523.25 Hz, Alto f0 min 147 Hz > D3 = 146.83 Hz), and a
+    clamp made the edge notes always read in tune (tuner, True bend). */
 float frequencyInRange (double fa, double period, double f0MinHz, double f0MaxHz) noexcept
 {
     if (! (period > 0.0))
@@ -152,7 +179,7 @@ float frequencyInRange (double fa, double period, double f0MinHz, double f0MaxHz
     if (f > f0MaxHz * tolerance || f < f0MinHz / tolerance)
         return 0.0f;
 
-    return static_cast<float> (std::clamp (f, f0MinHz, f0MaxHz));
+    return static_cast<float> (f);
 }
 } // namespace
 
@@ -161,7 +188,7 @@ void YinPitchDetector::prepare (double analysisSampleRate, int maxWindowSamples)
 {
     sampleRate = analysisSampleRate > 0.0 ? analysisSampleRate : 16000.0;
     maxWindow = std::max (1, maxWindowSamples);
-    difference.assign (static_cast<std::size_t> (maxWindow / 2 + 2), 0.0f);
+    difference.assign (lagBufferSizeFor (maxWindow), 0.0f);
 }
 
 PitchFrame YinPitchDetector::analyse (std::span<const float> input, double f0MinHz, double f0MaxHz) noexcept
@@ -172,7 +199,8 @@ PitchFrame YinPitchDetector::analyse (std::span<const float> input, double f0Min
 
     const auto lags = lagRangeFor (sampleRate, window.size(), f0MinHz, f0MaxHz);
 
-    if (frame.rmsDb < silenceFloorDb || ! lags.valid || difference.size() < static_cast<std::size_t> (lags.maxLag + 1))
+    if (frame.rmsDb < silenceFloorDb || ! lags.valid || difference.size() < static_cast<std::size_t> (lags.maxLag + 2)
+        || isLevelStep (window, frame.rmsDb))
         return frame;
 
     // Difference function d(tau) = sum_{j<Wi} (x[j] - x[j + tau])^2, Wi = size - maxLag, turned into the
@@ -196,10 +224,25 @@ PitchFrame YinPitchDetector::analyse (std::span<const float> input, double f0Min
     // interpolated (vertex) value is below the threshold: with periods of a few lags (Whistle) the
     // integer lags can miss the bottom of the dip by up to half a lag, which would otherwise skip the
     // true period and pick its double (octave down) ...
-    const auto vertexAt = [dn] (int tau) noexcept
-    { return std::max (0.0f, parabolicVertexValue (dn[tau - 1], dn[tau], dn[tau + 1])); };
+    // The vertex is only trusted when the parabola is plausible: d' >= 0 by definition, so a vertex below
+    // 0 means the three points are no parabolic dip (e.g. at an onset, where the still silent integration
+    // part leaves the placeholder d' = 1 up to some lag and then d' jumps to ~tau: the parabola through
+    // (1, 1, 165) has its vertex at -19.5, which used to read as a confident pitch). Then the sampled
+    // value is used, for the dip test and for the confidence.
+    // At maxLag (the global-minimum fallback can end there) there is no right neighbour: d'(maxLag + 1)
+    // is not computed for this frame (a stale value from an earlier, longer frame would make the
+    // result depend on the history), so the sampled value is used, as in MPM.
+    const auto vertexAt = [dn, &lags] (int tau) noexcept
+    {
+        if (tau >= lags.maxLag)
+            return dn[tau];
+
+        const auto vertex = parabolicVertexValue (dn[tau - 1], dn[tau], dn[tau + 1]);
+        return vertex >= 0.0f ? vertex : dn[tau];
+    };
 
     int chosen = -1;
+    bool fromDip = true;
 
     for (int tau = lags.scanMin; tau <= lags.tauMax; ++tau)
     {
@@ -223,6 +266,7 @@ PitchFrame YinPitchDetector::analyse (std::span<const float> input, double f0Min
     // ... else the global minimum (first occurrence) over the whole scanned range
     if (chosen < 0)
     {
+        fromDip = false;
         chosen = lags.scanMin;
 
         for (int tau = lags.scanMin + 1; tau <= lags.maxLag; ++tau)
@@ -230,18 +274,56 @@ PitchFrame YinPitchDetector::analyse (std::span<const float> input, double f0Min
                 chosen = tau;
     }
 
+    // Sub-multiple check: a local minimum near chosen / 2 or chosen / 3 that is almost as deep wins
+    // (repeated, so 4 T -> 2 T -> T). While the oldest part of the window (the integration part) is
+    // still partly silent, i.e. in the frames right after an onset, the silent samples add the same
+    // energy to d(T) and d(2 T), and the cumulative-mean normalisation then makes d'(2 T) the deeper
+    // one: d'(T) = 0.16, d'(2 T) = 0.12 for a saw at 165 Hz with 10 % of the window still silent,
+    // which started notes an octave low. For a genuine period T the sub-multiples are far worse
+    // (even with a 3x 2nd harmonic d'(T / 2) ~ 0.2 against d'(T) ~ 0; 0.5-0.8 with more harmonics).
+    for (bool refined = true; refined;)
+    {
+        refined = false;
+
+        for (int k = 3; k >= 2 && ! refined; --k)
+        {
+            const auto centre = static_cast<double> (chosen) / static_cast<double> (k);
+            const auto lo = std::max (lags.scanMin, static_cast<int> (std::floor (centre)) - 1);
+            const auto hi = std::min (lags.maxLag - 1, static_cast<int> (std::ceil (centre)) + 1);
+            int best = -1;
+
+            for (int tau = lo; tau <= hi; ++tau)
+                if (dn[tau] <= dn[tau - 1] && dn[tau] <= dn[tau + 1] && (best < 0 || dn[tau] < dn[best]))
+                    best = tau;
+
+            if (best > 0 && best < chosen && vertexAt (best) <= subMultipleRatio * vertexAt (chosen) + subMultipleSlack)
+            {
+                chosen = best;
+                refined = true;
+            }
+        }
+    }
+
     // Edge rule: the minimum must lie inside the range (an extremum at tauMin - 1 or below, or at
     // tauMax + 1, means the period is outside the range)
     if (chosen < lags.tauMin || chosen > lags.tauMax)
         return frame;
 
-    const auto offset = parabolicOffset (dn[chosen - 1], dn[chosen], dn[chosen + 1]);
+    // The period is interpolated on the raw d(tau) (recomputed for the three lags), not on d': the
+    // cumulative-mean normalisation tilts the parabola by tau / sum, which with short periods (~15 lags at
+    // 1 kHz) moved the estimate by more than 10 cents (de Cheveigne & Kawahara, step 5).
+    const auto rawAt = [x, integration] (int tau) noexcept { return squaredDistance (x, x + tau, integration); };
+    const auto offset = parabolicOffset (rawAt (chosen - 1), rawAt (chosen), rawAt (chosen + 1));
     const auto frequency = frequencyInRange (sampleRate, static_cast<double> (chosen) + offset, f0MinHz, f0MaxHz);
 
     if (frequency > 0.0f)
     {
         frame.frequencyHz = frequency;
         frame.confidence = std::clamp (1.0f - vertexAt (chosen), 0.0f, 1.0f);
+
+        // No dip under the threshold: not periodic enough to start a note (see fallbackMaxConfidence)
+        if (! fromDip)
+            frame.confidence = std::min (frame.confidence, fallbackMaxConfidence);
     }
 
     return frame;
@@ -252,7 +334,7 @@ void MpmPitchDetector::prepare (double analysisSampleRate, int maxWindowSamples)
 {
     sampleRate = analysisSampleRate > 0.0 ? analysisSampleRate : 16000.0;
     maxWindow = std::max (1, maxWindowSamples);
-    nsdf.assign (static_cast<std::size_t> (maxWindow / 2 + 2), 0.0f);
+    nsdf.assign (lagBufferSizeFor (maxWindow), 0.0f);
 }
 
 PitchFrame MpmPitchDetector::analyse (std::span<const float> input, double f0MinHz, double f0MaxHz) noexcept
@@ -263,7 +345,8 @@ PitchFrame MpmPitchDetector::analyse (std::span<const float> input, double f0Min
 
     const auto lags = lagRangeFor (sampleRate, window.size(), f0MinHz, f0MaxHz);
 
-    if (frame.rmsDb < silenceFloorDb || ! lags.valid || nsdf.size() < static_cast<std::size_t> (lags.maxLag + 1))
+    if (frame.rmsDb < silenceFloorDb || ! lags.valid || nsdf.size() < static_cast<std::size_t> (lags.maxLag + 2)
+        || isLevelStep (window, frame.rmsDb))
         return frame;
 
     // NSDF n(tau) = 2 r(tau) / m(tau) over the whole window; m(tau) (sum of squares of both overlapping

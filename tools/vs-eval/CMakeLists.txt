@@ -4,7 +4,8 @@ add_executable(vs-eval
     Metrics.h
     Metrics.cpp
     WavFile.h
-    WavFile.cpp)
+    WavFile.cpp
+    Corpus.h)
 
 target_link_libraries(vs-eval PRIVATE VocalSynthCore)
 # TestSignals.h (synthetic corpus for --self-test / --write-corpus) is shared with the core tests
