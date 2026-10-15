@@ -162,10 +162,11 @@ with a `version` property, and migrate older versions on load. Loading must tole
   (e.g. 1). On the target channel-rack instrument, set the same **MIDI input port** (VST wrapper
   settings, or the port field in the channel's Miscellaneous settings for native generators). Several
   instruments can listen on one port, and MIDI channels separate the pitched notes from the drum triggers.
-- Recording: plugin MIDI output is NOT reliably recordable directly in FL (see docs/RESEARCH.md 2.2).
-  Use VocalSynth's own capture + drag & drop of .mid/.wav; Patcher or a virtual port are workarounds.
-- VST3 MIDI out from FX plugins to channel-rack instruments is unverified in FL 2026; native FL synths
-  have no MIDI input port and need Patcher. Check docs/FL-ROUTING.md (after M1) before relying on it.
+- VERIFIED in FL Studio 2026 (M1, 2026-10-15): VocalSynth FX (VST3) on a mixer insert with wrapper
+  MIDI Output port N reaches a VST3 synth with Input port N - notes, pitch bend and CC all arrive. This is
+  the primary path. Native FL synths have no MIDI input port and need Patcher (T2, not yet tested).
+- VERIFIED: FL does NOT record plugin MIDI output into the receiving synth's piano roll, so VocalSynth
+  needs its own capture + drag & drop (M3).
 - Check: changing block size/sample rate in Audio Settings mid-session, the "Use fixed size buffers" wrapper
   option on and off, bypass/disable while notes sound (no stuck notes), save and reload the project (state),
   automation of every parameter, multiple instances, and removing the plugin while audio runs.

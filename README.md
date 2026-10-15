@@ -4,8 +4,10 @@
 
 VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Hauptplattform ist Windows, macOS folgt später. Das Plugin macht aus einem Mikrofonsignal in Echtzeit MIDI: gesungene Töne werden zu Noten, Beatbox-Laute zu Drum-Triggern, Lautstärke und Vokale zu Controller-Daten. Vom Funktionsumfang her orientiert es sich an Vochlea Dubler 2.
 
-> **Status: Planungsphase – noch kein Code.**
-> Bisher gibt es nur die technische Recherche ([docs/RESEARCH.md](docs/RESEARCH.md)) und den Plan ([docs/PLAN.md](docs/PLAN.md)). Alles unten beschreibt das Ziel, nicht den aktuellen Stand.
+> **Status: Meilenstein 1 – Testbuild für den FL-Studio-Routing-Test (Version 0.1.0).**
+> Das Plugin analysiert noch keine Stimme. Es erzeugt selbst festes Test-MIDI (Tonleiter, Pitchbend-Sweep, CC-Sweep) und kann es mit einem eingebauten Sinuston hörbar machen. Dazu kommen ein optionaler virtueller MIDI-Port, Test-Clips (`.mid`/`.wav`) zum Herausziehen per Drag & Drop, eine Pegelanzeige und eine Anzeige der Blockgrößen, die FL schickt. Damit wird in FL Studio 2026 geprüft, welcher MIDI-Weg funktioniert (Tests T1–T7). Anleitung und Ergebnistabelle: [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
+> **Ergebnis (2026-10-15):** VocalSynth FX auf dem Mikro-Insert schickt Noten, Pitchbend und CC über einen MIDI-Port an jeden VST3-Synth. Das ist der Hauptweg. Als Nächstes kommt Meilenstein 2: echte Tonhöhenerkennung aus der Stimme.
+> Grundlage sind die technische Recherche ([docs/RESEARCH.md](docs/RESEARCH.md)) und der Plan ([docs/PLAN.md](docs/PLAN.md)). Die Features unten beschreiben das Ziel, nicht den aktuellen Stand.
 
 ---
 
@@ -50,7 +52,7 @@ VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Ha
 3. Beim Ziel-Synth im **Channel Rack** denselben Port als **MIDI Input Port** einstellen. Native FL-Synths wie Sytrus oder FLEX haben keinen Input-Port, sie erreicht man über **Patcher**.
 4. Singen, beatboxen, spielen. Gelungene Takes über den Capture-Bereich per Drag & Drop ins Projekt ziehen.
 
-> **Ehrlicher Hinweis:** Ob VST3-MIDI-Out aus einem Mixer-Effekt in FL Studio 2026 zuverlässig funktioniert, ist **noch nicht verifiziert**. Es gibt widersprüchliche und teils negative Forenberichte, z. B. zu Scaler und einem JUCE-Arpeggiator. Deshalb ist Meilenstein 1 ein Pflicht-Spike (Go/No-go-Gate, siehe [docs/PLAN.md](docs/PLAN.md)) mit den Tests T1–T7 (siehe [docs/RESEARCH.md, Abschnitt 2.5](docs/RESEARCH.md#25-folgerungen-und-pflicht-spike-vor-der-architektur)).
+> **Ehrlicher Hinweis:** Ob VST3-MIDI-Out aus einem Mixer-Effekt in FL Studio 2026 zuverlässig funktioniert, ist **noch nicht verifiziert**. Es gibt widersprüchliche und teils negative Forenberichte, z. B. zu Scaler und einem JUCE-Arpeggiator. Deshalb ist Meilenstein 1 ein Pflicht-Spike (Go/No-go-Gate, siehe [docs/PLAN.md](docs/PLAN.md)) mit den Tests T1–T7 (siehe [docs/RESEARCH.md, Abschnitt 2.5](docs/RESEARCH.md#25-folgerungen-und-pflicht-spike-vor-der-architektur)). Der Testbuild dafür ist fertig; wie man testet, steht in [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
 
 **Fallbacks, falls das Port-Routing nicht klappt:**
 - Variante als **Instrument** im Channel Rack (Mikrofon per Sidechain) statt als Effekt
@@ -83,7 +85,7 @@ Dubler 2 hat den Workflow „Stimme → MIDI“ etabliert. VocalSynth setzt bei 
 
 - **JUCE 9** (aktuell 9.0.4) als Plugin-Framework
 - **C++23**
-- **CMake** auf Basis des Templates **[pamplejuce](https://github.com/sudara/pamplejuce)** (JUCE als Submodule, CPM)
+- **CMake** (eigenes schlankes Setup nach dem Vorbild von [pamplejuce](https://github.com/sudara/pamplejuce)), JUCE und clap-juce-extensions als gepinnte Submodules
 - **[clap-juce-extensions](https://github.com/free-audio/clap-juce-extensions)** für den CLAP-Build, da JUCE 9 kein natives CLAP kann
 - **Catch2** für Unit-Tests und Benchmarks mit Referenzaufnahmen
 - **pluginval** (Strictness 10) und der Steinberg-`validator` für die Plugin-Validierung
@@ -94,42 +96,78 @@ Formate: VST3 (primär), CLAP, später AU, dazu ein Standalone-Target zum Debugg
 
 ---
 
-## Projektstruktur (geplant)
-
-Die tatsächliche Struktur entsteht in Meilenstein 0 aus dem pamplejuce-Template und kann davon abweichen.
+## Projektstruktur
 
 ```
 VocalSynth/
-├── CMakeLists.txt
-├── JUCE/                    # Submodule (JUCE 9)
-├── modules/                 # clap-juce-extensions u. a.
-├── source/
-│   ├── PluginProcessor.*    # Audio-Thread, MIDI-Out
-│   ├── PluginEditor.*       # UI (Tuner, Trigger-Pads, Vokal-XY, Capture)
-│   ├── dsp/                 # Pitch (YIN/MPM), Onset, LPC/MFCC, kNN
-│   ├── midi/                # Gate, Scale-Lock, Akkorde, Bend, CC
-│   ├── capture/             # Recorder, Clean-Nachanalyse, Drag & Drop
-│   └── engine/              # interner Sampler/Synth
-├── tests/                   # Catch2-Tests + Audio-Fixtures
-├── docs/
-│   ├── RESEARCH.md
-│   └── PLAN.md
-└── .github/workflows/       # Build, Tests, pluginval
+├── CMakeLists.txt             # Wurzel: C++23, JUCE, CLAP, core, Plugins, Tests
+├── cmake/VocalSynthPlugin.cmake # Zwei Produkte aus einem Code: FX und Instrument
+├── JUCE/                      # Submodule, gepinnt auf 9.0.4
+├── modules/clap-juce-extensions/ # Submodule (CLAP-Format), gepinnt auf einen JUCE-9-fähigen Commit
+├── core/                      # VocalSynthCore: DSP in reinem C++, ohne JUCE (headless testbar)
+├── plugin/                    # Processor, Editor, Parameter, createPluginFilter
+├── tests/                     # Catch2: core/ (DSP) und plugin/ (Processor ohne Host)
+├── docs/                      # RESEARCH.md, PLAN.md, M1-DESIGN.md, FL-ROUTING.md
+└── .github/workflows/         # Build, Tests, pluginval, VST3- und CLAP-Validator
 ```
+
+Geplant sind außerdem `tools/` (Auswertung) und `resources/` (Samples, Presets), siehe [docs/PLAN.md](docs/PLAN.md#24-verzeichnisstruktur-geplant).
+
+---
+
+## Einfach installieren (Windows)
+
+1. Im [Actions-Tab](https://github.com/Tr3nben/VocalSynth/actions) den neuesten grünen Lauf öffnen und unten bei „Artifacts“ die Datei **`VocalSynth-<Version>-Windows-<Commit>.zip`** herunterladen (dafür bei GitHub angemeldet sein).
+2. ZIP entpacken und **`Install-VocalSynth.bat`** doppelklicken. Das Skript kopiert beide Plugins in je einen eigenen Ordner `VocalSynth`:
+   - `C:\Program Files\Common Files\VST3\VocalSynth\` (oder in deinen eigenen VST3-Ordner, das Skript fragt danach)
+   - `C:\Program Files\Common Files\CLAP\VocalSynth\`
+3. In FL Studio: *Options → Manage plugins → Find installed plugins*.
+4. Für den Routing-Test weiter mit [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
+
+Details stehen in der `LIESMICH.txt` im Paket. Die Plugins sind noch nicht signiert; meldet Windows „Der Computer wurde durch Windows geschützt“, über „Weitere Informationen → Trotzdem ausführen“ starten.
 
 ---
 
 ## Build
 
-*Folgt mit Meilenstein 0.*
+Aus einem Code entstehen zwei Plugins:
 
-Voraussichtliche Voraussetzungen:
-- CMake ≥ 3.25
-- C++23-fähiger Compiler (unter Windows Visual Studio)
-- Git (mit Submodules)
-- FL Studio 2026 zum Testen, unter Windows mit ASIO-Treiber
-- pluginval zur Validierung
-- Ein Mikrofon, laut Erfahrungen mit Dubler 2 bevorzugt ein dynamisches, und Kopfhörer gegen Übersprechen
+| Produkt | Typ | Formate |
+|---|---|---|
+| **VocalSynth FX** | Effekt für den Mixer-Insert (Mikro rein, MIDI raus) | VST3, CLAP, Standalone, AU (macOS) |
+| **VocalSynth Instrument** | Instrument mit Sidechain-Eingang | VST3, CLAP, AU (macOS) |
+
+Welches davon in FL Studio der Hauptweg wird, entscheidet der Routing-Test in Meilenstein 1.
+
+**Voraussetzungen**
+- CMake ≥ 3.25 und Ninja (oder ein anderer CMake-Generator)
+- C++23-Compiler: Visual Studio 2022 oder neuer (Windows), Xcode/Clang (macOS), GCC ≥ 13 oder Clang ≥ 17 (Linux)
+- Git mit Submodules
+- Linux zusätzlich: die JUCE-Abhängigkeiten, siehe [JUCE/docs/Linux Dependencies.md](JUCE/docs/Linux%20Dependencies.md) bzw. der Schritt „Install Linux dependencies“ in [.github/workflows/build_and_test.yml](.github/workflows/build_and_test.yml)
+
+**Bauen und testen**
+
+```bash
+git clone --recurse-submodules https://github.com/Tr3nben/VocalSynth.git
+cd VocalSynth
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target VocalSynthAll VocalSynthCoreTests VocalSynthPluginTests
+ctest --test-dir build --output-on-failure
+```
+
+Unter Windows die Befehle in der „Developer PowerShell for VS“ ausführen (damit der MSVC-Compiler gefunden wird). Ohne Ninja geht auch `cmake -B build` mit dem Visual-Studio-Generator; dann `--config Release` an Build und `ctest` anhängen.
+
+Die fertigen Plugins liegen danach unter `build/VocalSynthFX_artefacts/Release/` bzw. `build/VocalSynthInstrument_artefacts/Release/` (Unterordner `VST3`, `CLAP`, `Standalone`). Zum Testen in FL Studio die `.vst3`-Ordner nach `C:\Program Files\Common Files\VST3` kopieren und im Plugin-Manager „Find installed plugins“ ausführen.
+
+**Validierung** (läuft auch in der CI auf Windows, macOS und Linux)
+- [pluginval](https://github.com/Tracktion/pluginval) auf Strenge 10 für beide VST3s
+- Steinberg-`validator` aus dem VST3-SDK
+- [clap-validator](https://github.com/free-audio/clap-validator) für beide CLAPs
+- `auval` für die AU-Versionen (macOS)
+
+Fertige Builds jedes Commits gibt es als Artefakte im [Actions-Tab](https://github.com/Tr3nben/VocalSynth/actions). Sie sind noch **unsigniert**; Windows zeigt deshalb ggf. eine SmartScreen-Warnung.
+
+Zum Testen braucht es außerdem FL Studio 2026 (unter Windows mit ASIO-Treiber), ein Mikrofon (laut Erfahrungen mit Dubler 2 bevorzugt ein dynamisches) und Kopfhörer gegen Übersprechen.
 
 ---
 
@@ -150,11 +188,12 @@ Im Ordner [`.claude/skills/`](.claude/skills) liegen Skills für die Entwicklung
 
 - [docs/RESEARCH.md](docs/RESEARCH.md): Marktanalyse, MIDI-Routing in FL Studio, DSP-/ML-Verfahren, Tech-Stack, Risiken
 - [docs/PLAN.md](docs/PLAN.md): Roadmap und Meilensteine
+- [docs/FL-ROUTING.md](docs/FL-ROUTING.md): Testanleitung für FL Studio (T1–T7) mit Ergebnistabelle
+- [docs/M1-DESIGN.md](docs/M1-DESIGN.md): technisches Design des M1-Testbuilds (englisch)
 
 ---
 
 ## Lizenz
 
-**Noch nicht festgelegt.**
-
-Wichtig für die Entscheidung: JUCE ist dual lizenziert, unter **AGPLv3** oder der kommerziellen JUCE-EULA. Wer JUCE kostenlos nutzt, muss das gesamte Plugin unter AGPLv3 veröffentlichen, und wer Binaries verteilt, muss den Quellcode bereitstellen. Eine permissive Lizenz wie MIT ginge mit JUCE nur, wenn eine kommerzielle JUCE-Lizenz erworben wird (oder mit einem anderen Framework wie iPlug2 oder DPF).
+- **JUCE:** wird unter der **kostenlosen JUCE-Lizenz (Starter)** genutzt, nicht unter AGPLv3. Laut [docs/RESEARCH.md](docs/RESEARCH.md) gilt sie bis 20.000 USD Jahresumsatz; maßgeblich ist die [JUCE-9-EULA](https://juce.com/legal/juce-9-licence/). Die Lizenz ist an den JUCE-Account gebunden, am Code und am Build ändert sich dadurch nichts. Wer VocalSynth selbst aus dem Quellcode baut und verteilt, braucht dafür eine eigene JUCE-Lizenz (oder nutzt JUCE unter AGPLv3).
+- **Eigener Code von VocalSynth:** Lizenz noch nicht festgelegt. Durch die JUCE-Lizenz ist das Projekt nicht mehr an AGPLv3 gebunden.

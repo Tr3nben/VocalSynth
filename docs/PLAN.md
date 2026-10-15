@@ -32,7 +32,7 @@ Annahme für alle Zeitangaben: **ein Solo-Hobby-Entwickler mit ca. 8–10 Stunde
   - Plugin-MIDI-Out
   - interne Engine
   - Capture/Drag & Drop, optional virtueller MIDI-Port
-- **Open Source** mit CI und pluginval. Lizenz voraussichtlich AGPLv3, die Entscheidung ist noch offen (siehe Abschnitt 6).
+- **Öffentlicher Quellcode** mit CI und pluginval. JUCE läuft unter der kostenlosen JUCE-Lizenz (Starter); die Lizenz des eigenen Codes ist noch offen (siehe Abschnitt 6).
 
 ### 1.2 Später (nach 1.0)
 
@@ -152,10 +152,10 @@ Eine Festlegung aus RESEARCH 5.2 gilt durchgehend: Die **Live-Analyse läuft im 
 
 ```
 VocalSynth/
-├─ CMakeLists.txt            # pamplejuce-basiert, C++23, CMake ≥ 3.25
+├─ CMakeLists.txt            # C++23, CMake ≥ 3.25 (nach dem Vorbild von pamplejuce)
 ├─ cmake/                    # Hilfsfunktionen, Versionierung
 ├─ JUCE/                     # Submodule, gepinnt auf Tag 9.0.4
-├─ modules/clap-juce-extensions/
+├─ modules/clap-juce-extensions/ # Submodule, gepinnt auf einen Commit nach 0.26.0 (JUCE-9-Support gibt es erst auf main)
 ├─ core/                     # VocalSynthCore (ohne GUI/Host)
 │  ├─ include/vocalsynth/    # Framer.h, PitchDetector.h, NoteSegmenter.h, ...
 │  └─ src/
@@ -196,18 +196,22 @@ Gesamtdauer bis 1.0 (Windows): **ca. 7–10 Monate** bei 8–10 h/Woche.
 
 Ziel: ein leeres, aber valides Plugin, das auf allen drei CI-Plattformen baut und pluginval besteht.
 
-- [ ] Repo aus pamplejuce aufsetzen. JUCE 9.0.4 als Submodule pinnen, clap-juce-extensions einbinden.
-- [ ] Targets „VocalSynth FX“ und „VocalSynth Instrument“ anlegen, dazu Standalone. Formate VST3 + CLAP, AU nur im macOS-Build.
-- [ ] 4-Zeichen-Codes festlegen (Manufacturer mit mindestens einem Großbuchstaben) und als „nie ändern“ dokumentieren.
-- [ ] `core/` als eigene statische Bibliothek mit Catch2-Testprojekt und einem Dummy-Test anlegen.
-- [ ] CI-Pipeline:
-  - [ ] Linux, Windows und macOS bauen
-  - [ ] Unit-Tests ausführen
-  - [ ] pluginval laufen lassen (zuerst Level 5 mit `--skip-gui-tests`, Ziel Level 10)
-  - [ ] Steinberg-`validator` laufen lassen
-- [ ] Signing-Schritte nur ausführen, wenn Secrets gesetzt sind. So bleibt die CI für Forks grün.
-- [ ] Lizenz entscheiden (Abschnitt 6), dann `LICENSE` und `CONTRIBUTING.md` mit Lizenzhinweis anlegen.
+- [x] Repo nach dem Vorbild von pamplejuce aufsetzen (eigenes schlankes CMake). JUCE 9.0.4 als Submodule pinnen, clap-juce-extensions einbinden (gepinnt auf einen Commit nach 0.26.0, weil erst `main` JUCE 9 unterstützt).
+- [x] Targets „VocalSynth FX“ (VST3, CLAP, Standalone) und „VocalSynth Instrument“ (VST3, CLAP) anlegen, AU nur im macOS-Build.
+- [x] 4-Zeichen-Codes festlegen und als „nie ändern“ dokumentieren (`cmake/VocalSynthPlugin.cmake`): Manufacturer `Tr3n`, FX `VsFx`, Instrument `VsIn`, Bundle-IDs `com.tr3nben.vocalsynth.fx` / `.instrument`.
+- [x] `core/` als eigene statische Bibliothek mit Catch2-Testprojekt anlegen (erste echte Funktionen: Frequenz ↔ MIDI-Note, Cent-Abstand).
+- [x] CI-Pipeline:
+  - [x] Linux, Windows und macOS bauen
+  - [x] Unit-Tests ausführen (Core + Processor über Blockgrößen {1, 7, 64, 480, 512, 4096} und 44,1/48/96 kHz)
+  - [x] pluginval laufen lassen, direkt auf Level 10 inklusive GUI-Tests
+  - [x] Steinberg-`validator` laufen lassen
+  - [x] Zusätzlich: `clap-validator` für beide CLAPs (seit M1 ohne Ausnahmen) und `auval` auf macOS
+- [ ] Signing-Schritte nur ausführen, wenn Secrets gesetzt sind. So bleibt die CI für Forks grün. *(verschoben nach M8, Releases bis dahin unsigniert)*
+- [x] JUCE-Lizenz entscheiden: kostenlose JUCE-Lizenz (Starter) statt AGPLv3 (Entscheidung vom 2026-10-14).
+- [ ] Lizenz für den eigenen Code festlegen, dann `LICENSE` und `CONTRIBUTING.md` anlegen.
+- [x] Fertiges Windows-Paket aus der CI: ZIP mit `Install-VocalSynth.bat`, installiert nach `<VST3-Ordner>\VocalSynth\` und `<CLAP-Ordner>\VocalSynth\`.
 - [x] Projekt-Skill (`juce-audio-plugin-dev/SKILL.md`) an JUCE 9 / C++23 / CMake ≥ 3.25 angleichen.
+- [ ] Manuell: beide Plugins in FL Studio 2026 laden (CI-Artefakt „VocalSynth-Windows-…“) und prüfen, dass sie ohne Absturz laufen.
 
 **Lieferung:** CI-Artefakte (`.vst3`, `.clap`, Standalone).
 **Abnahme:** CI auf drei Plattformen grün. pluginval besteht Level ≥ 5 mit FX und Instrument. Das Plugin lädt in FL 2026 ohne Absturz.
@@ -216,17 +220,25 @@ Ziel: ein leeres, aber valides Plugin, das auf allen drei CI-Plattformen baut un
 
 Ziel: klären, auf welchem Weg MIDI zuverlässig von VocalSynth zum Klangerzeuger kommt. Erst danach wird der primäre Ausgabeweg festgelegt.
 
-- [ ] Testmodus im Plugin bauen (`tools/vs-spike` bzw. ein Parameter „Testmuster“):
-  - [ ] Notenfolge, Pitchbend-Sweep und CC-Sweep
-  - [ ] Pegelanzeige für ankommendes Audio, wichtig für T3
-  - [ ] Histogramm der Host-Blockgrößen über Atomics, angezeigt im UI
-- [ ] T1–T7 nach RESEARCH 2.5 in FL 2026 (Windows, ASIO, 128–256 Samples) durchführen. Pro Test notieren, ob Note, Pitchbend und CC ankommen, mit Screenshot des Wrapper-Setups.
+- [x] Testmodus im Plugin bauen (als Parameter „Test Pattern“ statt eines eigenen `tools/vs-spike`; Design in `docs/M1-DESIGN.md`, Testbuild Version 0.1.0):
+  - [x] Notenfolge, Pitchbend-Sweep und CC-Sweep (Parameter für MIDI-Kanal, Tempo und CC-Nummer; Modus „All“ im Wechsel)
+  - [x] Pegelanzeige für ankommendes Audio, wichtig für T3 (dazu Anzeige der Eingangskanäle)
+  - [x] Histogramm der Host-Blockgrößen über Atomics, angezeigt im UI
+  - [x] Zähler der gesendeten MIDI-Nachrichten im UI („nicht gesendet“ vs. „nicht geroutet“) und Anzeige des geladenen Formats (VST3/CLAP, für T5)
+  - [x] Monitor-Ton im Plugin für T6 und virtueller MIDI-Port (Parameter „Virtual MIDI Out“) für T7
+  - [x] Test-`.mid` und Test-`.wav` zum Herausziehen per Drag & Drop
+  - [x] Keine hängenden Noten bei Musterwechsel, Bypass und Neustart der Verarbeitung (Unit-Tests über Blockgrößen {1, 7, 64, 480, 512, 4096})
+- [x] Testanleitung `docs/FL-ROUTING.md` mit Klickwegen für T1–T7, Zusatzchecks und Ergebnistabelle zum Ausfüllen.
+- [x] T1 in FL Studio 2026 durchgeführt (2026-10-15): Noten, Pitchbend und CC kommen über den MIDI-Port an. T6 (Monitor-Ton) funktioniert ebenfalls. Plugin-MIDI lässt sich nicht direkt in die Piano Roll aufnehmen.
+- [ ] Optional: T2–T5 und T7 (nach dem Erfolg von T1 nicht mehr entscheidend).
 - [ ] Zusatzchecks, die Capture und DSP absichern:
   - [ ] Drag & Drop einer Test-`.mid` in ein Pattern und einer `.wav` in die Playlist
   - [ ] Blockgrößen mit und ohne „Use fixed size buffers“
   - [ ] gemeldete Latenz 0 verschiebt nichts
 - [ ] T7: virtueller Port über Windows MIDI Services (Windows 11 24H2/25H2) testen. Prüfen, ob FL ihn als Input sieht und aufnimmt, und was bei mehreren Plugin-Instanzen passiert.
-- [ ] Ergebnisse in `docs/FL-ROUTING.md` festhalten: FL-Version, Build, Datum, Ergebnistabelle, Schritt-für-Schritt-Rezept.
+- [x] Ergebnisse in `docs/FL-ROUTING.md`, Abschnitt 6, festgehalten.
+
+**Entscheidung (2026-10-15): T1 o.k. → primärer Weg ist VocalSynth FX auf dem Mikro-Insert mit MIDI-Port-Routing.** Die Instrument-Variante bleibt erhalten, ist aber sekundär. Weil FL Plugin-MIDI nicht aufnimmt, bleibt die eigene Aufnahme mit Drag & Drop (M3) wichtig.
 
 **Entscheidungsregel:**
 
@@ -453,7 +465,7 @@ Ziel: Singen erzeugt in FL saubere Noten mit Bend.
 
 | Frage | Optionen | Empfehlung |
 |---|---|---|
-| **Lizenz** | AGPLv3 (JUCE kostenlos) oder kommerzielle JUCE-9-Lizenz (Starter kostenlos bis 20.000 USD, Indie, Pro) | **AGPLv3.** Passt zu Open Source, keine Kosten. Falls später ein Dual-Licensing denkbar ist, vor externen Beiträgen eine CLA einführen, sonst ist der Wechsel versperrt. |
+| **Lizenz** | AGPLv3 (JUCE kostenlos) oder kommerzielle JUCE-9-Lizenz (Starter kostenlos bis 20.000 USD, Indie, Pro) | **Entschieden (2026-10-14): JUCE über die kostenlose Starter-Lizenz.** Offen bleibt die Lizenz des eigenen Codes (z. B. MIT oder proprietär). Vor externen Beiträgen klären, ob eine CLA nötig ist. |
 | **FX- vs. Instrument-Target als Standard** | FX im Mic-Insert oder Instrument mit Sidechain | **Erst nach M1 entscheiden.** Bis dahin beide bauen. |
 | **CLAP-Priorität** | gleichrangig mit VST3 oder nur Zusatzformat | **Ab M0 mitbauen (kostet wenig), aber VST3 bleibt primär.** CLAP rückt nur auf, wenn T5 in FL besser abschneidet. |
 | **macOS-Zeitpunkt** | parallel oder nach dem Windows-Release | **Nach 1.0 (Windows).** CI baut macOS schon ab M0, damit nichts verrottet. Apple-Account (99 USD/Jahr) erst mit dem macOS-Release. |
@@ -466,7 +478,7 @@ Ziel: Singen erzeugt in FL saubere Noten mit Bend.
 
 ## 7. Nächste konkrete Schritte
 
-1. Lizenz entscheiden (Empfehlung: AGPLv3), dann `LICENSE` anlegen.
+1. Lizenz für den eigenen Code festlegen (JUCE läuft unter der kostenlosen Starter-Lizenz), dann `LICENSE` anlegen.
 2. pamplejuce als Vorlage übernehmen. JUCE auf Tag 9.0.4 pinnen. CMake-Targets „VocalSynth FX“ und „VocalSynth Instrument“ (VST3 + CLAP + Standalone) anlegen. Plugin-Codes festlegen.
 3. CI auf Linux, Windows und macOS grün bekommen: Build, Dummy-Unit-Test, pluginval Level 5, Steinberg-`validator`, Signing nur bei gesetzten Secrets.
 4. Testmuster-Modus (Noten, Pitchbend-Sweep, CC-Sweep, Blockgrößen-Histogramm, Sidechain-Pegel) für den M1-Spike bauen.
