@@ -229,13 +229,16 @@ Ziel: klären, auf welchem Weg MIDI zuverlässig von VocalSynth zum Klangerzeuge
   - [x] Test-`.mid` und Test-`.wav` zum Herausziehen per Drag & Drop
   - [x] Keine hängenden Noten bei Musterwechsel, Bypass und Neustart der Verarbeitung (Unit-Tests über Blockgrößen {1, 7, 64, 480, 512, 4096})
 - [x] Testanleitung `docs/FL-ROUTING.md` mit Klickwegen für T1–T7, Zusatzchecks und Ergebnistabelle zum Ausfüllen.
-- [ ] T1–T7 nach RESEARCH 2.5 in FL 2026 (Windows, ASIO, 128–256 Samples) durchführen. Pro Test notieren, ob Note, Pitchbend und CC ankommen, mit Screenshot des Wrapper-Setups.
+- [x] T1 in FL Studio 2026 durchgeführt (2026-10-15): Noten, Pitchbend und CC kommen über den MIDI-Port an. T6 (Monitor-Ton) funktioniert ebenfalls. Plugin-MIDI lässt sich nicht direkt in die Piano Roll aufnehmen.
+- [ ] Optional: T2–T5 und T7 (nach dem Erfolg von T1 nicht mehr entscheidend).
 - [ ] Zusatzchecks, die Capture und DSP absichern:
   - [ ] Drag & Drop einer Test-`.mid` in ein Pattern und einer `.wav` in die Playlist
   - [ ] Blockgrößen mit und ohne „Use fixed size buffers“
   - [ ] gemeldete Latenz 0 verschiebt nichts
 - [ ] T7: virtueller Port über Windows MIDI Services (Windows 11 24H2/25H2) testen. Prüfen, ob FL ihn als Input sieht und aufnimmt, und was bei mehreren Plugin-Instanzen passiert.
-- [ ] Ergebnisse in `docs/FL-ROUTING.md` festhalten: FL-Version, Build, Datum, Ergebnistabelle, Schritt-für-Schritt-Rezept.
+- [x] Ergebnisse in `docs/FL-ROUTING.md`, Abschnitt 6, festgehalten.
+
+**Entscheidung (2026-10-15): T1 o.k. → primärer Weg ist VocalSynth FX auf dem Mikro-Insert mit MIDI-Port-Routing.** Die Instrument-Variante bleibt erhalten, ist aber sekundär. Weil FL Plugin-MIDI nicht aufnimmt, bleibt die eigene Aufnahme mit Drag & Drop (M3) wichtig.
 
 **Entscheidungsregel:**
 

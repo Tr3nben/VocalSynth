@@ -251,12 +251,12 @@ Hängt ein Ton: notieren, bei welchem Schritt. Beenden kannst du ihn, indem du d
 
 | | |
 |---|---|
-| Datum | |
+| Datum | 2026-10-15 |
 | FL-Studio-Version (*Help → About*) | |
-| VocalSynth-Version und Commit (aus dem ZIP-Namen) | 0.1.0 / |
+| VocalSynth-Version und Commit (aus dem ZIP-Namen) | 0.1.0 / 00608dd |
 | Windows-Version (`winver`) | |
 | Audio-Interface, ASIO-Puffer, Samplerate | |
-| Empfänger-Synth(s) mit Version | |
+| Empfänger-Synth(s) mit Version | VST3-Synth (Vital o. ä.) |
 
 **Routing-Tests**
 
@@ -264,17 +264,25 @@ Eintragen: **ja** / **nein** / **teils** (z. B. „nur manchmal“, „verzöger
 
 | Test | Note | Pitchbend | CC | Bemerkung |
 |---|---|---|---|---|
-| T1 – FX im Mixer, Port 5 → VST3-Synth | | | | |
+| T1 – FX im Mixer, Port 5 → VST3-Synth | ja | ja | ja | Alles kommt an. Primärer Weg (siehe Abschnitt 7). |
 | T2 – FX → nativer Synth über Patcher | | | | |
 | T3 – Instrument mit Sidechain (Audio-in: ja/nein) | | | | |
 | T4 – alles in Patcher auf dem Mikro-Insert | | | | |
 | T5 – CLAP, Aufbau T1 | | | | |
 | T5 – CLAP, Aufbau T3 | | | | |
 | T5 – CLAP, Aufbau T4 | | | | |
-| T6 – interner Monitor-Ton (FX und Instrument) | | | – | |
+| T6 – interner Monitor-Ton (FX und Instrument) | ja | ja | – | CC hat beim Sinuston erwartungsgemäß keine hörbare Wirkung. |
 | T7 – virtueller Port, live gespielt | | | | |
 | T7 – virtueller Port, in Piano Roll aufgenommen | | | | |
 | T7 – zweite Instanz („VocalSynth FX 2“) | | | | |
+
+**Aufnahme**
+
+| Check | Ergebnis | Bemerkung |
+|---|---|---|
+| Plugin-MIDI aus T1 direkt in die Piano Roll des Synths aufnehmen | nein | Wie in RESEARCH 2.2 erwartet: FL nimmt Plugin-MIDI nicht auf. Die eigene Aufnahme mit Drag & Drop (M3) bleibt nötig. |
+
+T2–T5 und T7 wurden nicht getestet; sie sind nach dem Erfolg von T1 optional.
 
 **Zusatzchecks**
 

@@ -5,7 +5,8 @@
 VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Hauptplattform ist Windows, macOS folgt später. Das Plugin macht aus einem Mikrofonsignal in Echtzeit MIDI: gesungene Töne werden zu Noten, Beatbox-Laute zu Drum-Triggern, Lautstärke und Vokale zu Controller-Daten. Vom Funktionsumfang her orientiert es sich an Vochlea Dubler 2.
 
 > **Status: Meilenstein 1 – Testbuild für den FL-Studio-Routing-Test (Version 0.1.0).**
-> Das Plugin analysiert noch keine Stimme. Es erzeugt selbst festes Test-MIDI (Tonleiter, Pitchbend-Sweep, CC-Sweep) und kann es mit einem eingebauten Sinuston hörbar machen. Dazu kommen ein optionaler virtueller MIDI-Port, Test-Clips (`.mid`/`.wav`) zum Herausziehen per Drag & Drop, eine Pegelanzeige und eine Anzeige der Blockgrößen, die FL schickt. Damit wird in FL Studio 2026 geprüft, welcher MIDI-Weg funktioniert (Tests T1–T7). Anleitung und Ergebnistabelle: [docs/FL-ROUTING.md](docs/FL-ROUTING.md). Die Ergebnisse stehen noch aus.
+> Das Plugin analysiert noch keine Stimme. Es erzeugt selbst festes Test-MIDI (Tonleiter, Pitchbend-Sweep, CC-Sweep) und kann es mit einem eingebauten Sinuston hörbar machen. Dazu kommen ein optionaler virtueller MIDI-Port, Test-Clips (`.mid`/`.wav`) zum Herausziehen per Drag & Drop, eine Pegelanzeige und eine Anzeige der Blockgrößen, die FL schickt. Damit wird in FL Studio 2026 geprüft, welcher MIDI-Weg funktioniert (Tests T1–T7). Anleitung und Ergebnistabelle: [docs/FL-ROUTING.md](docs/FL-ROUTING.md).
+> **Ergebnis (2026-10-15):** VocalSynth FX auf dem Mikro-Insert schickt Noten, Pitchbend und CC über einen MIDI-Port an jeden VST3-Synth. Das ist der Hauptweg. Als Nächstes kommt Meilenstein 2: echte Tonhöhenerkennung aus der Stimme.
 > Grundlage sind die technische Recherche ([docs/RESEARCH.md](docs/RESEARCH.md)) und der Plan ([docs/PLAN.md](docs/PLAN.md)). Die Features unten beschreiben das Ziel, nicht den aktuellen Stand.
 
 ---
