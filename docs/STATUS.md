@@ -58,3 +58,6 @@ cargo install --locked --git https://github.com/free-audio/clap-validator --tag 
 Linux-Pakete für JUCE: siehe Schritt „Install Linux dependencies“ in `.github/workflows/build_and_test.yml`.
 Lokaler Build: `cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`.
 CI-Artefakte lassen sich aus dem Container nicht herunterladen (Proxy blockiert den Blob-Speicher).
+CI: Bei Push/PR laufen nur Linux und Windows. macOS (AU, auval) nur bei manuellem Start
+(Actions → Build & Test → Run workflow). Grund: Im Oktober 2026 waren die Gratis-Minuten des privaten Repos aufgebraucht
+(macOS zählt 10-fach), danach wurde das Repo öffentlich gemacht.

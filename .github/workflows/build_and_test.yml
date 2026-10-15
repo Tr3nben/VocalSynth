@@ -1,7 +1,13 @@
 name: Build & Test
 
 on:
+  # Manual run (Actions tab -> Build & Test -> Run workflow); only this one includes macOS
   workflow_dispatch:
+    inputs:
+      macos:
+        description: 'Also build and validate on macOS (AU, auval)'
+        type: boolean
+        default: true
   # Documentation-only changes don't need a full build
   push:
     paths-ignore: ['**.md', 'docs/**', '.claude/**']
@@ -33,21 +39,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Linux + Windows on every push/PR. macOS runners are slow and expensive, so macOS only runs
+      # on a manual run. pluginval and the GUI tests need a display on Linux (xvfb-run).
       matrix:
-        include:
-          - name: Linux
-            os: ubuntu-24.04
-            pluginval: ./pluginval
-            # pluginval and the GUI tests need a display
-            run-prefix: xvfb-run -a
-          - name: Windows
-            os: windows-latest
-            pluginval: ./pluginval.exe
-            run-prefix: ""
-          - name: macOS
-            os: macos-latest
-            pluginval: pluginval.app/Contents/MacOS/pluginval
-            run-prefix: ""
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.macos
+          && '[{"name":"Linux","os":"ubuntu-24.04","pluginval":"./pluginval","run-prefix":"xvfb-run -a"},{"name":"Windows","os":"windows-latest","pluginval":"./pluginval.exe","run-prefix":""},{"name":"macOS","os":"macos-latest","pluginval":"pluginval.app/Contents/MacOS/pluginval","run-prefix":""}]'
+          || '[{"name":"Linux","os":"ubuntu-24.04","pluginval":"./pluginval","run-prefix":"xvfb-run -a"},{"name":"Windows","os":"windows-latest","pluginval":"./pluginval.exe","run-prefix":""}]') }}
 
     steps:
       - name: Checkout
