@@ -9,7 +9,7 @@ on:
   # Remove before merging to master.
   push:
     branches: [m2.1-polish]
-    paths: ['.github/workflows/corpus-eval.yml', 'tools/corpus/**', 'core/**', 'tools/vs-eval/**']
+    paths: ['.github/workflows/corpus-eval.yml', 'tools/corpus/**', 'tests/tools/**', 'core/**', 'tools/vs-eval/**']
   workflow_dispatch:
     inputs:
       datasets:

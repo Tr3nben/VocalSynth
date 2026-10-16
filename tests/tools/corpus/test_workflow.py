@@ -19,7 +19,10 @@ def load():
 def test_manual_trigger_only():
     wf = load()
     triggers = wf[True]  # YAML 1.1 reads the key "on" as True
-    assert list(triggers) == ["workflow_dispatch"]
+    # Besides the manual trigger, only a temporary push trigger for the v0.2.1 tuning branch is allowed
+    assert set(triggers) <= {"workflow_dispatch", "push"} and "workflow_dispatch" in triggers
+    if "push" in triggers:
+        assert triggers["push"]["branches"] == ["m2.1-polish"]
     assert set(triggers["workflow_dispatch"]["inputs"]) >= {"datasets", "sweep", "gates", "stickiness"}
 
 
