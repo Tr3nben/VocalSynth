@@ -1540,7 +1540,7 @@ TEST_CASE ("NoteSegmenter provisional note: while settling only a clear error is
     VoiceSettings s;
     s.legato = legato;
     s.minNoteLengthMs = 250.0f; // corrections ignore minNoteLength and T_min
-    REQUIRE (NoteSegmenter::provisionalSettleMarginSemitones == 0.0);
+    REQUIRE (NoteSegmenter::provisionalSettleMarginSemitones < 0.05); // 64.55 after settling corrects
 
     SegmenterRig rig (s); // h = 0.2 at 50 %: a normal change needs |p - q| >= 0.7
     rig.segmenter.setOnsetTiming (rig.hop, SegmenterRig::provisionalTimeoutHops * static_cast<int64_t> (rig.hop),

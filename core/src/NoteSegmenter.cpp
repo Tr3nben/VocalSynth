@@ -188,7 +188,9 @@ bool NoteSegmenter::processProvisionalFrame (const PitchFrame& frame, bool stron
         // part (a rising scoop read as the semitone below). So while settling only a clear error of the
         // fast frames (another note or octave: the candidate wins by 2 h) is corrected at once, and the
         // note stays provisional; the first strong frame after that moves it to its nearest note
-        // (margin provisionalSettleMarginSemitones) and ends the provisional state. With 2 h there, a
+        // (margin provisionalSettleMarginSemitones, 2 cents: a pitch midway between two allowed notes
+        // reads 54.002 or 53.998 by detector noise, which must not flip the note) and ends the provisional
+        // state. With 2 h there, a
         // mid-scoop reading kept a wrong-semitone start for T_min + minNoteLength (v0.2.1 review,
         // vocadito_1: note F1 0.264 -> 0.225; now 0.278).
         const auto settling = age < provisionalSettleSamples;

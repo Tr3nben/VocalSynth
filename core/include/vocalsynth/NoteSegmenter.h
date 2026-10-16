@@ -78,7 +78,8 @@ struct StickinessParams
       (change with the legato/retrigger order) and is a normal note from then on; otherwise the frame
       is processed as by a normal note (bend, change timer) and the note stays provisional;
     - the first strong frame after that confirms the note: if its candidate wins by
-      min (provisionalSettleMarginSemitones, 2 h) (0: the nearest note, a tie keeps q), the note is
+      min (provisionalSettleMarginSemitones, 2 h) (2 cents: the nearest note; a near-tie within the
+      detector noise keeps q), the note is
       corrected at once; either way it is a normal note from then on. A scoop into the note that
       takes longer than about one window is still read mid-scoop here and then changes by the normal
       path (T_min, minNoteLength), as in v0.2.0;
@@ -123,7 +124,7 @@ public:
     /** A provisional note starts only if p +- this quantises to the same note as p (not near a boundary). */
     static constexpr double fastNoteMarginSemitones = 0.15;
     /** Correction margin of the first strong frame after the settle time (see class comment). */
-    static constexpr double provisionalSettleMarginSemitones = 0.1;
+    static constexpr double provisionalSettleMarginSemitones = 0.02;
     static constexpr int maxEventsPerOnsetFrame = 2;       ///< bend + note-on
 
     // Thresholds of other modules that are defined relative to these (kept in sync at compile time)

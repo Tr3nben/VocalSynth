@@ -813,8 +813,9 @@ in Tenor) holds the voice, whatever pitch is sung. A C4 in Tenor waited as long 
   holds audio from before the start (the onset, the start of a scoop) and lags behind the fast frames: a
   strong frame then changes the note at once only if its candidate wins by 2 h (the fast frames read
   another note or octave; no T_min / minNoteLength), otherwise the note stays provisional. The first strong
-  frame after the settle time moves it to its **nearest** note (`provisionalSettleMarginSemitones = 0`, a tie
-  keeps it) and ends the provisional state. Review finding (vocadito_1): with 2 h at the first strong frame,
+  frame after the settle time moves it to its **nearest** note (`provisionalSettleMarginSemitones = 0.02`: a
+  near-tie within the detector noise keeps it, e.g. F# sung in G mixolydian, read 54.002 after a start on F; with
+  0 that flipped to G after 19 ms, with 0.05 and 0.1 vocadito_1 F1 fell to 0.266 and 0.254) and ends the provisional state. Review finding (vocadito_1): with 2 h at the first strong frame,
   a mid-scoop reading kept a wrong-semitone start for T_min + minNoteLength (note F1 MPM 0.264 in v0.2.0 ->
   0.225); a small margin already during the settle time corrected towards the stale scoop start (57 -> 56
   for 60 ms) and flip-flopped (notes of 2-6 ms). Now: MPM 114 notes / 24 matched / F1 0.278, YIN 112 / 26 /

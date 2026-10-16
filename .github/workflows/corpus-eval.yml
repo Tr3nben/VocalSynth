@@ -5,6 +5,11 @@
 name: Corpus evaluation
 
 on:
+  # Temporary while v0.2.1 is tuned on its branch (a manual run needs the file on master first).
+  # Remove before merging to master.
+  push:
+    branches: [m2.1-polish]
+    paths: ['.github/workflows/corpus-eval.yml', 'tools/corpus/**', 'core/**', 'tools/vs-eval/**']
   workflow_dispatch:
     inputs:
       datasets:
@@ -51,11 +56,11 @@ jobs:
     timeout-minutes: 60
     env:
       # Workflow inputs reach the scripts only through the environment (no expression expansion in scripts)
-      IN_DATASETS: ${{ inputs.datasets }}
-      IN_GATES: ${{ inputs.gates }}
-      IN_STICKINESS: ${{ inputs.stickiness }}
-      IN_MIN_NOTE: ${{ inputs.min_note }}
-      IN_LIMIT: ${{ inputs.limit }}
+      IN_DATASETS: ${{ inputs.datasets || 'vocadito,dcs,vocalset' }}
+      IN_GATES: ${{ inputs.gates || '-45,-40,-35' }}
+      IN_STICKINESS: ${{ inputs.stickiness || '30,50,70' }}
+      IN_MIN_NOTE: ${{ inputs.min_note || '60' }}
+      IN_LIMIT: ${{ inputs.limit || '0' }}
     steps:
       - name: Check out (no submodules, vs-eval needs only core/ and tools/)
         uses: actions/checkout@v4
@@ -102,9 +107,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/corpus/raw
-          key: corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-${{ github.run_id }}
+          key: corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets || 'vocadito,dcs,vocalset' }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-${{ github.run_id }}
           restore-keys: |
-            corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-
+            corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets || 'vocadito,dcs,vocalset' }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-
 
       - name: Free disk space for whole-archive downloads
         run: |
@@ -158,7 +163,7 @@ jobs:
             --json "$RESULTS/eval.json" --markdown "$RESULTS/eval.md" "$EVAL"
 
       - name: Parameter sweep
-        if: inputs.sweep
+        if: github.event_name == 'push' || inputs.sweep
         run: |
           build-eval/vs-eval/vs-eval --summary-only --algorithm both --jobs "$(nproc)" \
             --gate "$IN_GATES" --stickiness "$IN_STICKINESS" --min-note "$IN_MIN_NOTE" \
