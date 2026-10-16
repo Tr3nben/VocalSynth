@@ -24,6 +24,7 @@ struct VoiceAnalysisSnapshot
     float centsOffset = 0.0f;           ///< cents from nearestNote, -50..+50 (0 when unvoiced)
     int nearestNote = -1;               ///< nearest chromatic MIDI note to frequencyHz (tuner), -1 if unvoiced
     int activeNote = -1;                ///< MIDI note now sounding (incl. octave shift), -1 if none
+    int quantisedNote = -1;             ///< activeNote without the octave shift (same publish), -1 if none
     float confidence = 0.0f;            ///< 0..1, cleaned confidence of the newest frame
     float rmsDb = PitchFrame::silenceDb; ///< input level (conditioned, analysis rate) for the meter / gate line
     bool voiced = false;                ///< voicing decision of the NoteSegmenter for the newest frame
@@ -50,6 +51,7 @@ public:
         centsOffset.store (s.centsOffset, std::memory_order_relaxed);
         nearestNote.store (s.nearestNote, std::memory_order_relaxed);
         activeNote.store (s.activeNote, std::memory_order_relaxed);
+        quantisedNote.store (s.quantisedNote, std::memory_order_relaxed);
         confidence.store (s.confidence, std::memory_order_relaxed);
         rmsDb.store (s.rmsDb, std::memory_order_relaxed);
         voiced.store (s.voiced, std::memory_order_relaxed);
@@ -90,6 +92,7 @@ private:
         s.centsOffset = centsOffset.load (std::memory_order_relaxed);
         s.nearestNote = nearestNote.load (std::memory_order_relaxed);
         s.activeNote = activeNote.load (std::memory_order_relaxed);
+        s.quantisedNote = quantisedNote.load (std::memory_order_relaxed);
         s.confidence = confidence.load (std::memory_order_relaxed);
         s.rmsDb = rmsDb.load (std::memory_order_relaxed);
         s.voiced = voiced.load (std::memory_order_relaxed);
@@ -102,6 +105,7 @@ private:
     std::atomic<float> centsOffset { 0.0f };
     std::atomic<int> nearestNote { -1 };
     std::atomic<int> activeNote { -1 };
+    std::atomic<int> quantisedNote { -1 };
     std::atomic<float> confidence { 0.0f };
     std::atomic<float> rmsDb { PitchFrame::silenceDb };
     std::atomic<bool> voiced { false };
@@ -177,7 +181,8 @@ public:
     static constexpr int fastHopDivisor = 2;
 
     /** A provisional note that the full window has not confirmed (strong frame) after
-        windowSamples + provisionalTimeoutHops hops ends (false start) unless that frame is weak voiced. */
+        windowSamples + provisionalTimeoutHops hops ends (false start) unless that frame is weak voiced
+        or a strong frame came before. Settle time (NoteSegmenter::setOnsetTiming): windowSamples. */
     static constexpr int provisionalTimeoutHops = 3;
 
     /** Fast-path frames (of getFastHopSamples()) in the provisional latency model: frame-clock
@@ -198,7 +203,7 @@ public:
         1000 * ((numTaps - 1) / 2 + (D - 1)) / sampleRate + 1000 * InputConditioner::groupDelaySeconds (sampleRate, f)
         + 1000 * (FastOnsetDetector::requiredSamplesFor (fa, f0Min, f0Max, ceil (fa / f) + 1) + fastLatencyBudgetHops * fastHop) / fa
         with f = max (f0Hz, f0Min). The provisional path needs about two periods of the tone, so the
-        latency falls with the pitch: 48 kHz Tenor 23.2 ms at A2 (f0 min), 12.6 ms at B3. */
+        latency falls with the pitch: 48 kHz Tenor 23.2 ms at A2 (f0 min), 12.4 ms at B3. */
     static double computeFastOnsetLatencyMs (double sampleRate, VoiceRange range, double f0Hz = 0.0) noexcept;
 
     /** Model of the confirmed (full-window) path, the v0.2.0 formula (docs/M2-DESIGN.md 3.11):

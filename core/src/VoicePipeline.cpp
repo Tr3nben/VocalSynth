@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace vocalsynth
 {
@@ -113,7 +114,8 @@ void VoicePipeline::applySettings (const VoiceSettings& s) noexcept
     const auto hop = static_cast<int64_t> (framer.getHopSamples());
     framer.setWindowSamples (window);
     segmenter.setSettings (s);
-    segmenter.setOnsetTiming (hop * factor, (static_cast<int64_t> (window) + provisionalTimeoutHops * hop) * factor);
+    segmenter.setOnsetTiming (hop * factor, (static_cast<int64_t> (window) + provisionalTimeoutHops * hop) * factor,
+                              static_cast<int64_t> (window) * factor);
     bend.setMode (s.bendMode, s.bendRange);
 }
 
@@ -185,10 +187,15 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
         }
 
         // Provisional onsets: only while no note is on (after the full frame of this sample, if any).
-        // Below the gate a frame cannot start a note: no search (same result for the segmenter).
+        // Below the gate a frame cannot start a note, and while the fast path is blocked the segmenter
+        // reads only the level: no search then (same result for the segmenter).
         if (fastDue && segmenter.getActiveNote() < 0)
-            segmenter.processOnsetFrame (fastDetector.analyse (framer.getWindow(), range.f0MinHz, range.f0MaxHz, s.gateThresholdDb),
+        {
+            const auto minRmsDb = segmenter.isFastPathBlocked() ? std::numeric_limits<float>::infinity()
+                                                                : s.gateThresholdDb;
+            segmenter.processOnsetFrame (fastDetector.analyse (framer.getWindow(), range.f0MinHz, range.f0MaxHz, minRmsDb),
                                          hopSample, i, bend, out);
+        }
     }
 
     samplePosition += numSamples;
@@ -239,6 +246,7 @@ void VoicePipeline::publishSnapshot() noexcept
     s.rmsDb = lastFrame.rmsDb;
     s.voiced = segmenter.isFrameVoiced();
     s.activeNote = segmenter.getActiveNote();
+    s.quantisedNote = segmenter.getQuantisedNote();
     s.latencyMs = static_cast<float> (getAlgorithmicLatencyMs());
     s.frameCounter = frameCounter;
 

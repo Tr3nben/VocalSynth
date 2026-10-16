@@ -873,19 +873,18 @@ void VocalSynthEditor::updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot, 
     const auto voiceSettings = vsProcessor.getVoiceSettings();
     const bool voiceSource = vsProcessor.getSource() == params::Source::voice;
 
-    // Tuner: the sent note in the sung octave (the Octave shift is shown by "Sounding note")
+    // Tuner: the sent note in the sung octave (the Octave shift is shown by "Sounding note"). Taken
+    // from the same publish as activeNote: with the live Octave parameter, an Octave change flashed
+    // the name one octave off until the next publish (up to ~2 blocks at a 2048 buffer).
     TunerDisplayModel::Input input;
     input.active = voiceSource;
     input.frequencyHz = snapshot.frequencyHz;
     input.nearestNote = snapshot.nearestNote;
     input.confidence = snapshot.confidence;
     input.voiced = snapshot.voiced;
-
-    if (snapshot.activeNote >= 0)
-    {
-        const auto sung = snapshot.activeNote - 12 * voiceSettings.octaveShift;
-        input.sungNote = sung >= 0 && sung <= 127 ? sung : -1;
-    }
+    input.sungNote = snapshot.activeNote >= 0 && snapshot.quantisedNote >= 0 && snapshot.quantisedNote <= 127
+                         ? snapshot.quantisedNote
+                         : -1;
 
     tuner.setState (tunerModel.update (input, elapsedMs), voiceSource);
 
@@ -995,11 +994,13 @@ void VocalSynthEditor::timerCallback()
     const auto elapsedMs = lastTickMs > 0.0 ? nowMs - lastTickMs : 1000.0 / refreshHz;
     lastTickMs = nowMs;
 
+    // Pixel key of the meter as last drawn, taken before the peak and the snapshot values move
+    const auto oldMeter = voiceMeterKey();
+
     const auto peak = vsProcessor.takeInputPeak();
     displayedLevel = juce::jmax (peak, displayedLevel * meterDecayPerTick);
 
     // Label::setText only repaints when the text actually changes
-    const auto oldMeter = voiceMeterKey();
     updateStatusTexts();
     updateVoiceTexts (vsProcessor.getVoiceSnapshot(), elapsedMs);
 
@@ -1013,7 +1014,10 @@ void VocalSynthEditor::timerCallback()
     if (currentPage == Page::voice)
     {
         if (voiceMeterKey() != oldMeter)
+        {
+            ++voiceMeterRepaints;
             repaint (voiceMeterBounds.expanded (4, 4));
+        }
 
         return;
     }

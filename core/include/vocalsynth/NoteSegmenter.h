@@ -64,21 +64,33 @@ struct StickinessParams
     full-window frames do. While idle and armed, fastOnsetConfirmFrames consecutive fast frames with
     confidence >= fastConfidenceOn, rmsDb >= gate and pitches within fastMaxSpreadCents of each other
     start a PROVISIONAL note at the last of them (q = quantize (p, -1), velocity from the max rmsDb of
-    those frames, same event order as a note start). Armed = the fast path saw a frame that was not
+    those frames, same event order as a note start), unless that last pitch lies within
+    fastNoteMarginSemitones of a boundary between two allowed notes (then the run continues). Armed = the fast path saw a frame that was not
     fast-strong since the last note start (or reset): after a note (also a failed provisional one) the
     fast path needs a gap in the voice first, so it can never re-trigger in a loop where the full path
     disagrees. While provisional, the full-window frames (processFrame):
     - within provisionalIgnoreSamples of the start are ignored (keeps the event bound, see
       VoicePipeline::maxEventsForSamples);
-    - the first strong frame confirms the note: if its candidate quantize (p, q) wins by 2 h (the usual
-      change condition without T_min and minNoteLength), the note is corrected at once (change with the
-      legato/retrigger order); otherwise the note continues as a normal one, with this frame;
+    - strong frames within provisionalSettleSamples of the start (the full window still holds audio
+      from before the start: the onset, the start of a scoop into the note, so it lags behind the fast
+      frames): if the candidate quantize (p, q) wins by 2 h (the usual change condition without T_min
+      and minNoteLength: the fast frames read another note or octave), the note is corrected at once
+      (change with the legato/retrigger order) and is a normal note from then on; otherwise the frame
+      is processed as by a normal note (bend, change timer) and the note stays provisional;
+    - the first strong frame after that confirms the note: if its candidate wins by
+      min (provisionalSettleMarginSemitones, 2 h) (0: the nearest note, a tie keeps q), the note is
+      corrected at once; either way it is a normal note from then on. A scoop into the note that
+      takes longer than about one window is still read mid-scoop here and then changes by the normal
+      path (T_min, minNoteLength), as in v0.2.0;
     - other frames hold the note (no release counting, no bend updates) until provisionalTimeoutSamples
-      after the start; then the note becomes normal if the frame is weak voiced, else it ends at once
-      (false start; minNoteLength does not apply). After a false start the fast path stays off until
-      a frame below gateThresholdDb - gateHysteresisDb (a real gap): where the full window never
-      agrees (e.g. a tone whose 2 f0 lies above the range and whose 2nd harmonic dominates, which YIN
-      rejects as out of range), alternating fast frames would otherwise re-arm it every timeout.
+      after the start; then the note becomes normal if the frame is weak voiced or a strong frame was
+      seen since the start, else it ends at once (false start; minNoteLength does not apply). After a
+      false start the fast path stays off until a frame below gateThresholdDb or a note start by the
+      full window: where the full window never agrees (e.g. a tone whose 2 f0 lies above the range
+      and whose 2nd harmonic dominates, which YIN rejects as out of range), alternating fast frames
+      would otherwise re-arm it every timeout. (v0.2.1 review: with gateThresholdDb - gateHysteresisDb
+      as the gap, a noise floor just below the gate kept the fast path off for the whole session after
+      one short blip.)
 
     Event order at one sample (binding):
     - note start:            bend.noteStarted, note-on
@@ -108,6 +120,10 @@ public:
     static constexpr float fastConfidenceOn = 0.95f;
     static constexpr int fastOnsetConfirmFrames = 2;
     static constexpr double fastMaxSpreadCents = 20.0;  ///< also absorbs the onset bias (FastOnsetDetector)
+    /** A provisional note starts only if p +- this quantises to the same note as p (not near a boundary). */
+    static constexpr double fastNoteMarginSemitones = 0.15;
+    /** Correction margin of the first strong frame after the settle time (see class comment). */
+    static constexpr double provisionalSettleMarginSemitones = 0.1;
     static constexpr int maxEventsPerOnsetFrame = 2;       ///< bend + note-on
 
     // Thresholds of other modules that are defined relative to these (kept in sync at compile time)
@@ -143,8 +159,9 @@ public:
                        VsEventSink out) noexcept;
 
     /** Provisional-note timing in host samples (VoicePipeline: ignore = 1 hop, timeout = window + a few
-        hops of the current range). Never emits. Values < 0 are treated as 0. */
-    void setOnsetTiming (int64_t provisionalIgnoreSamples, int64_t provisionalTimeoutSamples) noexcept;
+        hops, settle = window of the current range). Never emits. Values < 0 are treated as 0. */
+    void setOnsetTiming (int64_t provisionalIgnoreSamples, int64_t provisionalTimeoutSamples,
+                         int64_t provisionalSettleSamples = 0) noexcept;
 
     /** One FastOnsetDetector frame (only used while idle, see class comment). Same arguments as
         processFrame(). Emits at most maxEventsPerOnsetFrame events. */
@@ -153,6 +170,10 @@ public:
 
     /** True while the active note was started by processOnsetFrame() and not yet confirmed. */
     bool isProvisional() const noexcept { return provisional; }
+
+    /** True while processOnsetFrame() reads only frame.rmsDb (fast path off after a false start, see
+        class comment): the caller may skip the pitch search and pass an RMS-only frame. */
+    bool isFastPathBlocked() const noexcept { return fastBlocked; }
 
     /** Ends the active note (note-off + bend.noteEnded) at sampleOffset and goes idle. Emits nothing if
         no note is active. */
@@ -194,7 +215,7 @@ private:
     ScaleQuantizer quantizer;
 
     // From setSettings()
-    float gateThresholdDb = -45.0f;
+    float gateThresholdDb = -40.0f;  ///< VoiceSettings default
     double hysteresisSemitones = 0.2;
     int64_t minChangeSamples = 0;
     int64_t minNoteSamples = 0;
@@ -220,9 +241,12 @@ private:
     // Provisional onsets
     int64_t provisionalIgnoreSamples = 0;
     int64_t provisionalTimeoutSamples = 0;
+    int64_t provisionalSettleSamples = 0;
+    int64_t provisionalStartSample = 0;  ///< fast onset of the provisional note (corrections keep it)
     bool provisional = false;
+    bool provisionalSeenStrong = false;  ///< a strong full frame came since the provisional start
     bool fastArmed = true;         ///< see class comment
-    bool fastBlocked = false;      ///< after a false start: no fast onsets until a gap below the gate
+    bool fastBlocked = false;      ///< after a false start: no fast onsets until below the gate / a full start
     int fastFrames = 0;            ///< consecutive agreeing fast-strong frames while idle
     double fastLastPitch = 0.0;
     float fastMaxRmsDb = PitchFrame::silenceDb;

@@ -23,6 +23,7 @@ class Dataset:
     citation: str
     zip_name: str | None        # None: resolved via the Zenodo API (largest .zip whose name matches zip_pattern)
     zip_pattern: str = r".*\.zip$"
+    zip_prefer: str | None = None  # with zip_name None: this key if the record has it, else the smallest match
     full_download: bool = False  # small archive: always fetch it whole
     manifest: dict = field(default_factory=dict)
 
@@ -55,6 +56,7 @@ DATASETS = {
         citation="J. Wilkins, P. Seetharaman, A. Wahl, B. Pardo: VocalSet: A Singing Voice Dataset. ISMIR 2018",
         zip_name=None,
         zip_pattern=r"(?i).*vocalset.*\.zip$",
+        zip_prefer="VocalSet1-2.zip",
     ),
 }
 

@@ -1,0 +1,187 @@
+# Evaluates the voice pipeline on real singing from public datasets (docs/CORPUS.md).
+# Manual only: Actions -> "Corpus evaluation" -> Run workflow. Nothing of the datasets is committed or
+# uploaded: the audio stays in the runner (and in the Actions cache of this repository); the artifact holds
+# only the metrics (JSON + Markdown).
+name: Corpus evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      datasets:
+        description: "Datasets (comma list of vocadito, dcs, vocalset)"
+        default: "vocadito,dcs,vocalset"
+        type: string
+      sweep:
+        description: "Run the parameter sweep (gate x stickiness, both algorithms)"
+        default: true
+        type: boolean
+      gates:
+        description: "Sweep: gate thresholds in dB (comma list)"
+        default: "-45,-40,-35"
+        type: string
+      stickiness:
+        description: "Sweep: stickiness in % (comma list)"
+        default: "30,50,70"
+        type: string
+      min_note:
+        description: "Sweep: minimum note length in ms (comma list; one value = no sweep of it)"
+        default: "60"
+        type: string
+      limit:
+        description: "At most N files per dataset (0 = all; for quick runs)"
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corpus-eval
+  cancel-in-progress: false
+
+env:
+  # Bump to force a new download (the key also covers the manifests and the selection code)
+  CORPUS_CACHE_VERSION: "v1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  evaluate:
+    name: vs-eval on public singing datasets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Workflow inputs reach the scripts only through the environment (no expression expansion in scripts)
+      IN_DATASETS: ${{ inputs.datasets }}
+      IN_GATES: ${{ inputs.gates }}
+      IN_STICKINESS: ${{ inputs.stickiness }}
+      IN_MIN_NOTE: ${{ inputs.min_note }}
+      IN_LIMIT: ${{ inputs.limit }}
+    steps:
+      - name: Check out (no submodules, vs-eval needs only core/ and tools/)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/corpus/requirements.txt
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ninja-build
+          python -m pip install -q -r tools/corpus/requirements.txt
+          # Outside the checkout: raw/ (cached, never uploaded), eval/ (converted audio), results/ (artifact)
+          {
+            echo "RAW=$RUNNER_TEMP/corpus/raw"
+            echo "EVAL=$RUNNER_TEMP/corpus/eval"
+            echo "RESULTS=$RUNNER_TEMP/corpus/results"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/corpus/raw" "$RUNNER_TEMP/corpus/eval" "$RUNNER_TEMP/corpus/results"
+          df -h / | tail -1
+
+      - name: Build vs-eval (standalone, JUCE-free)
+        run: |
+          cmake -S tools/vs-eval/standalone -B build-eval -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          cmake --build build-eval --target vs-eval
+          ctest --test-dir build-eval --output-on-failure
+
+      - name: Test the corpus tooling (fake datasets, end to end through vs-eval)
+        run: VS_EVAL="$PWD/build-eval/vs-eval/vs-eval" python -I -m pytest tests/tools/corpus -q -p no:cacheprovider
+
+      # The cache holds raw/ (only the selected files, a few hundred MB). Keys are immutable, so every run
+      # that adds a dataset saves a new entry (run id suffix) and the next run restores the newest one.
+      # The download step always runs: datasets whose files are cached with their md5 are skipped, the
+      # others (e.g. one that failed last time) are fetched.
+      - name: Restore the corpus from the cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/corpus/raw
+          key: corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-${{ github.run_id }}
+          restore-keys: |
+            corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-
+
+      - name: Free disk space for whole-archive downloads
+        run: |
+          # Only needed if Zenodo refuses Range requests: then a whole archive (up to ~6 GB) is
+          # downloaded, read and deleted, one dataset at a time. Runs whenever a requested dataset is
+          # not in raw/ yet (also after a partial cache hit, e.g. one dataset failed last time).
+          missing=""
+          for ds in ${IN_DATASETS//,/ }; do
+            [ -f "$RAW/$ds/SOURCE.json" ] || missing="$missing $ds"
+          done
+          if [ -z "$missing" ]; then
+            echo "All requested datasets are cached: no cleanup"
+            exit 0
+          fi
+          echo "Not cached:$missing"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          df -h / | tail -1
+
+      - name: Download the subset (Zenodo)
+        id: download
+        # A dataset that fails does not stop the run: the others are still evaluated.
+        continue-on-error: true
+        run: |
+          state() { cat "$RAW"/*/SOURCE.json 2>/dev/null | sha256sum | cut -c1-16 || true; }
+          before=$(state)
+          python -I tools/corpus/corpus.py download --raw "$RAW" --datasets "$IN_DATASETS" \
+            --work "$RUNNER_TEMP" --strict || status=$?
+          du -sh "$RAW"/* || true
+          if [ "$(state)" != "$before" ] && ls "$RAW"/*/SOURCE.json > /dev/null 2>&1; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit "${status:-0}"
+
+      - name: Save the corpus to the cache
+        if: always() && steps.download.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/corpus/raw
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Convert to vs-eval inputs (WAV 44.1 kHz + reference f0 + note labels)
+        run: |
+          python -I tools/corpus/corpus.py convert --raw "$RAW" --out "$EVAL" --datasets "$IN_DATASETS" \
+            --rate 44100 --jobs "$(nproc)" --limit "$IN_LIMIT"
+          cp "$EVAL/manifest.json" "$RESULTS/corpus-manifest.json"
+          cp "$EVAL/corpus.md" "$RESULTS/corpus.md"
+
+      - name: Evaluate (default settings, YIN and MPM)
+        run: |
+          build-eval/vs-eval/vs-eval --algorithm both --jobs "$(nproc)" \
+            --json "$RESULTS/eval.json" --markdown "$RESULTS/eval.md" "$EVAL"
+
+      - name: Parameter sweep
+        if: inputs.sweep
+        run: |
+          build-eval/vs-eval/vs-eval --summary-only --algorithm both --jobs "$(nproc)" \
+            --gate "$IN_GATES" --stickiness "$IN_STICKINESS" --min-note "$IN_MIN_NOTE" \
+            --json "$RESULTS/sweep.json" --markdown "$RESULTS/sweep.md" "$EVAL"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "# Corpus evaluation ($(cat VERSION), ${GITHUB_SHA::8})"
+            echo
+            for f in corpus.md eval.md sweep.md; do
+              if [ -f "$RESULTS/$f" ]; then cat "$RESULTS/$f"; echo; fi
+            done
+          } > "$RESULTS/summary.md"
+          cat "$RESULTS/summary.md"
+          cat "$RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the metrics (no audio)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-eval-${{ github.run_number }}
+          path: ${{ runner.temp }}/corpus/results
+          if-no-files-found: warn
+          retention-days: 30

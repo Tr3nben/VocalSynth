@@ -1,4 +1,4 @@
-# M2 design: pitch -> MIDI (v0.2.0)
+# M2 design: pitch -> MIDI (v0.2.0; v0.2.1 changes in section 11)
 
 Status: design + compilable scaffold, revised after the design review (section 9 lists what changed and
 why). All public interfaces in `core/include/vocalsynth/` are final for M2. Bodies are `TODO(A|B|C)` stubs where marked; the pure formulas (tables, latency, stickiness, velocity,
@@ -395,7 +395,7 @@ process. The UI timer (30 Hz) reads it via a processor accessor.
 metrics; the plugin leaves it null. `getFrameCentreDelayInputSamples()` = FIR group delay +
 `D (W - 1) / 2` (implemented) gives the time stamp of a frame's window centre.
 
-### 3.11 Latency budget (onset -> note-on, algorithmic)
+### 3.11 Latency budget (onset -> note-on, algorithmic; v0.2.1: this is the confirmed path, see 11.3)
 
 Worst case for an abrupt voiced onset at input sample t0, all in the formula of
 `computeAlgorithmicLatencyMs()`:
@@ -468,7 +468,7 @@ All `juce::ParameterID {id, 1}`, appended **after** the M1 parameters (M1 IDs, o
 | `key` | choice | C .. B | C |
 | `scale` | choice | Chromatic, Major, Natural Minor, Harmonic Minor, Major Pentatonic, Minor Pentatonic, Blues, Dorian, Mixolydian | Chromatic |
 | `stickiness` | float | 0..100 % | 50 |
-| `gateThreshold` | float | -70..-10 dB | -45 |
+| `gateThreshold` | float | -70..-10 dB | -40 (v0.2.0: -45, see 11.1) |
 | `minNoteLength` | float | 20..250 ms | 60 |
 | `octaveShift` | int | -3..+3 | 0 |
 | `bendMode` | choice | Off, Anchored, True | Off |
@@ -480,7 +480,7 @@ Choice index == core enum value (`static_cast<int>`). `params::Source {voice, te
 Parameters.h (plugin concept). The choice names are `constexpr std::array<const char*, numXxx>` sized by
 the core enum counts (a missing or extra name is a compile error; `static_assert` against nullptr
 entries), and every default is a named constant `static_assert`ed against `VoiceSettings {}`, so plugin
-and core defaults cannot drift. Value texts carry no unit (stickiness "50", gate "-45.0", min note "60",
+and core defaults cannot drift. Value texts carry no unit (stickiness "50", gate "-40.0", min note "60",
 velocity "70"); the unit is the parameter label ("%", "dB", "ms"), as M1's testTempo ("120.0" + "BPM"),
 so hosts that print both do not show "50 % %". `tests/plugin/ParameterTests.cpp` (registered) checks IDs,
 version hints, types, ranges, defaults, choice names, the enum mapping, texts and state save/restore.
@@ -770,3 +770,201 @@ No interface that D or vs-eval use changed.
      values can differ). The plugin test compares against a reference run with `juce::ScopedNoDenormals`.
    - MonitorSynth keeps +-2 semitone bends; the processor rescales bends for it (`monitorBendFor()`), so
      monitor bends beyond +-2 semitones are clamped (MIDI output is unaffected; stated in M2-TESTING.md).
+
+## 11. v0.2.1 changes (core: faster note-on, gate default)
+
+User feedback on v0.2.0 (FL Studio 2026, Tenor, ASIO 2048 samples): note-on feels slow when the MIDI
+goes to an external synth; gate -35..-40 dB works best. The headers are authoritative; this section
+records what changed and why. Public API: only additions (source-compatible for the plugin and vs-eval).
+
+### 11.1 Gate default -45 -> -40 dB
+
+`VoiceSettings {}.gateThresholdDb`, the `sanitise()` fallback and `params::defaultGateThresholdDb`
+(static_assert-tied) are -40 dB; the range stays -70..-10 dB. On the synthetic self-test corpus the gate
+change alone changes nothing (all notes are -12..-22 dBFS; v0.2.0 core at -40 and -45 dB gave identical
+metrics), so all metric changes below come from 11.2.
+
+### 11.2 Provisional ("fast") onsets
+
+Why the v0.2.0 onset was slow: YIN integrates over the oldest half of the window and MPM normalises over
+the whole window, so both become confident only when most of the window (2 periods of **f0 min**, 18.4 ms
+in Tenor) holds the voice, whatever pitch is sung. A C4 in Tenor waited as long as an A2.
+
+- **`FastOnsetDetector`** (PitchDetector.h): newest-anchored normalised cross-correlation on the same
+  Framer window: `n(tau) = <a, b> / (|a| |b|)` with `a` = the newest `Wi(tau) = max(floor, tau)` samples
+  and `b` the same span `tau` earlier (floor = half a period of f0 min, >= 16 samples). A tone of period T
+  is seen once the newest ~2 T samples hold it, i.e. the latency now follows the **sung** pitch. Less than
+  one period of integration was tried and rejected: ramp-like waveforms (saw) gave confident wrong periods.
+  Cosine instead of NSDF normalisation (level ramps pulled the NSDF peak to shorter lags), zero-phase
+  [1 2 1]/4 pre-smoothing (narrow peaks at non-integer periods lost against 2 T: an octave-low start at
+  653 Hz), MPM key-maximum selection, edge rule, range tolerance and a 6 dB energy-step check as the full
+  detectors. Below the gate it returns after the RMS (no search). Stateless, deterministic, no allocation.
+- **Pipeline**: while no note is on, the detector runs every `fastHopSamplesFor (fa) = hop / 2` analysis
+  samples (1 ms) on the absolute push counter (block-size invariant like the full frames).
+- **NoteSegmenter** (`processOnsetFrame`): while idle and armed, `fastOnsetConfirmFrames = 2` consecutive
+  fast frames with confidence >= `fastConfidenceOn = 0.95`, RMS >= gate and pitches within
+  `fastMaxSpreadCents = 20` start a **provisional** note (same events and order as a normal start). New in
+  this round: **`fastNoteMarginSemitones = 0.15`**: the starting frame's pitch must quantise to the same note
+  at p +- 0.15 st, else the run continues and the next clear frame starts it (or the full window decides).
+  Without it, a vibrato trough at an onset (alto voice-like item, 63.42 while the note was 64) started a
+  4-60 ms wrong-semitone note before the full window corrected it.
+- **Confirmation** by the full window: ignored for one hop after the start (event bound). Until one
+  window after the start (**settle time**, `setOnsetTiming (..., settle = window)`) the full window still
+  holds audio from before the start (the onset, the start of a scoop) and lags behind the fast frames: a
+  strong frame then changes the note at once only if its candidate wins by 2 h (the fast frames read
+  another note or octave; no T_min / minNoteLength), otherwise the note stays provisional. The first strong
+  frame after the settle time moves it to its **nearest** note (`provisionalSettleMarginSemitones = 0`, a tie
+  keeps it) and ends the provisional state. Review finding (vocadito_1): with 2 h at the first strong frame,
+  a mid-scoop reading kept a wrong-semitone start for T_min + minNoteLength (note F1 MPM 0.264 in v0.2.0 ->
+  0.225); a small margin already during the settle time corrected towards the stale scoop start (57 -> 56
+  for 60 ms) and flip-flopped (notes of 2-6 ms). Now: MPM 114 notes / 24 matched / F1 0.278, YIN 112 / 26 /
+  0.304 (v0.2.0: 100 / 21 / 0.264 and 96 / 22 / 0.284; gate -40, Bass range). A scoop longer than about one
+  window is still read mid-scoop and changes by the normal path, as in v0.2.0. If no strong frame comes
+  within window + 3 hops, the note continues when that frame is weak voiced or a strong frame came before,
+  else it ends (false start) and the fast path stays off until a fast frame below the **gate** or a note
+  start by the full window (review: with gate - hysteresis, a noise floor just below the gate kept it off
+  for the whole session after one short blip: onsets 17.9 instead of 11.9 ms). While it is off, the
+  pipeline skips the fast search (`isFastPathBlocked()`, RMS only; same segmenter result). The fast path
+  re-arms only after a non-strong fast frame, so it cannot loop against a disagreeing full window. Octave decisions therefore stay with the full-window detector + octave guard
+  (where YIN reads a missing-fundamental tone an octave high, the fast note is corrected to YIN's reading,
+  as v0.2.0 would have started it).
+- **Event capacity**: `maxEventsForSamples()` adds `NoteSegmenter::maxEventsPerOnsetFrame = 2` per call
+  (one provisional onset per call at most, see VoicePipeline.h).
+
+Evaluated and **not** taken (gain too small for the risk / cost, numbers from the self-test corpus and the
+model): fast hop 0.5 ms (`fastHopDivisor` 4: -0.5..-0.7 ms mean onset, doubles the fast-path CPU); one
+fast confirmation frame (-0.7..-0.9 ms mean, but a single confident outlier frame could start a note);
+high-pass Q 0.5 (model -0.4 ms Tenor, -1.1 ms Bass at f0 min, mean onset -0.05 ms, but ~3 dB more cut at
+the lowest Bass notes); a shorter decimator FIR (at most -0.2 ms, costs alias rejection). A smaller median
+delay on the confirmed path was not pursued: that path now only matters when the fast path does not fire.
+
+### 11.3 Latency model (`computeAlgorithmicLatencyMs`, shown in the UI)
+
+`computeAlgorithmicLatencyMs (sr, range) = min (computeFastOnsetLatencyMs (sr, range), computeConfirmedLatencyMs (sr, range))`,
+the worst case (tone at f0 min). `computeConfirmedLatencyMs` is the v0.2.0 formula of 3.11 (used when the
+fast path does not fire: weak, noisy or slowly rising onsets). The fast path for a tone at f:
+`front end (FIR + decimation phase + high-pass group delay at f) + requiredSamplesFor (period of f) + 3 fast hops`
+(1 frame-clock quantisation, 1 extra confirmation frame, 1 for the onset bias to settle).
+`computeFastOnsetLatencyMs (sr, range, f0Hz)` gives the per-pitch value (for a pitch-dependent display).
+
+| Range (48 kHz) | shown (worst, f0 min) | v0.2.0 shown | typical pitch | confirmed path |
+|---|---|---|---|---|
+| Bass | 38.05 | 39.05 | 18.81 (D3) | 39.05 |
+| Baritone | 30.58 | 31.58 | 15.89 (F3) | 31.58 |
+| **Tenor** | **23.21** | 24.21 | **12.65** (A#3) | 24.21 |
+| Alto | 17.93 | 18.93 | 10.14 (E4) | 18.93 |
+| Soprano | 14.21 | 15.21 | 8.32 (A#4) | 15.21 |
+| Whistle | 7.62 | 8.62 | 5.45 | 8.62 |
+| Wide | 38.05 | 39.05 | 15.34 (C4) | 39.05 |
+
+44.1 kHz: 0.1-0.2 ms lower (Tenor 23.03), 96 kHz as 48 kHz.
+
+### 11.4 Measured onset -> note-on latency
+
+Sine at -20 dBFS after silence, worst of 44.1/48/96 kHz x 8 onset phases x YIN/MPM
+(`tests/core/VoicePipelineTests.cpp`, limits = measured + ~0.8 ms):
+
+| Range | f0 min v0.2.0 -> v0.2.1 | +1 semitone | typical pitch |
+|---|---|---|---|
+| Bass | 34.44 -> 32.94 | 34.44 -> 31.44 | 32.19 -> **17.19** |
+| Baritone | 28.44 -> 27.44 | 28.19 -> 25.69 | 26.44 -> **15.44** |
+| **Tenor** | 21.94 -> 21.44 | 21.69 -> 19.94 | 20.69 -> **10.69** |
+| Alto | 16.44 -> 16.44 | 16.19 -> 15.69 | 16.69 -> **8.19** |
+| Soprano | 13.44 -> 12.69 | 13.19 -> 11.94 | 13.44 -> **6.69** |
+| Whistle | 7.94 -> 5.94 | 7.94 -> 5.69 | 7.94 -> **3.94** |
+| Wide | 34.44 -> 32.94 | 34.44 -> 31.44 | 31.69 -> **12.94** |
+
+Tenor by pitch (worst, YIN / MPM; v0.2.0 in brackets): A2 21.4 (21.9 / 21.7), C3 18.2 (20.7 / 19.9),
+E3 14.9 (20.7 / 19.7), G3 12.7 (20.9 / 18.4), A3 11.4 (20.7 / 18.2), C4 10.2 (20.2 / 15.9), E4 9.2
+(20.2 / 13.7), A4 8.7 (20.4 / 11.2), C5 8.2 (19.7 / 10.2). YIN and MPM are now equally fast.
+
+**Limit at f0 min.** "Clearly below 15 ms" for every pitch is not reachable safely: a period cannot be
+measured reliably from less than about two periods, and two periods of A2 are 18.2 ms. Below 15 ms in
+Tenor from about E3 upward. For the user the much larger part is the host: an ASIO buffer of 2048
+samples is ~43-46 ms per buffer (FL's MIDI-out routing likely adds about one more); 256 samples would be
+~5-6 ms.
+
+Randomised onset stress test (300 harmonic tones per range, random spectra incl. weak / missing
+fundamental and strong 2nd harmonic, +-25 cents detuning, 0-30 ms attacks, 30 % with vibrato, 50 % with
+noise at 15-35 dB SNR): Tenor mean / p90 / max 21.4 / 24.4 / 31.8 ms (YIN), 15.6 / 21.3 / 26.5 ms (MPM)
+-> 12.5 / 18.1 / 25.5 ms (both). Tones whose first note is wrong (in v0.2.1 all of them octave cases), all ranges:
+YIN 14 -> 4, MPM 22 -> 15; tones with more than one note: YIN 10 -> 18 (the fast note is right and the full
+window later moves to YIN's octave reading, see 11.2), MPM 22 -> 22. Noise-only stress (white, pink,
+burst, high band-limited noise at -45..-5 dBFS): 0 notes before and after; only low-pass noise at 30-230 Hz
+(rumble, quasi-periodic) gives notes, as in v0.2.0 (242 -> 269 notes in 2100 runs).
+
+### 11.5 vs-eval self-test (synthetic corpus, 43 files)
+
+| Metric | v0.2.0 YIN | v0.2.1 YIN | v0.2.0 MPM | v0.2.1 MPM |
+|---|---|---|---|---|
+| Raw pitch accuracy (+-50 cents) | 0.9928 | 0.9928 | 0.9945 | 0.9945 |
+| Octave error rate (raw / processed) | 0 / 0.0003 | 0 / 0.0003 | 0 / 0.0008 | 0 / 0.0008 |
+| Note F1 all | 0.767 | 0.779 | 0.799 | 0.808 |
+| Note F1 after a rest | 0.985 | **0.996** | 0.989 | **0.996** |
+| Note F1 legato | 0.000 | 0.000 | 0.144 | 0.161 |
+| Mean onset latency (matched notes) | 24.5 ms | **15.8 ms** | 20.4 ms | **17.2 ms** |
+| Onset latency after a rest, mean / p95 | 25.0 / 41.9 ms | 15.5 / 30.9 ms | 19.0 / 35.9 ms | 15.4 / 30.9 ms |
+| Notes on noise / breath / silence | 0 | 0 | 0 | 0 |
+
+Same corpus and the same (current) vs-eval for both columns; v0.2.0 = the core of e49ce02. MPM stays the
+default (equal pitch metrics, better F1 overall / legato; onset latency after a rest is now the same).
+
+### 11.6 CPU
+
+Worst / mean 128-sample block in % of the block time (`[.benchmark]`, min of 3 runs per block). While a
+note is on, the fast path does not run (voiced numbers as v0.2.0). Idle with input **above** the gate
+(white noise at -30 dBFS) is the new worst case; below the gate the fast detector stops after the RMS.
+
+| 48 kHz | voiced worst / mean | idle (noise -30 dB) worst / mean |
+|---|---|---|
+| Wide YIN / MPM | 5.0 / 1.7, 6.4 / 1.9 | 6.3 / 4.0, 7.9 / 4.2 |
+| Bass YIN / MPM | 4.9 / 1.7, 9.5 / 2.1 | 7.5 / 4.0, 9.0 / 4.3 |
+| Tenor YIN / MPM | 3.2 / 1.6, 3.5 / 1.6 | 2.9 / 1.7, 3.6 / 1.8 |
+
+44.1 kHz (analysis at 22.05 kHz, longer lags): Wide idle worst 16-20 %, mean 7.6-8.1 % (v0.2.0 idle:
+worst 8.5-8.8 %, mean 3.4 %); Tenor idle worst 5-6 %, mean 2.9-3.1 %. 96 kHz: worst <= 12.5 %. All below
+the 20 % budget at 48 kHz. (Measured with another build running on the 4-core container.)
+
+### 11.7 Tests
+
+New: `[fastonset]` cases for FastOnsetDetector (integration length, steady accuracy +-10 cents in every
+range, noise never reaches 0.95, out-of-range tones, onset after ~2 periods, level steps, front-end
+regressions) and the provisional NoteSegmenter logic (start, rejection, note-boundary margin, confirm /
+correct, false start + gap rule, weak-voiced timeout, re-arming, octave shift, flush / reset); pipeline:
+a tone the full window never confirms gives at most one short note; idle CPU case. Changed on purpose:
+the latency test also checks the per-pitch fast model and the v0.2.1 limits; the model table test checks
+the new values (shown = min (fast, confirmed)); `maxEventsForSamples` + 2; the velocity check uses the
+default gate instead of a literal -45; the hysteresis-confirmation case starts at 64.3 instead of 64.45
+(64.45 is now within the note-boundary margin and starts nothing).
+
+After the review: segmenter cases for the settle time (2 h while settling, nearest note after it, a note
+seen strong is no false start) and for the unblocking rule (noise between gate - 3 dB and the gate, a
+full-window note, RMS-only frames while blocked give the same result); pipeline: scoops of 50-100 cents
+over 15-40 ms into A3 (wrong start <= one window + 2 hops, never towards the scoop start) and a 12/14 ms
+blip over noise just below the gate (later onsets stay on the fast path); the hysteresis section of the
+confirmation case now runs with a settle time (the note stays provisional).
+
+### 11.8 Plugin side (summary; details in the plugin headers)
+
+- Calm tuner (`plugin/TunerDisplayModel.h`): the editor still polls at ~30 Hz, but the shown values are
+  smoothed with time constants independent of the timer rate: note name only after 100 ms of stability
+  (held 250 ms, fades over 200 ms), needle one-pole 120 ms, Hz / cents texts at most 5 changes per
+  second, voiced LED hold 150 ms. MIDI output is unchanged by this.
+- The latency display uses `computeAlgorithmicLatencyMs()` (worst case, 11.3); the host buffer is shown
+  next to it, since at 2048 samples it dominates the total delay. Buffer = the largest host block of the
+  last 1-2 s (`RecentBlockSize`, 1 s windows; the largest, not the most frequent, because FL without
+  "fixed size buffers" splits its buffer and the largest block matches the ASIO buffer). Total =
+  analysis + 2 x buffer (one buffer in, one out); the FL MIDI port is shown separately as about one more
+  buffer (unconfirmed). Above 512 samples the Total line turns amber and a hint suggests 128 / 256.
+- Own DSP load (`DspLoadMeter`, PluginProcessor.h): `processBlock` / `processBlockBypassed` timed with
+  high-resolution ticks; average with a 1 s time constant independent of the block size, peak decaying
+  with 3 s; plain members + relaxed atomics only (no allocation, no locks). Shown on both pages, text
+  updated at most twice per second.
+- Tuner model details: the note name is the sent note in the sung octave (without Octave shift), white
+  while sending, grey when it is only the nearest note; confidence bar rises with 15 ms, falls with
+  250 ms; only changed regions are repainted. After the review: the sung note comes from the snapshot
+  (`VoiceAnalysisSnapshot::quantisedNote`, same publish as `activeNote`; the live Octave parameter flashed
+  the name one octave off after an Octave change); a note change refreshes the Hz / cents texts from the
+  new pitch at once (the lagged smoothed pitch showed "A4, 260 Hz" for 200 ms after A3 -> A4); the Voice
+  page meter compares the pixel key from before the tick's update (a moving peak bar alone did not
+  repaint).

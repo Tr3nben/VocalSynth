@@ -49,8 +49,11 @@ Antwort auf deine Rückmeldung zu 0.2.0 (danke!):
   VocalSynth von Vital (oder einem anderen Synth) in der CPU-Anzeige von FL unterscheiden.
 - **Gate-Standard −40 dB** (vorher −45). Dein Erfahrungswert **−35 … −40 dB** ist damit fast erreicht; alle
   Regler bleiben einstellbar.
-- **Schnellere Notenanfänge** bei klaren Tonanfängen (Analyse-Latenz Tenor ca. 18 statt 24 ms). Den aktuellen
-  Wert zeigt die Anzeige *Analysis*.
+- **Schnellere Notenanfänge** bei klaren Tonanfängen: im Tenor bei mittlerer Tonlage (A4/C5 in FL-Notennamen,
+  220/262 Hz) ca. 10–11 statt ca. 20 ms, ab E4 (165 Hz) unter 15 ms. Am tiefsten Ton der Stimmlage (Tenor A3,
+  110 Hz) bleibt es bei ca. 21 ms, weil die Analyse mindestens zwei Schwingungen braucht. Die Anzeige *Analysis*
+  zeigt diesen ungünstigsten Fall (Tenor 23 ms statt 24 ms). Gleitest du von unten in den Ton (Schleifer), kann
+  kurz (ca. 20 ms im Tenor) der Halbton darunter anklingen, danach kommt die richtige Note.
 
 Kurztest für 0.2.1 (ca. 15 Minuten):
 
@@ -58,6 +61,7 @@ Kurztest für 0.2.1 (ca. 15 Minuten):
 2. ASIO-Puffer wie in [1.1](#11-puffergröße-und-latenz) auf **256** (dann **128**) stellen; die Zeile *Buffer*
    im Plugin muss den neuen Wert zeigen, der orange Hinweis verschwindet.
 3. Tonleiter und einen Ton mit Vibrato singen: Ist das Stimmgerät jetzt angenehm ruhig, aber noch schnell genug?
+   Ein paar Töne bewusst von unten anschleifen: Hörst du am Notenanfang einen Doppelanschlag oder Zwitschern?
 4. Latenz-Gefühl mit dem Synth über den MIDI-Port bei 2048, 256 und 128 Samples vergleichen.
 5. *VocalSynth DSP* (Reiter *Voice* unten oder *Test & Routing*) beim Singen ablesen und mit der CPU-Anzeige
    von FL vergleichen.
@@ -86,18 +90,18 @@ Die Verzögerung zwischen Singen und Synth-Ton setzt sich aus drei Teilen zusamm
 
 | Teil | Wie groß | Was du tun kannst |
 |---|---|---|
-| **Analyse** in VocalSynth | Tenor ca. 18–24 ms, Bass/Wide ca. 29–39 ms (Anzeige *Analysis*) | Passende *Voice Range* wählen (tiefere Lagen brauchen ein längeres Fenster). |
+| **Analyse** in VocalSynth | je nach Tonhöhe: Tenor ca. 10–23 ms, Bass/Wide ca. 13–38 ms (Anzeige *Analysis* = ungünstigster Fall, tiefster Ton) | Passende *Voice Range* wählen (tiefere Lagen brauchen ein längeres Fenster). |
 | **Audio-Puffer** (ASIO) | Puffer ÷ Samplerate, **zweimal**: einmal beim Eingang (Mikrofon), einmal beim Ausgang (Kopfhörer) | **Puffer verkleinern** – das bringt am meisten. |
 | **MIDI-Port von FL** | wenn der Synth das MIDI über den Output/Input Port bekommt: oft **ein weiterer Puffer** **(unbestätigt)** | Puffer verkleinern. (Der Monitor-Ton im Plugin hat diesen Umweg nicht.) |
 
-Beispiele bei 44,1 kHz (Tenor, Analyse ca. 18 ms):
+Beispiele bei 44,1 kHz (Tenor, Analyse wie angezeigt 23 ms; bei mittlerer Tonlage eher 11 ms):
 
 | ASIO-Puffer | ein Puffer | Gesamt ca. (Analyse + 2 Puffer) | über den MIDI-Port ca. |
 |---|---|---|---|
-| **2048** Samples | 46 ms | 111 ms | 157 ms |
-| 512 Samples | 12 ms | 41 ms | 53 ms |
-| **256** Samples | 5,8 ms | 30 ms | 35 ms |
-| **128** Samples | 2,9 ms | 24 ms | 27 ms |
+| **2048** Samples | 46 ms | 116 ms | 162 ms |
+| 512 Samples | 12 ms | 46 ms | 58 ms |
+| **256** Samples | 5,8 ms | 35 ms | 41 ms |
+| **128** Samples | 2,9 ms | 29 ms | 32 ms |
 
 Ab etwa 30–40 ms fühlt sich Singen → Synth „direkt“ an; 100 ms und mehr merkt man deutlich. Deshalb:
 **128 oder 256 Samples** einstellen. Knackst es dann, den nächstgrößeren Wert nehmen (256 → 512).
@@ -269,8 +273,8 @@ Bitte als Liste oder Tabelle (Deutsch ist perfekt):
 
 - **Keine Aufnahme in FL:** FL nimmt Plugin-MIDI nicht in die Piano Roll auf. Capture mit Drag & Drop kommt in M3.
 - **Monophon:** Es wird immer nur eine Note erkannt (eine Stimme). Akkorde gibt es erst mit dem Akkord-Modus (M5).
-- **Latenz:** Die Analyse braucht einen Teil eines Fensters von mindestens zwei Perioden des tiefsten Tons der
-  Stimmlage, daher Tenor ca. 18–24 ms, Bass/Wide ca. 29–39 ms, plus zweimal der ASIO-Puffer (siehe 1.1). Die
+- **Latenz:** Die Analyse braucht mindestens etwa zwei Schwingungen des gesungenen Tons, daher je nach Tonhöhe
+  Tenor ca. 10–23 ms, Bass/Wide ca. 13–38 ms (am tiefsten Ton der Stimmlage am längsten), plus zweimal der ASIO-Puffer (siehe 1.1). Die
   Verzögerung wird FL nicht gemeldet und nicht ausgeglichen. Die Anzeige *Total* ist eine Schätzung: Treiber-
   und Wandler-Latenz deines Interfaces kommen noch dazu.
 - **Feinabstimmung:** Schwellen (Gate-Hysterese, Konfidenz, Oktavschutz) sind bisher nur mit synthetischen Signalen

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace vocalsynth
 {
@@ -43,9 +44,11 @@ void TunerDisplayModel::reset() noexcept
     sinceTextMs = 0.0;
     smoothedPitch = 0.0;
     needleNeedsSnap = true;
+    textNeedsSnap = false;
 }
 
-void TunerDisplayModel::updateNote (const Input& input, bool hasPitch, double elapsedMs, bool& appeared) noexcept
+void TunerDisplayModel::updateNote (const Input& input, bool hasPitch, double elapsedMs, bool& appeared,
+                                    bool& changed) noexcept
 {
     int confirmed = -1;
     bool segmented = false;
@@ -82,6 +85,7 @@ void TunerDisplayModel::updateNote (const Input& input, bool hasPitch, double el
     if (confirmed >= 0)
     {
         appeared = state.note < 0;
+        changed = ! appeared && confirmed != state.note;
         state.note = confirmed;
         state.noteIsSegmented = segmented;
         state.noteAlpha = 1.0f;
@@ -128,10 +132,19 @@ const TunerDisplayModel::State& TunerDisplayModel::update (const Input& input, d
     const bool hasPitch = input.frequencyHz > 0.0f && std::isfinite (input.frequencyHz) && input.nearestNote >= 0;
 
     bool appeared = false;
-    updateNote (input, hasPitch, dt, appeared);
+    bool changed = false;
+    updateNote (input, hasPitch, dt, appeared, changed);
 
     if (appeared)
         needleNeedsSnap = true;
+
+    // A new note: the Hz / cents texts start from the new pitch at once (the needle still glides).
+    // With the lagged smoothed pitch, "A4, 260 Hz" stood for 200 ms after A3 -> A4 (v0.2.1 review).
+    if (changed)
+        textNeedsSnap = true;
+
+    bool refreshText = appeared;
+    std::optional<int> snappedCents; // cents text of a note change (the needle is still gliding)
 
     // Needle and smoothed pitch follow only while there is a pitch; otherwise they hold
     if (state.note >= 0 && hasPitch)
@@ -145,12 +158,21 @@ const TunerDisplayModel::State& TunerDisplayModel::update (const Input& input, d
             state.needleCents = target;
             smoothedPitch = pitch;
             needleNeedsSnap = false;
+            textNeedsSnap = false;
         }
         else
         {
             const auto k = smoothingCoefficient (dt, needleTimeConstantMs);
             state.needleCents += (target - state.needleCents) * k;
             smoothedPitch += (pitch - smoothedPitch) * static_cast<double> (k);
+        }
+
+        if (textNeedsSnap)
+        {
+            smoothedPitch = pitch;
+            snappedCents = static_cast<int> (std::lround (target));
+            textNeedsSnap = false;
+            refreshText = true;
         }
     }
 
@@ -159,12 +181,12 @@ const TunerDisplayModel::State& TunerDisplayModel::update (const Input& input, d
     {
         sinceTextMs += dt;
 
-        if (appeared || state.displayHz <= 0.0f || sinceTextMs >= textIntervalMs)
+        if (refreshText || state.displayHz <= 0.0f || sinceTextMs >= textIntervalMs)
         {
             if (smoothedPitch > 0.0)
             {
                 state.displayHz = static_cast<float> (hzOf (smoothedPitch));
-                state.displayCents = static_cast<int> (std::lround (state.needleCents));
+                state.displayCents = snappedCents.value_or (static_cast<int> (std::lround (state.needleCents)));
                 sinceTextMs = 0.0;
             }
         }

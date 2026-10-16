@@ -88,6 +88,12 @@ public:
     /** Current calm tuner values (for the tests). */
     const TunerDisplayModel::State& getTunerState() const noexcept { return tunerModel.getState(); }
 
+    /** Number of Voice-page meter repaints the timer requested so far (for the tests). */
+    int getVoiceMeterRepaintCount() const noexcept { return voiceMeterRepaints; }
+
+    /** Runs one display update tick now, as the timer does (for the tests). */
+    void runTimerTickForTests() { timerCallback(); }
+
 private:
     /** A labelled box that, when dragged, exports a file and starts an external file drag
         (drop it into an FL pattern or the playlist). */
@@ -272,6 +278,7 @@ private:
     float meterRmsDb = -100.0f;  // analysis RMS (gate input) of the newest snapshot
     float meterGateDb = params::defaultGateThresholdDb; // gateThreshold
     bool meterGateOpen = false;
+    int voiceMeterRepaints = 0;
     BlockSizeHistogram::Snapshot histogram;
 
     TunerDisplayModel tunerModel;

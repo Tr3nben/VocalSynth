@@ -405,6 +405,26 @@ TEST_CASE ("Tuner: Hz and cents texts change at most five times per second", "[e
     CHECK (VocalSynthEditor::formatTunerHz (0.0f) == "- Hz");
 }
 
+TEST_CASE ("Tuner: Hz and cents texts follow a note change at once", "[editor][tuner]")
+{
+    // v0.2.1 review: the Hz text came from the lagged smoothed pitch, so A3 -> A4 read "A4, 260 Hz"
+    // for 200 ms and reached 432 Hz only after 400 ms
+    TunerDisplayModel model;
+    run (model, pitchInput (57.0, 57), 500.0); // A3 (FL: A4), 220 Hz
+    REQUIRE (model.getState().displayHz == Catch::Approx (220.0f).margin (0.5f));
+
+    const auto& s = model.update (pitchInput (69.1, 69), tickMs); // A4 (FL: A5), 10 cents sharp
+    CHECK (s.note == 69);
+    CHECK (s.displayHz == Catch::Approx (hzOfNote (69.1)).epsilon (1.0e-4));
+    CHECK (s.displayCents == 10);
+    CHECK (std::abs (s.needleCents) < 10.0f + 1.0f); // the needle still glides (from 0 towards +10)
+
+    // Within the note the texts are stepped again
+    const auto shownHz = s.displayHz;
+    model.update (pitchInput (69.4, 69), tickMs);
+    CHECK (juce::exactlyEqual (model.getState().displayHz, shownHz));
+}
+
 TEST_CASE ("Tuner: voiced LED attacks at once and holds on release", "[editor][tuner]")
 {
     TunerDisplayModel model;
@@ -517,6 +537,82 @@ TEST_CASE ("DSP load text", "[editor]")
     r.peakProportion = 0.053f;
     r.valid = true;
     CHECK (VocalSynthEditor::formatDspLoad (r) == "VocalSynth DSP: avg 2.1 % / peak 5.3 % of the block time");
+}
+
+TEST_CASE ("Editor tuner: an Octave change does not flash the note one octave off", "[editor][tuner]")
+{
+    VocalSynthProcessor processor (Variant::fx);
+    processor.prepareToPlay (48000.0, 2048);
+    juce::AudioBuffer<float> buffer (2, 2048);
+    juce::MidiBuffer midi;
+    int64_t pos = 0;
+
+    const auto processSung = [&] (int blocks)
+    {
+        for (int b = 0; b < blocks; ++b, pos += 2048)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 2048; ++i)
+                    buffer.setSample (ch, i, 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0
+                                                                      * (double) (pos + i) / 48000.0));
+            midi.clear();
+            processor.processBlock (buffer, midi);
+        }
+    };
+
+    processSung (10); // A3, MIDI 57
+    REQUIRE (processor.getVoiceSnapshot().activeNote == 57);
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+    auto* vsEditor = dynamic_cast<VocalSynthEditor*> (editor.get());
+    REQUIRE (vsEditor != nullptr);
+    vsEditor->runTimerTickForTests();
+    REQUIRE (vsEditor->getTunerState().note == 57);
+
+    // Octave +1: before the next block the snapshot still holds the old note; the tuner keeps A3
+    auto* octave = processor.getParameters().getParameter (params::octaveShift.getParamID());
+    REQUIRE (octave != nullptr);
+    octave->setValueNotifyingHost (octave->convertTo0to1 (1.0f));
+    vsEditor->runTimerTickForTests();
+    CHECK (vsEditor->getTunerState().note == 57);
+
+    processSung (2);
+    REQUIRE (processor.getVoiceSnapshot().activeNote == 69);
+    CHECK (processor.getVoiceSnapshot().quantisedNote == 57);
+    vsEditor->runTimerTickForTests();
+    CHECK (vsEditor->getTunerState().note == 57);
+}
+
+TEST_CASE ("Editor Voice page meter repaints when only the peak bar moves", "[editor]")
+{
+    // v0.2.1 review: the meter key was taken after the peak update, so a moving peak bar alone
+    // (Source = Test Pattern, or a steady RMS) never repainted
+    VocalSynthProcessor processor (Variant::fx);
+    processor.prepareToPlay (48000.0, 512);
+
+    if (auto* source = processor.getParameters().getParameter (params::source.getParamID()))
+        source->setValueNotifyingHost (source->convertTo0to1 ((float) params::Source::testPattern));
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+    auto* vsEditor = dynamic_cast<VocalSynthEditor*> (editor.get());
+    REQUIRE (vsEditor != nullptr);
+    vsEditor->runTimerTickForTests();
+    const auto before = vsEditor->getVoiceMeterRepaintCount();
+
+    juce::AudioBuffer<float> buffer (2, 512);
+    juce::MidiBuffer midi;
+    buffer.clear();
+    buffer.setSample (0, 100, 0.5f); // a peak at -6 dBFS
+    buffer.setSample (1, 100, 0.5f);
+    processor.processBlock (buffer, midi);
+    vsEditor->runTimerTickForTests();
+    CHECK (vsEditor->getVoiceMeterRepaintCount() == before + 1);
+
+    // The peak bar decays over the next ticks: still repainted
+    buffer.clear();
+    processor.processBlock (buffer, midi);
+    vsEditor->runTimerTickForTests();
+    CHECK (vsEditor->getVoiceMeterRepaintCount() == before + 2);
 }
 
 TEST_CASE ("Editor tuner names the note being sent", "[editor][tuner]")

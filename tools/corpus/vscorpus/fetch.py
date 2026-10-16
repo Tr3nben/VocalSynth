@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 
@@ -46,8 +47,6 @@ def zenodo_files(record: int) -> list[dict]:
 def resolve_archive(name: str, manifest: dict) -> dict:
     """{key, size, md5, url} of the dataset's archive; the pinned md5 wins over the API's."""
     ds = DATASETS[name]
-    import re
-
     try:
         files = zenodo_files(ds.record)
     except Exception as e:  # noqa: BLE001 - fall back to the plain download URL
@@ -56,12 +55,20 @@ def resolve_archive(name: str, manifest: dict) -> dict:
 
     pattern = re.compile(ds.zip_pattern)
     candidates = [f for f in files if (ds.zip_name and f["key"] == ds.zip_name) or (not ds.zip_name and pattern.match(f["key"] or ""))]
-    if not candidates and ds.zip_name:
-        candidates = [{"key": ds.zip_name, "size": None, "md5": None, "url": ZENODO_FILE.format(record=ds.record, key=ds.zip_name)}]
+    fallback_key = ds.zip_name or ds.zip_prefer
+    if not candidates and fallback_key and (ds.zip_name or not files):  # try the known file name
+        candidates = [{"key": fallback_key, "size": None, "md5": None, "url": ZENODO_FILE.format(record=ds.record, key=fallback_key)}]
     if not candidates:
         raise RuntimeError(f"{name}: no archive in Zenodo record {ds.record} (files: {[f['key'] for f in files]})")
 
-    archive = max(candidates, key=lambda f: f["size"] or 0)
+    preferred = [f for f in candidates if ds.zip_prefer and f["key"] == ds.zip_prefer]
+    if ds.zip_name:
+        archive = candidates[0]
+    else:
+        # Several archives (VocalSet 1.2: the same recordings in different folder layouts): the preferred
+        # one, else the smallest - the subset is chosen by file name, so any layout works, and a whole
+        # download (no range support) then costs least.
+        archive = preferred[0] if preferred else min(candidates, key=lambda f: f["size"] or float("inf"))
     pinned = manifest.get("zip_md5")
     if pinned and archive["md5"] and pinned != archive["md5"]:
         raise RuntimeError(f"{name}: Zenodo lists md5 {archive['md5']} for {archive['key']}, pinned {pinned}")

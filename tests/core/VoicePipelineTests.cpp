@@ -980,6 +980,148 @@ TEST_CASE ("Pipeline: a tone the full window never confirms gives at most one sh
         CHECK (n.note == nearestMidiNote (462.43));
 }
 
+TEST_CASE ("Pipeline: a scoop into the note gives the target note after one window, no wrong-semitone start that lasts",
+           "[pipeline][fastonset]")
+{
+    // v0.2.1 review (vocadito_1): the fast frames read the start of a scoop, the first strong full frame
+    // still averaged it and did not win by 2 h, so the wrong semitone stayed for T_min + minNoteLength
+    // (>= 60 ms, e.g. 44 then 48 instead of 45). Now the provisional note moves to the nearest note of
+    // the first strong full frame whose window no longer holds audio from before the start: a wrong
+    // start lasts about one window, and it never moves towards the stale start of the scoop (a small
+    // margin before that turned a correct 57 into a 56 held for 60 ms). Scoops longer than about a
+    // window change by the normal path, as in v0.2.0 (not tested here).
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto legato = GENERATE (false, true);
+    const auto [depthCents, scoopMs] = GENERATE (table<double, double> ({ { 50.0, 15.0 }, { 80.0, 15.0 }, { 100.0, 15.0 },
+                                                                         { 50.0, 25.0 }, { 80.0, 25.0 }, { 100.0, 25.0 },
+                                                                         { 50.0, 40.0 }, { 80.0, 40.0 } }));
+    CAPTURE (algorithmName (algorithm), sr, legato, depthCents, scoopMs);
+
+    constexpr double target = 57.0; // A3 (FL: A4), 220 Hz, mid Tenor
+    const auto scoopSeconds = 0.001 * scoopMs;
+    auto tone = test::oscillator (
+        sr, 0.4, 0.3f,
+        [=] (double t) { return midiNoteToFrequency (target - 0.01 * depthCents * std::max (0.0, 1.0 - t / scoopSeconds)); },
+        [] (double phase) { return std::sin (2.0 * std::numbers::pi * phase) + 0.4 * std::sin (4.0 * std::numbers::pi * phase); });
+    applyFades (tone, sr, 0.005);
+    const auto onset = static_cast<int64_t> (test::numSamplesFor (0.1, sr));
+    const auto input = test::concat ({ test::silence (sr, 0.1), tone, test::silence (sr, 0.2) });
+
+    auto s = settingsFor (VoiceRange::tenor, algorithm);
+    s.legato = legato;
+    const auto run = runPipeline (input, sr, s);
+    const auto notes = notesOf (run.events);
+    CHECK (run.contractViolations == 0);
+    CHECK (midiInvariantViolations (run.events) == 0);
+    REQUIRE_FALSE (notes.empty());
+    REQUIRE (notes.size() <= 2);
+    CHECK (notes.back().note == static_cast<int> (target));
+
+    const auto factor = Decimator::factorFor (sr);
+    const auto hopHost = static_cast<int64_t> (factor * Framer::hopSamplesFor (sr / factor));
+    const auto windowHost = static_cast<int64_t> (Framer::windowSamplesFor (sr / factor, voiceRangeInfo (VoiceRange::tenor).f0MinHz))
+                            * factor;
+
+    for (const auto& n : notes)
+    {
+        CAPTURE (n.note, static_cast<double> (n.on - onset) * 1000.0 / sr, static_cast<double> (n.off - n.on) * 1000.0 / sr);
+
+        if (n.note != static_cast<int> (target))
+            CHECK (n.off - n.on <= windowHost + 2 * hopHost); // before: >= minNoteLength (60 ms)
+    }
+
+    // The target note sounds by the end of the scoop plus one window (and two hops)
+    CHECK (notes.back().on - onset <= std::llround (scoopSeconds * sr) + windowHost + 2 * hopHost);
+}
+
+TEST_CASE ("Pipeline: a short blip over a noise floor just below the gate does not switch the fast path off",
+           "[pipeline][fastonset]")
+{
+    // v0.2.1 review: noise between gate - 3 dB and the gate (the usual "gate just above the noise"
+    // setup) never gave a gap of gate - 3 dB; one 12-14 ms blip that the full window never confirmed
+    // (false start) moved every later onset from the fast path (~12 ms) to the full window (~18 ms).
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto blipMs = GENERATE (12.0, 14.0);
+    CAPTURE (algorithmName (algorithm), blipMs);
+    constexpr double sr = 48000.0;
+    const auto s = settingsFor (VoiceRange::tenor, algorithm);
+    const auto gate = static_cast<double> (s.gateThresholdDb);
+
+    const auto noise = scaledToRmsDb (test::whiteNoise (sr, 6.0, 1.0f, 7), gate + 4.3);
+    const auto withTones = [&] (bool blip)
+    {
+        auto x = noise;
+        const auto addTone = [&] (double start, double seconds)
+        {
+            auto tone = scaledToRmsDb (test::harmonicStack (sr, 220.0, seconds, 1, 2, 0.5f, 0.6), -20.0);
+            applyFades (tone, sr, 0.002);
+            const auto from = test::numSamplesFor (start, sr);
+
+            for (std::size_t i = 0; i < tone.size() && from + i < x.size(); ++i)
+                x[from + i] += tone[i];
+        };
+
+        if (blip)
+            addTone (0.5, 0.001 * blipMs);
+
+        for (int k = 0; k < 8; ++k)
+            addTone (1.5 + 0.5 * k, 0.25);
+
+        return x;
+    };
+
+    // Precondition: the analysis level of the noise stays above gate - 3 dB (so v0.2.1 never saw a gap)
+    // and lies mostly below the gate; the noise alone starts no note
+    {
+        const auto run = runPipeline (noise, sr, s, 512, true);
+        CHECK (notesOf (run.events).empty());
+        std::vector<float> levels;
+
+        for (const auto& f : run.frames)
+            if (f.hopSample > static_cast<int64_t> (0.5 * sr))
+                levels.push_back (f.raw.rmsDb);
+
+        REQUIRE_FALSE (levels.empty());
+        std::sort (levels.begin(), levels.end());
+        CAPTURE (levels.front(), levels[levels.size() / 2], levels.back());
+        REQUIRE (static_cast<double> (levels.front()) > gate - static_cast<double> (NoteSegmenter::gateHysteresisDb));
+        REQUIRE (static_cast<double> (levels[levels.size() / 2]) < gate);
+    }
+
+    const auto onsetsOf = [&] (bool blip)
+    {
+        const auto run = runPipeline (withTones (blip), sr, s);
+        CHECK (midiInvariantViolations (run.events) == 0);
+        std::vector<int64_t> latencies;
+
+        for (int k = 0; k < 8; ++k)
+        {
+            const auto onset = static_cast<int64_t> (test::numSamplesFor (1.5 + 0.5 * k, sr));
+
+            for (const auto& n : notesOf (run.events))
+                if (n.on > onset && n.on < onset + static_cast<int64_t> (0.06 * sr))
+                {
+                    latencies.push_back (n.on - onset);
+                    break;
+                }
+        }
+
+        return latencies;
+    };
+
+    const auto clean = onsetsOf (false);
+    const auto afterBlip = onsetsOf (true);
+    REQUIRE (clean.size() == 8);
+    REQUIRE (afterBlip.size() == 8);
+
+    for (std::size_t k = 0; k < clean.size(); ++k)
+    {
+        CAPTURE (k, static_cast<double> (clean[k]) * 1000.0 / sr, static_cast<double> (afterBlip[k]) * 1000.0 / sr);
+        CHECK (afterBlip[k] <= clean[k] + static_cast<int64_t> (0.001 * sr)); // still the fast path
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // Note logic end to end
 
@@ -1275,10 +1417,11 @@ TEST_CASE ("Pipeline latency: abrupt onset -> note-on within the model and the s
     std::map<std::pair<int, int>, double> worstAlg;  // (range, algorithm) -> ms
 
     // v0.2.1 limits in ms (docs/M2-DESIGN.md 11): { any pitch, typical pitch }; v0.2.0 measured
-    // Tenor 21.9 / 20.7, Bass 34.4 / 32.2
+    // Tenor 21.9 / 20.7, Bass 34.4 / 32.2. (At f0 min the first confident fast frames read sharp by up
+    // to ~50 cents; NoteSegmenter::fastNoteMarginSemitones waits for them to settle: Tenor +0.5 ms.)
     const std::map<VoiceRange, std::pair<double, double>> limits {
         { VoiceRange::bass, { 34.0, 18.0 } },       { VoiceRange::baritone, { 28.25, 16.25 } },
-        { VoiceRange::tenor, { 22.0, 11.5 } },     { VoiceRange::alto, { 17.25, 9.0 } },
+        { VoiceRange::tenor, { 22.25, 11.5 } },    { VoiceRange::alto, { 17.25, 9.0 } },
         { VoiceRange::soprano, { 13.5, 7.5 } }, { VoiceRange::whistle, { 6.75, 4.75 } },
         { VoiceRange::wide, { 34.0, 13.75 } },
     };
@@ -1552,6 +1695,7 @@ TEST_CASE ("Pipeline snapshot: tuner values, note, latency and publish rate", "[
     CHECK (s.nearestNote == 58);
     CHECK (std::abs (s.centsOffset - 20.0f) < 5.0f);
     CHECK (s.activeNote == 58);
+    CHECK (s.quantisedNote == 58); // octave shift 0
     CHECK (s.voiced);
     CHECK (s.confidence > 0.9f);
     CHECK (std::abs (s.rmsDb - (20.0f * std::log10 (0.3f / std::sqrt (2.0f)))) < 1.0f);
@@ -1568,9 +1712,18 @@ TEST_CASE ("Pipeline snapshot: tuner values, note, latency and publish rate", "[
     p.reset();
     const auto afterReset = p.getSnapshot();
     CHECK (afterReset.activeNote == -1);
+    CHECK (afterReset.quantisedNote == -1);
     CHECK (afterReset.frequencyHz == 0.0f);
     CHECK_FALSE (afterReset.voiced);
     CHECK (afterReset.frameCounter == s.frameCounter);
+
+    // activeNote and quantisedNote come from the same publish (the tuner shows the sung note)
+    auto shifted = settingsFor (VoiceRange::alto);
+    shifted.octaveShift = 1;
+    PipelineRun shiftedRun;
+    runOn (p, test::sine (sr, f, 0.3, 0.3f), shifted, 512, false, shiftedRun);
+    CHECK (p.getSnapshot().activeNote == 70);
+    CHECK (p.getSnapshot().quantisedNote == 58);
 }
 
 TEST_CASE ("VoiceSnapshotPublisher: concurrent reads are consistent", "[pipeline]")
@@ -1585,6 +1738,7 @@ TEST_CASE ("VoiceSnapshotPublisher: concurrent reads are consistent", "[pipeline
         s.centsOffset = static_cast<float> (k % 100);
         s.nearestNote = static_cast<int> (k % 128);
         s.activeNote = static_cast<int> ((k + 1) % 128);
+        s.quantisedNote = static_cast<int> ((k + 5) % 128);
         s.confidence = static_cast<float> (k % 1000) / 1000.0f;
         s.rmsDb = -static_cast<float> (k % 120);
         s.voiced = (k % 2) == 1;
@@ -1625,6 +1779,7 @@ TEST_CASE ("VoiceSnapshotPublisher: concurrent reads are consistent", "[pipeline
 
         if (! (s.frequencyHz == expected.frequencyHz && s.centsOffset == expected.centsOffset
                && s.nearestNote == expected.nearestNote && s.activeNote == expected.activeNote
+               && s.quantisedNote == expected.quantisedNote
                && s.confidence == expected.confidence && s.rmsDb == expected.rmsDb && s.voiced == expected.voiced
                && s.latencyMs == expected.latencyMs))
             ++inconsistent;

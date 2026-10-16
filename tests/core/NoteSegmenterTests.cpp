@@ -1360,6 +1360,68 @@ TEST_CASE ("NoteSegmenter provisional onset: weak, quiet, single, alternating or
     CHECK (rig.noteOns().size() == 1);
 }
 
+TEST_CASE ("NoteSegmenter provisional onset: no start from a pitch near a note boundary", "[notesegmenter][fastonset]")
+{
+    // The frame that would start the provisional note must quantise to the same note at p +-
+    // fastNoteMarginSemitones (v0.2.1: a vibrato trough at the onset read 45 cents flat and started a
+    // wrong-semitone provisional note). The run goes on: the next clear frame within fastMaxSpreadCents
+    // starts the note at once.
+    REQUIRE (NoteSegmenter::fastNoteMarginSemitones == 0.15);
+
+    struct Case
+    {
+        Scale scale;
+        double pitch;
+        int expected;         ///< -1: no provisional note from pitch
+        double settled = 0.0; ///< for expected == -1: a clear pitch within fastMaxSpreadCents afterwards ...
+        int settledNote = -1; ///< ... and the note it starts
+    };
+
+    // Chromatic boundaries at x.5; C major between C and D at 61.0, between E and F at 64.5
+    for (const auto& c : { Case { Scale::chromatic, 60.36, -1, 60.3, 60 }, Case { Scale::chromatic, 59.64, -1, 59.7, 60 },
+                           Case { Scale::chromatic, 60.34, 60 }, Case { Scale::chromatic, 59.66, 60 },
+                           Case { Scale::major, 61.1, -1, 61.2, 62 }, Case { Scale::major, 61.2, 62 },
+                           Case { Scale::major, 64.4, -1, 64.3, 64 }, Case { Scale::major, 64.3, 64 } })
+    {
+        CAPTURE (static_cast<int> (c.scale), c.pitch);
+        VoiceSettings s;
+        s.scale = c.scale;
+        SegmenterRig rig (s);
+
+        for (int i = 0; i < 8; ++i)
+        {
+            rig.onsetFrame (voicedAt (c.pitch, 0.99f));
+            rig.frame (unvoiced (-20.0f)); // the full window is still filling
+        }
+
+        if (c.expected < 0)
+        {
+            CHECK (rig.events.empty());
+            const auto produced = rig.onsetFrame (voicedAt (c.settled, 0.99f));
+            REQUIRE (produced.size() == 1);
+            CHECK (produced[0].data1 == c.settledNote);
+        }
+        else
+        {
+            const auto ons = rig.noteOns();
+            REQUIRE (ons.size() == 1);
+            CHECK (ons[0].event.data1 == c.expected);
+        }
+
+        CHECK (rig.segmenter.isProvisional());
+    }
+
+    // A boundary pitch far from the settled one restarts the run (fastMaxSpreadCents)
+    SegmenterRig rig;
+    rig.onsetFrame (voicedAt (60.45, 0.99f));
+    rig.frame (unvoiced (-20.0f));
+    rig.onsetFrame (voicedAt (60.45, 0.99f));
+    rig.frame (unvoiced (-20.0f));
+    CHECK (rig.onsetFrame (voicedAt (60.2, 0.99f)).empty());
+    rig.frame (unvoiced (-20.0f));
+    CHECK (rig.onsetFrame (voicedAt (60.2, 0.99f)).size() == 1);
+}
+
 TEST_CASE ("NoteSegmenter provisional note: ignored for one hop, then confirmed or corrected at once by a strong full frame",
            "[notesegmenter][fastonset]")
 {
@@ -1414,17 +1476,20 @@ TEST_CASE ("NoteSegmenter provisional note: ignored for one hop, then confirmed 
         CHECK (rig.noteOffs().empty());
     }
 
-    SECTION ("a candidate inside the stickiness hysteresis keeps the provisional note")
+    SECTION ("while settling, a candidate inside the stickiness hysteresis keeps the provisional note")
     {
         SegmenterRig rig (s); // h = 0.4 at 100 %: a change needs |p - q| >= 0.9
-        rig.onsetFrame (voicedAt (64.45));
+        rig.segmenter.setOnsetTiming (rig.hop, SegmenterRig::provisionalTimeoutHops * static_cast<int64_t> (rig.hop),
+                                      4 * static_cast<int64_t> (rig.hop));
+        // (64.3: a fast pitch within fastNoteMarginSemitones of 64.5 would not start a note at all)
+        rig.onsetFrame (voicedAt (64.3));
         rig.frame (unvoiced (-20.0f));
-        rig.onsetFrame (voicedAt (64.45));
+        rig.onsetFrame (voicedAt (64.3));
         REQUIRE (rig.segmenter.getActiveNote() == 64);
         rig.frame (unvoiced (-20.0f));
         CHECK (rig.frame (voicedAt (64.6)).empty());
         CHECK (rig.segmenter.getActiveNote() == 64);
-        CHECK_FALSE (rig.segmenter.isProvisional());
+        CHECK (rig.segmenter.isProvisional()); // the nearest note decides after the settle time (test below)
     }
 }
 
@@ -1454,11 +1519,168 @@ TEST_CASE ("NoteSegmenter provisional note: a false start ends at the timeout, t
     rig.hops (voicedAt (64.0), unvoiced (-20.0f), 5);
     CHECK (rig.noteOns().size() == 1);
 
-    // A gap below the gate's lower edge unblocks it
+    // A gap below the gate unblocks it
     rig.hops (unvoiced (-120.0f), unvoiced (-120.0f), 1);
     rig.hops (voicedAt (62.0), unvoiced (-20.0f), 2);
     CHECK (rig.noteOns().size() == 2);
     CHECK (rig.segmenter.getActiveNote() == 62);
+    rig.flush();
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter provisional note: while settling only a clear error is corrected, then the nearest note",
+           "[notesegmenter][fastonset]")
+{
+    // v0.2.1 review (scoops): until the full window no longer holds audio from before the start
+    // (settle time), it lags behind the fast frames; the first strong frame after that decides with
+    // the nearest note instead of 2 h (a mid-scoop 64.6 used to keep the 64 for T_min + minNoteLength).
+    constexpr int settleHops = 4;
+    const auto legato = GENERATE (false, true);
+    CAPTURE (legato);
+    VoiceSettings s;
+    s.legato = legato;
+    s.minNoteLengthMs = 250.0f; // corrections ignore minNoteLength and T_min
+    REQUIRE (NoteSegmenter::provisionalSettleMarginSemitones == 0.0);
+
+    SegmenterRig rig (s); // h = 0.2 at 50 %: a normal change needs |p - q| >= 0.7
+    rig.segmenter.setOnsetTiming (rig.hop, SegmenterRig::provisionalTimeoutHops * static_cast<int64_t> (rig.hop),
+                                  settleHops * static_cast<int64_t> (rig.hop));
+    rig.onsetFrame (voicedAt (64.3));
+    rig.frame (unvoiced (-20.0f));
+    rig.onsetFrame (voicedAt (64.3));
+    REQUIRE (rig.segmenter.getActiveNote() == 64);
+    REQUIRE (rig.segmenter.isProvisional());
+    const auto start = rig.events.back().position;
+
+    SECTION ("a mid-scoop reading while settling keeps the note provisional; the first frame after settling corrects it")
+    {
+        // Frames at start + hop / 2 + k hop: settling while k hop + hop / 2 < settleHops hop
+        rig.frames (voicedAt (64.6), settleHops);
+        CHECK (rig.noteOns().size() == 1);
+        CHECK (rig.segmenter.isProvisional());
+        REQUIRE (rig.now() - start >= settleHops * rig.hop);
+
+        const auto position = rig.now();
+        const auto produced = rig.frame (voicedAt (64.55));
+        REQUIRE (produced.size() == 2);
+        CHECK (produced[legato ? 0 : 1].type == VsEventType::noteOn);
+        CHECK (produced[legato ? 0 : 1].data1 == 65);
+        CHECK (rig.events.back().position == position);
+        CHECK_FALSE (rig.segmenter.isProvisional());
+
+        // A normal note from now on: back to 64 only with 2 h, T_min and minNoteLength
+        rig.framesFor (voicedAt (64.4), 400.0);
+        CHECK (rig.segmenter.getActiveNote() == 65);
+    }
+
+    SECTION ("a clear error while settling is corrected at once")
+    {
+        rig.frame (voicedAt (52.0)); // half a hop after the onset: ignored
+        CHECK (rig.noteOns().size() == 1);
+        const auto produced = rig.frame (voicedAt (52.0));
+        REQUIRE (produced.size() == 2);
+        CHECK (rig.segmenter.getActiveNote() == 52);
+        CHECK_FALSE (rig.segmenter.isProvisional());
+
+        rig.framesFor (voicedAt (52.6), 100.0); // normal note: no nearest-note correction any more
+        CHECK (rig.segmenter.getActiveNote() == 52);
+    }
+
+    SECTION ("the nearest note after settling is the same note: confirmed, nothing sent")
+    {
+        rig.frames (voicedAt (64.6), settleHops);
+        CHECK (rig.frame (voicedAt (64.45)).empty());
+        CHECK_FALSE (rig.segmenter.isProvisional());
+        CHECK (rig.segmenter.getActiveNote() == 64);
+    }
+
+    SECTION ("a note seen strong while settling is not a false start at the timeout")
+    {
+        rig.frames (voicedAt (64.2), 2);
+        rig.frames (unvoiced (-20.0f), SegmenterRig::provisionalTimeoutHops);
+        CHECK_FALSE (rig.segmenter.isProvisional());
+        CHECK_FALSE (rig.segmenter.isFastPathBlocked());
+        CHECK (rig.noteOffs().empty()); // minNoteLength (250 ms) now applies to the release
+        rig.framesFor (unvoiced (-20.0f), 300.0);
+        CHECK (rig.noteOffs().size() == 1);
+    }
+
+    rig.flush();
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter provisional note: after a false start, a frame below the gate or a full-window note unblocks the fast path",
+           "[notesegmenter][fastonset]")
+{
+    // v0.2.1 review: with gate - gateHysteresisDb as the gap, a noise floor just below the gate (the
+    // usual setup) kept the fast path off for the whole session after one short blip.
+    VoiceSettings s;
+    s.minNoteLengthMs = 20.0f;
+    SegmenterRig rig (s);
+    const auto gate = rig.settings.gateThresholdDb;
+
+    const auto falseStart = [&rig]
+    {
+        rig.onsetFrame (voicedAt (64.0));
+        rig.frame (unvoiced (-20.0f));
+        rig.onsetFrame (voicedAt (64.0));
+        rig.hops (voicedAt (64.0), unvoiced (-20.0f), SegmenterRig::provisionalTimeoutHops + 1);
+    };
+
+    falseStart();
+    REQUIRE (rig.noteOffs().size() == 1);
+    CHECK (rig.segmenter.isFastPathBlocked());
+
+    SECTION ("noise between gate - 3 dB and the gate")
+    {
+        rig.hops (voicedAt (64.0, 0.99f, gate + 0.5f), unvoiced (gate - 1.0f), 3); // at or above the gate: still blocked
+        CHECK (rig.segmenter.isFastPathBlocked());
+        rig.hops (unvoiced (gate - 1.0f), unvoiced (gate - 1.0f), 1);
+        CHECK_FALSE (rig.segmenter.isFastPathBlocked());
+        rig.hops (voicedAt (62.0), unvoiced (-20.0f), 2);
+        CHECK (rig.noteOns().size() == 2);
+        CHECK (rig.segmenter.isProvisional());
+    }
+
+    SECTION ("a note started by the full window")
+    {
+        rig.hops (voicedAt (62.0), voicedAt (62.0), 3); // fast frames blocked, the full window starts it
+        REQUIRE (rig.noteOns().size() == 2);
+        CHECK_FALSE (rig.segmenter.isProvisional());
+        CHECK_FALSE (rig.segmenter.isFastPathBlocked());
+        rig.hops (unvoiced (-20.0f), unvoiced (-20.0f), NoteSegmenter::releaseFrames + 15);
+        REQUIRE (rig.noteOffs().size() == 2);
+        rig.hops (voicedAt (60.0), unvoiced (-20.0f), 2);
+        CHECK (rig.noteOns().size() == 3);
+        CHECK (rig.segmenter.isProvisional());
+    }
+
+    SECTION ("while blocked, an RMS-only frame gives the same result as the full fast frame")
+    {
+        // VoicePipeline skips the fast search while isFastPathBlocked() (frame with rmsDb only)
+        for (const auto level : { gate - 4.0f, gate - 1.0f, gate, -20.0f })
+        {
+            CAPTURE (level);
+            SegmenterRig a (s), b (s);
+
+            for (auto* r : { &a, &b })
+            {
+                r->onsetFrame (voicedAt (64.0));
+                r->frame (unvoiced (-20.0f));
+                r->onsetFrame (voicedAt (64.0));
+                r->hops (voicedAt (64.0), unvoiced (-20.0f), SegmenterRig::provisionalTimeoutHops + 1);
+                REQUIRE (r->segmenter.isFastPathBlocked());
+            }
+
+            a.onsetFrame (voicedAt (64.0, 0.99f, level));
+            b.onsetFrame (unvoiced (level));
+            CHECK (a.segmenter.isFastPathBlocked() == b.segmenter.isFastPathBlocked());
+            a.hops (voicedAt (62.0), unvoiced (-20.0f), 2);
+            b.hops (voicedAt (62.0), unvoiced (-20.0f), 2);
+            CHECK (a.events == b.events);
+        }
+    }
+
     rig.flush();
     checkMidiInvariants (rig.events);
 }

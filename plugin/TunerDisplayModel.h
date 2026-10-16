@@ -16,7 +16,9 @@ namespace vocalsynth
       (no jump), holds while the pitch is briefly gone, and starts at its target when a note appears
       after the name had faded out.
     - Hz and cents texts: stepped every textIntervalMs (at most 5 changes per second) from the smoothed
-      pitch / needle; refreshed at once when a note appears.
+      pitch / needle; refreshed at once when a note appears, and when the shown note changes: then the
+      smoothed pitch jumps to the new pitch and the cents text shows its offset from the new note
+      (the needle still glides), so the texts never show the lagged pitch of the previous note.
     - Voiced LED: on at once, off only after the voicing has been gone for ledHoldMs.
     - Confidence bar: fast attack (confidenceAttackMs), slower release (confidenceReleaseMs). */
 class TunerDisplayModel
@@ -67,7 +69,7 @@ public:
     static float smoothingCoefficient (double elapsedMs, double timeConstantMs) noexcept;
 
 private:
-    void updateNote (const Input& input, bool hasPitch, double elapsedMs, bool& appeared) noexcept;
+    void updateNote (const Input& input, bool hasPitch, double elapsedMs, bool& appeared, bool& changed) noexcept;
 
     State state;
     int candidateNote = -1;
@@ -77,6 +79,7 @@ private:
     double sinceTextMs = 0.0;
     double smoothedPitch = 0.0; ///< MIDI note number (fractional) of the smoothed f0, 0 = none yet
     bool needleNeedsSnap = true; ///< the next pitch sets needle and pitch directly (a note appeared)
+    bool textNeedsSnap = false;  ///< the next pitch sets the smoothed pitch and the texts (note changed)
 };
 
 } // namespace vocalsynth
