@@ -1,0 +1,9 @@
+{
+ "dataset": "vocalset",
+ "version": "1.2",
+ "zenodo_record": 1442513,
+ "zip": null,
+ "zip_md5": null,
+ "source": "zip name and md5 are taken from the Zenodo API at download time (not pinned: no third-party checksum list exists); the zip's CRC32 values are always checked",
+ "members": {}
+}

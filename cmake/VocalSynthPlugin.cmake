@@ -28,6 +28,8 @@ target_sources(VocalSynthPluginCode INTERFACE
     ${CMAKE_SOURCE_DIR}/plugin/PluginProcessor.cpp
     ${CMAKE_SOURCE_DIR}/plugin/TestClipExporter.h
     ${CMAKE_SOURCE_DIR}/plugin/TestClipExporter.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/TunerDisplayModel.h
+    ${CMAKE_SOURCE_DIR}/plugin/TunerDisplayModel.cpp
     ${CMAKE_SOURCE_DIR}/plugin/VirtualMidiPort.h
     ${CMAKE_SOURCE_DIR}/plugin/VirtualMidiPort.cpp)
 

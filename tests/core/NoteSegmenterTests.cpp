@@ -13,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -56,10 +57,14 @@ struct SegmenterRig
         : sampleRate (sr), hop (hostHopFor (sr)), blockSize (block)
     {
         segmenter.prepare (sampleRate);
+        segmenter.setOnsetTiming (hop, provisionalTimeoutHops * static_cast<int64_t> (hop));
         bend.prepare (sampleRate, static_cast<double> (hop) / sampleRate);
         apply (s);
         nextFrameSample = hop - 1;
     }
+
+    /** Provisional-note timeout of the rig (the pipeline uses window + 3 hops, ~12 hops in Tenor). */
+    static constexpr int provisionalTimeoutHops = 10;
 
     void apply (const VoiceSettings& s)
     {
@@ -96,6 +101,37 @@ struct SegmenterRig
         }
 
         return produced;
+    }
+
+    /** One FastOnsetDetector frame half a hop before the next full frame (the pipeline's 1 ms grid).
+        Checks the offsets and maxEventsPerOnsetFrame. */
+    std::vector<VsEvent> onsetFrame (const PitchFrame& f)
+    {
+        VsEventBuffer<16> buffer;
+        const auto position = nextFrameSample - hop / 2;
+        segmenter.processOnsetFrame (f, position, offsetOf (position), bend, buffer);
+
+        REQUIRE (buffer.size() <= static_cast<std::size_t> (NoteSegmenter::maxEventsPerOnsetFrame));
+        std::vector<VsEvent> produced;
+
+        for (const auto& e : buffer)
+        {
+            REQUIRE (e.sampleOffset == offsetOf (position));
+            events.push_back ({ position, e });
+            produced.push_back (e);
+        }
+
+        return produced;
+    }
+
+    /** count hops of (fast frame, full frame). */
+    void hops (const PitchFrame& fast, const PitchFrame& full, int count)
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            onsetFrame (fast);
+            frame (full);
+        }
     }
 
     void frames (const PitchFrame& f, int count)
@@ -282,8 +318,8 @@ TEST_CASE ("NoteSegmenter: silence, noise-like and quiet frames never start a no
     rig.frames (unvoiced(), 200);
     rig.frames (unvoiced (-20.0f), 200);                  // loud but aperiodic
     rig.frames (voicedAt (60.0, 0.79f, -20.0f), 200);     // just below confidenceOn
-    rig.frames (voicedAt (60.0, 0.95f, -45.01f), 200);    // just below the gate
-    rig.frames (voicedAt (60.0, 0.70f, -46.0f), 200);     // weak but never strong
+    rig.frames (voicedAt (60.0, 0.95f, -40.01f), 200);    // just below the gate (default -40 dB)
+    rig.frames (voicedAt (60.0, 0.70f, -42.0f), 200);     // weak but never strong
     rig.frames ({ std::numeric_limits<float>::quiet_NaN(), 0.95f, -20.0f }, 20);
     rig.frames ({ 261.6f, std::numeric_limits<float>::quiet_NaN(), -20.0f }, 20);
     rig.frames ({ 261.6f, 0.95f, std::numeric_limits<float>::quiet_NaN() }, 20);
@@ -990,8 +1026,9 @@ TEST_CASE ("NoteSegmenter: octave shift", "[notesegmenter]")
 TEST_CASE ("NoteSegmenter: velocity from the onset RMS and sensitivity", "[notesegmenter]")
 {
     const auto sensitivity = GENERATE (0.0f, 70.0f, 100.0f);
-    const auto rms = GENERATE (-45.0f, -30.0f, -9.0f, -3.0f);
+    const auto rms = GENERATE (-40.0f, -30.0f, -9.0f, -3.0f); // from the default gate (-40 dB) up
     VoiceSettings s;
+    const auto gate = static_cast<double> (s.gateThresholdDb);
     s.velocitySensitivityPercent = sensitivity;
     s.minNoteLengthMs = 20.0f;
     s.stickinessPercent = 0.0f;
@@ -1001,7 +1038,7 @@ TEST_CASE ("NoteSegmenter: velocity from the onset RMS and sensitivity", "[notes
     rig.frames (voicedAt (60.0, 0.95f, rms), 1);
     rig.frames (voicedAt (60.0, 0.95f, -10.0f), 20); // later level changes do not matter
     REQUIRE (rig.noteOns().size() == 1);
-    const auto expected = NoteSegmenter::velocityFor (static_cast<double> (rms), -45.0, static_cast<double> (sensitivity));
+    const auto expected = NoteSegmenter::velocityFor (static_cast<double> (rms), gate, static_cast<double> (sensitivity));
     CHECK (rig.noteOns()[0].event.data2 == expected);
 
     if (sensitivity == 0.0f)
@@ -1011,7 +1048,7 @@ TEST_CASE ("NoteSegmenter: velocity from the onset RMS and sensitivity", "[notes
     rig.framesFor (voicedAt (65.0, 0.95f, -40.0f), 100.0);
     REQUIRE (rig.noteOns().size() == 2);
     CHECK (rig.noteOns()[1].event.data2
-           == NoteSegmenter::velocityFor (-40.0, -45.0, static_cast<double> (sensitivity)));
+           == NoteSegmenter::velocityFor (-40.0, gate, static_cast<double> (sensitivity)));
 }
 
 TEST_CASE ("NoteSegmenter: flush ends the note at the given offset and returns to idle", "[notesegmenter]")
@@ -1260,4 +1297,245 @@ TEST_CASE ("NoteSegmenter: MIDI invariants under random frame sequences and sett
         if (lastOfFrame && sounding == 0)
             REQUIRE (lastBend == 0);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Provisional onsets (FastOnsetDetector frames, docs/M2-DESIGN.md 11)
+
+TEST_CASE ("NoteSegmenter provisional onset: two agreeing fast frames start the note at the second", "[notesegmenter][fastonset]")
+{
+    REQUIRE (NoteSegmenter::fastOnsetConfirmFrames == 2);
+    SegmenterRig rig;
+    const auto gate = static_cast<double> (rig.settings.gateThresholdDb);
+
+    rig.frame (unvoiced (-20.0f));
+    CHECK (rig.onsetFrame (voicedAt (60.0, 0.99f, -20.0f)).empty());
+    rig.frame (unvoiced (-20.0f)); // the full window is still filling
+    const auto position = rig.now() - rig.hop / 2;
+    const auto produced = rig.onsetFrame (voicedAt (60.1, NoteSegmenter::fastConfidenceOn, -18.0f));
+
+    REQUIRE (produced.size() == 1); // bend off: only the note-on
+    CHECK (produced[0].type == VsEventType::noteOn);
+    CHECK (produced[0].data1 == 60);
+    CHECK (produced[0].data2 == NoteSegmenter::velocityFor (-18.0, gate, 70.0)); // max rmsDb of both frames
+    CHECK (rig.events[0].position == position);
+    CHECK (rig.segmenter.getActiveNote() == 60);
+    CHECK (rig.segmenter.isProvisional());
+    CHECK (rig.segmenter.isFrameVoiced());
+
+    // While a note is on, fast frames are ignored
+    CHECK (rig.onsetFrame (voicedAt (67.0)).empty());
+    CHECK (rig.onsetFrame (voicedAt (67.0)).empty());
+}
+
+TEST_CASE ("NoteSegmenter provisional onset: weak, quiet, single, alternating or disagreeing fast frames start nothing",
+           "[notesegmenter][fastonset]")
+{
+    const auto quietDb = VoiceSettings {}.gateThresholdDb - 0.01f;
+
+    for (const auto& [name, a, b] : { std::tuple { "below fastConfidenceOn", voicedAt (60.0, 0.949f), voicedAt (60.0, 0.949f) },
+                                      std::tuple { "below the gate", voicedAt (60.0, 0.99f, quietDb), voicedAt (60.0, 0.99f, quietDb) },
+                                      std::tuple { "alternating", voicedAt (60.0, 0.99f), unvoiced (-20.0f) },
+                                      std::tuple { "disagreeing by 25 cents", voicedAt (60.0, 0.99f), voicedAt (60.25, 0.99f) } })
+    {
+        CAPTURE (name);
+        SegmenterRig rig;
+
+        for (int i = 0; i < 20; ++i)
+        {
+            rig.onsetFrame (a);
+            rig.frame (unvoiced (-20.0f));
+            rig.onsetFrame (b);
+            rig.frame (unvoiced (-20.0f));
+        }
+
+        CHECK (rig.events.empty());
+    }
+
+    // Within fastMaxSpreadCents they agree
+    SegmenterRig rig;
+    rig.onsetFrame (voicedAt (60.0, 0.99f));
+    rig.frame (unvoiced (-20.0f));
+    rig.onsetFrame (voicedAt (60.19, 0.99f));
+    CHECK (rig.noteOns().size() == 1);
+}
+
+TEST_CASE ("NoteSegmenter provisional note: ignored for one hop, then confirmed or corrected at once by a strong full frame",
+           "[notesegmenter][fastonset]")
+{
+    const auto legato = GENERATE (false, true);
+    CAPTURE (legato);
+    VoiceSettings s;
+    s.legato = legato;
+    s.minNoteLengthMs = 250.0f;  // the correction ignores minNoteLength ...
+    s.stickinessPercent = 100.0f; // ... and T_min
+
+    SECTION ("the full window reads another note (an octave below): immediate change")
+    {
+        SegmenterRig rig (s);
+        rig.onsetFrame (voicedAt (64.0));
+        rig.frame (unvoiced (-20.0f));
+        rig.onsetFrame (voicedAt (64.0));
+        REQUIRE (rig.segmenter.isProvisional());
+
+        CHECK (rig.frame (voicedAt (52.0)).empty()); // half a hop after the onset: ignored
+        CHECK (rig.segmenter.isProvisional());
+
+        const auto position = rig.now();
+        const auto produced = rig.frame (voicedAt (52.0));
+        REQUIRE (produced.size() == 2);
+        CHECK (produced[legato ? 0 : 1].type == VsEventType::noteOn);
+        CHECK (produced[legato ? 0 : 1].data1 == 52);
+        CHECK (produced[legato ? 1 : 0].type == VsEventType::noteOff);
+        CHECK (produced[legato ? 1 : 0].data1 == 64);
+        CHECK (rig.events.back().position == position);
+        CHECK_FALSE (rig.segmenter.isProvisional());
+        CHECK (rig.segmenter.getActiveNote() == 52);
+
+        // From now on a normal note: the next change needs T_min and minNoteLength again
+        rig.framesFor (voicedAt (55.0), 50.0);
+        CHECK (rig.segmenter.getActiveNote() == 52);
+        rig.framesFor (voicedAt (55.0), 300.0);
+        CHECK (rig.segmenter.getActiveNote() == 55);
+    }
+
+    SECTION ("the full window agrees: the note simply continues")
+    {
+        SegmenterRig rig (s);
+        rig.onsetFrame (voicedAt (64.0));
+        rig.frame (unvoiced (-20.0f));
+        rig.onsetFrame (voicedAt (64.0));
+        rig.frame (unvoiced (-20.0f));
+        rig.frames (voicedAt (64.2, 0.7f), 3); // weak frames hold the note, no confirmation yet
+        CHECK (rig.segmenter.isProvisional());
+        CHECK (rig.frame (voicedAt (64.2)).empty());
+        CHECK_FALSE (rig.segmenter.isProvisional());
+        CHECK (rig.noteOns().size() == 1);
+        CHECK (rig.noteOffs().empty());
+    }
+
+    SECTION ("a candidate inside the stickiness hysteresis keeps the provisional note")
+    {
+        SegmenterRig rig (s); // h = 0.4 at 100 %: a change needs |p - q| >= 0.9
+        rig.onsetFrame (voicedAt (64.45));
+        rig.frame (unvoiced (-20.0f));
+        rig.onsetFrame (voicedAt (64.45));
+        REQUIRE (rig.segmenter.getActiveNote() == 64);
+        rig.frame (unvoiced (-20.0f));
+        CHECK (rig.frame (voicedAt (64.6)).empty());
+        CHECK (rig.segmenter.getActiveNote() == 64);
+        CHECK_FALSE (rig.segmenter.isProvisional());
+    }
+}
+
+TEST_CASE ("NoteSegmenter provisional note: a false start ends at the timeout, then the fast path waits for a gap",
+           "[notesegmenter][fastonset]")
+{
+    VoiceSettings s;
+    s.minNoteLengthMs = 250.0f; // a false start ignores minNoteLength
+    SegmenterRig rig (s);
+
+    rig.onsetFrame (voicedAt (64.0));
+    rig.frame (unvoiced (-20.0f));
+    rig.onsetFrame (voicedAt (64.0));
+    REQUIRE (rig.noteOns().size() == 1);
+    const auto start = rig.noteOns()[0].position;
+
+    // The full window never sees the tone (loud, aperiodic frames); fast frames keep reading it
+    rig.hops (voicedAt (64.0), unvoiced (-20.0f), SegmenterRig::provisionalTimeoutHops + 1);
+    REQUIRE (rig.noteOffs().size() == 1);
+    const auto age = rig.noteOffs()[0].position - start;
+    CHECK (age >= SegmenterRig::provisionalTimeoutHops * rig.hop);
+    CHECK (age < (SegmenterRig::provisionalTimeoutHops + 1) * rig.hop);
+
+    // Blocked: neither the same tone nor non-strong but loud frames re-arm the fast path
+    rig.hops (voicedAt (64.0), unvoiced (-20.0f), 5);
+    rig.hops (unvoiced (-20.0f), unvoiced (-20.0f), 2);
+    rig.hops (voicedAt (64.0), unvoiced (-20.0f), 5);
+    CHECK (rig.noteOns().size() == 1);
+
+    // A gap below the gate's lower edge unblocks it
+    rig.hops (unvoiced (-120.0f), unvoiced (-120.0f), 1);
+    rig.hops (voicedAt (62.0), unvoiced (-20.0f), 2);
+    CHECK (rig.noteOns().size() == 2);
+    CHECK (rig.segmenter.getActiveNote() == 62);
+    rig.flush();
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter provisional note: weak voiced at the timeout continues as a normal note", "[notesegmenter][fastonset]")
+{
+    VoiceSettings s;
+    s.minNoteLengthMs = 20.0f;
+    SegmenterRig rig (s);
+
+    rig.onsetFrame (voicedAt (64.0));
+    rig.frame (unvoiced (-20.0f));
+    rig.onsetFrame (voicedAt (64.0));
+    rig.frames (voicedAt (64.0, 0.7f), SegmenterRig::provisionalTimeoutHops + 5);
+    CHECK (rig.noteOffs().empty());
+    CHECK_FALSE (rig.segmenter.isProvisional());
+
+    rig.frames (unvoiced (-20.0f), NoteSegmenter::releaseFrames);
+    CHECK (rig.noteOffs().size() == 1);
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter provisional onset: re-armed only by a non-strong fast frame after a note", "[notesegmenter][fastonset]")
+{
+    VoiceSettings s;
+    s.minNoteLengthMs = 20.0f;
+    SegmenterRig rig (s);
+
+    // A note started and released by the full window while the fast frames stay strong
+    rig.hops (voicedAt (60.0, 0.99f), voicedAt (60.0), 10);
+    REQUIRE (rig.noteOns().size() == 1);
+    CHECK_FALSE (rig.segmenter.isProvisional());
+    rig.hops (voicedAt (60.0, 0.99f), unvoiced (-20.0f), NoteSegmenter::releaseFrames + 5);
+    REQUIRE (rig.noteOffs().size() == 1);
+    CHECK (rig.noteOns().size() == 1); // not armed since the note start
+
+    rig.hops (unvoiced (-20.0f), unvoiced (-20.0f), 1);
+    rig.hops (voicedAt (60.0, 0.99f), unvoiced (-20.0f), 2);
+    CHECK (rig.noteOns().size() == 2);
+    CHECK (rig.segmenter.isProvisional());
+    rig.flush();
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter provisional onset: octave shift and unplayable notes", "[notesegmenter][fastonset]")
+{
+    VoiceSettings s;
+    s.octaveShift = 2;
+    SegmenterRig rig (s);
+    rig.onsetFrame (voicedAt (60.0));
+    rig.onsetFrame (voicedAt (60.0));
+    REQUIRE (rig.noteOns().size() == 1);
+    CHECK (rig.noteOns()[0].event.data1 == 84);
+    CHECK (rig.segmenter.getQuantisedNote() == 60);
+
+    s.octaveShift = 3;
+    SegmenterRig high (s);
+    high.onsetFrame (voicedAt (120.0));
+    high.onsetFrame (voicedAt (120.0));
+    CHECK (high.events.empty()); // 120 + 36 > 127
+}
+
+TEST_CASE ("NoteSegmenter provisional state is cleared by flush and reset", "[notesegmenter][fastonset]")
+{
+    SegmenterRig rig;
+    rig.onsetFrame (voicedAt (60.0));
+    rig.onsetFrame (voicedAt (60.0));
+    REQUIRE (rig.segmenter.isProvisional());
+    rig.flush();
+    CHECK_FALSE (rig.segmenter.isProvisional());
+    CHECK (rig.segmenter.getActiveNote() == -1);
+
+    // After a flush (e.g. a range change while singing) the fast path may restart the note at once
+    rig.frame (unvoiced (-20.0f));
+    rig.onsetFrame (voicedAt (60.0));
+    rig.onsetFrame (voicedAt (60.0));
+    CHECK (rig.noteOns().size() == 2);
+    rig.flush();
+    checkMidiInvariants (rig.events);
 }

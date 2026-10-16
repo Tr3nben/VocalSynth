@@ -20,6 +20,8 @@ constexpr int labelWidth = 100;
 constexpr int sliderTextWidth = 64;
 
 constexpr int refreshHz = 30;
+constexpr int tunerFadeSteps = 32;           // note name / needle fade quantisation (repaint only on a visible step)
+constexpr double dspTextIntervalMs = 500.0;  // DSP load texts change at most twice per second
 constexpr float meterDecayPerTick = 0.85f;
 constexpr float meterFloorDb = -60.0f;
 constexpr float voiceMeterFloorDb = -70.0f; // lowest gate threshold
@@ -43,6 +45,24 @@ juce::String formatCount (uint64_t value)
 juce::String enDash()
 {
     return juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x93"));
+}
+
+/** U+2014 EM DASH. */
+juce::String emDash()
+{
+    return juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x94"));
+}
+
+/** U+2248 ALMOST EQUAL TO. */
+juce::String approx()
+{
+    return juce::String (juce::CharPointer_UTF8 ("\xe2\x89\x88"));
+}
+
+/** " U+00B7 " MIDDLE DOT with spaces, the separator of the latency texts. */
+juce::String dotSeparator()
+{
+    return juce::String (juce::CharPointer_UTF8 ("  \xc2\xb7  "));
 }
 
 void styleValueLabel (juce::Label& label)
@@ -149,15 +169,83 @@ void VocalSynthEditor::FileDragSource::mouseUp (const juce::MouseEvent&)
     repaint();
 }
 //==============================================================================
-void VocalSynthEditor::TunerDisplay::setSnapshot (const VoiceAnalysisSnapshot& snapshot, bool active)
+void VocalSynthEditor::TunerDisplay::setState (const TunerDisplayModel::State& state, bool active)
 {
-    const auto changed = snapshot.frameCounter != shown.frameCounter || active != isActive
-                         || ! juce::exactlyEqual (snapshot.frequencyHz, shown.frequencyHz) || snapshot.voiced != shown.voiced;
-    shown = snapshot;
-    isActive = active;
-
-    if (changed)
+    if (active != isActive)
+    {
+        shown = state;
+        isActive = active;
         repaint();
+        return;
+    }
+
+    const auto oldNote = noteKey();
+    const auto oldText = textKey();
+    const auto oldNeedle = needleKey();
+    const auto oldBottom = bottomKey();
+    shown = state;
+
+    // Only the regions whose visible content changed
+    if (! (noteKey() == oldNote))
+        repaint (noteArea);
+
+    if (! (textKey() == oldText))
+        repaint (textArea);
+
+    if (! (needleKey() == oldNeedle))
+        repaint (scaleArea);
+
+    if (! (bottomKey() == oldBottom))
+        repaint (bottomArea);
+}
+
+VocalSynthEditor::TunerDisplay::NoteKey VocalSynthEditor::TunerDisplay::noteKey() const noexcept
+{
+    return { shown.note, shown.noteIsSegmented, juce::roundToInt (shown.noteAlpha * (float) tunerFadeSteps) };
+}
+
+VocalSynthEditor::TunerDisplay::TextKey VocalSynthEditor::TunerDisplay::textKey() const noexcept
+{
+    return { juce::roundToInt (shown.displayHz * 10.0f), shown.displayCents };
+}
+
+VocalSynthEditor::TunerDisplay::NeedleKey VocalSynthEditor::TunerDisplay::needleKey() const noexcept
+{
+    if (! isActive || shown.note < 0 || shown.displayHz <= 0.0f)
+        return {};
+
+    return { juce::roundToInt (needleX (shown.needleCents) * 2.0f),
+             juce::roundToInt (shown.noteAlpha * (float) tunerFadeSteps),
+             std::abs (shown.needleCents) <= TunerDisplayModel::inTuneCents };
+}
+
+VocalSynthEditor::TunerDisplay::BottomKey VocalSynthEditor::TunerDisplay::bottomKey() const noexcept
+{
+    return { shown.ledOn, juce::roundToInt ((float) barArea.getWidth() * juce::jlimit (0.0f, 1.0f, shown.confidence)) };
+}
+
+float VocalSynthEditor::TunerDisplay::needleX (float cents) const noexcept
+{
+    const auto line = scaleLineArea.toFloat();
+    const auto range = TunerDisplayModel::maxNeedleCents;
+    return line.getX() + line.getWidth() * (juce::jlimit (-range, range, cents) + range) / (2.0f * range);
+}
+
+void VocalSynthEditor::TunerDisplay::resized()
+{
+    auto area = getLocalBounds().reduced (14, 10);
+
+    auto top = area.removeFromTop (56);
+    noteArea = top.removeFromLeft (130);
+    textArea = top;
+
+    area.removeFromTop (6);
+    scaleArea = area.removeFromTop (44);
+    scaleLineArea = scaleArea.withHeight (30);
+
+    area.removeFromTop (6);
+    bottomArea = area.removeFromTop (22);
+    barArea = bottomArea.withTrimmedLeft (76).withTrimmedRight (78).reduced (2, 5);
 }
 
 void VocalSynthEditor::TunerDisplay::paint (juce::Graphics& g)
@@ -166,41 +254,37 @@ void VocalSynthEditor::TunerDisplay::paint (juce::Graphics& g)
     g.setColour (panelColour);
     g.fillRoundedRectangle (bounds, 8.0f);
 
-    auto area = getLocalBounds().reduced (14, 10);
-    const bool hasPitch = isActive && shown.frequencyHz > 0.0f && shown.nearestNote >= 0;
-    const auto cents = juce::jlimit (-50.0f, 50.0f, shown.centsOffset);
-    const auto inTune = std::abs (cents) <= 10.0f;
+    const bool hasNote = isActive && shown.note >= 0;
+    const bool hasPitch = hasNote && shown.displayHz > 0.0f;
+    const auto alpha = juce::jlimit (0.0f, 1.0f, shown.noteAlpha);
 
-    // Top: note name (FL convention) and frequency
-    auto top = area.removeFromTop (56);
-    g.setColour (hasPitch ? juce::Colours::white : dimTextColour);
+    // Note name (FL convention): white while it is the note being sent, lighter grey for the nearest note
+    // without a MIDI note; fades to grey during the release
+    const auto noteColour = shown.noteIsSegmented ? juce::Colours::white : textColour;
+    g.setColour (hasNote ? dimTextColour.interpolatedWith (noteColour, alpha) : dimTextColour);
     g.setFont (juce::FontOptions (44.0f, juce::Font::bold));
-    g.drawText (hasPitch ? getNoteName (shown.nearestNote) : juce::String ("-"), top.removeFromLeft (130),
-                juce::Justification::centredLeft);
+    g.drawText (hasNote ? getNoteName (shown.note) : juce::String ("-"), noteArea, juce::Justification::centredLeft);
 
+    // Frequency and cents (stepped values, at most 5 changes per second)
+    auto text = textArea;
     g.setFont (juce::FontOptions (16.0f));
     g.setColour (textColour);
-    auto topRight = top;
-    g.drawText (hasPitch ? juce::String (shown.frequencyHz, 1) + " Hz" : juce::String ("- Hz"),
-                topRight.removeFromTop (28), juce::Justification::centredRight);
+    g.drawText (hasPitch ? formatTunerHz (shown.displayHz) : juce::String ("- Hz"), text.removeFromTop (28),
+                juce::Justification::centredRight);
     g.setColour (dimTextColour);
-    g.drawText (hasPitch ? (cents >= 0.0f ? "+" : "") + juce::String (juce::roundToInt (cents)) + " cents"
+    g.drawText (hasPitch ? (shown.displayCents >= 0 ? "+" : "") + juce::String (shown.displayCents) + " cents"
                          : juce::String ("- cents"),
-                topRight, juce::Justification::centredRight);
+                text, juce::Justification::centredRight);
 
-    // Middle: cents scale -50 .. +50 with the needle
-    area.removeFromTop (6);
-    auto scale = area.removeFromTop (44);
-    const auto scaleLine = scale.removeFromTop (30).toFloat();
-    const auto xFor = [&scaleLine] (float c) { return scaleLine.getX() + scaleLine.getWidth() * (c + 50.0f) / 100.0f; };
-
+    // Cents scale -50 .. +50 with the needle
+    const auto scaleLine = scaleLineArea.toFloat();
     g.setColour (backgroundColour);
     g.fillRoundedRectangle (scaleLine, 4.0f);
 
     g.setColour (dimTextColour);
     for (const auto tick : { -50, -25, 0, 25, 50 })
     {
-        const auto x = xFor ((float) tick);
+        const auto x = needleX ((float) tick);
         const auto inset = tick == 0 ? 2.0f : 9.0f;
         g.drawLine (x, scaleLine.getY() + inset, x, scaleLine.getBottom() - inset, tick == 0 ? 2.0f : 1.0f);
     }
@@ -208,23 +292,23 @@ void VocalSynthEditor::TunerDisplay::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (11.0f));
     for (const auto tick : { -50, 0, 50 })
         g.drawText ((tick > 0 ? "+" : "") + juce::String (tick),
-                    juce::Rectangle<float> (xFor ((float) tick) - 20.0f, (float) scale.getY(), 40.0f, 14.0f),
+                    juce::Rectangle<float> (needleX ((float) tick) - 20.0f, scaleLine.getBottom(), 40.0f, 14.0f),
                     juce::Justification::centred);
 
     if (hasPitch)
     {
-        const auto x = xFor (cents);
-        g.setColour (inTune ? accentColour : warnColour);
+        const auto x = needleX (shown.needleCents);
+        const auto inTune = std::abs (shown.needleCents) <= TunerDisplayModel::inTuneCents;
+        g.setColour ((inTune ? accentColour : warnColour).withMultipliedAlpha (0.25f + 0.75f * alpha));
         g.fillRoundedRectangle (x - 2.5f, scaleLine.getY() + 1.0f, 5.0f, scaleLine.getHeight() - 2.0f, 2.0f);
     }
 
     // Bottom: confidence bar and voiced LED
-    area.removeFromTop (6);
-    auto bottom = area.removeFromTop (22);
+    auto bottom = bottomArea;
     auto led = bottom.removeFromRight (78);
     const auto ledCircle = led.removeFromLeft (20).toFloat().withSizeKeepingCentre (14.0f, 14.0f);
-    const bool voiced = isActive && shown.voiced;
-    g.setColour (voiced ? accentColour : backgroundColour);
+    const bool ledOn = isActive && shown.ledOn;
+    g.setColour (ledOn ? accentColour : backgroundColour);
     g.fillEllipse (ledCircle);
     g.setColour (dimTextColour);
     g.drawEllipse (ledCircle, 1.0f);
@@ -232,21 +316,21 @@ void VocalSynthEditor::TunerDisplay::paint (juce::Graphics& g)
     g.drawText ("Voiced", led.withTrimmedLeft (4), juce::Justification::centredLeft);
 
     g.drawText ("Confidence", bottom.removeFromLeft (76), juce::Justification::centredLeft);
-    const auto bar = bottom.reduced (2, 5).toFloat();
+    const auto bar = barArea.toFloat();
     g.setColour (backgroundColour);
     g.fillRoundedRectangle (bar, 3.0f);
 
     if (isActive)
     {
-        g.setColour (voiced ? accentColour : dimTextColour);
+        g.setColour (ledOn ? accentColour : dimTextColour);
         g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * juce::jlimit (0.0f, 1.0f, shown.confidence)), 3.0f);
     }
-
-    if (! isActive)
+    else
     {
         g.setColour (dimTextColour);
         g.setFont (juce::FontOptions (13.0f));
-        g.drawText ("Source = Test Pattern: no voice analysis", area, juce::Justification::centred);
+        g.drawText ("Source = Test Pattern: no voice analysis", getLocalBounds().reduced (14, 10).withTop (bottomArea.getBottom()),
+                    juce::Justification::centred);
     }
 }
 
@@ -272,6 +356,55 @@ juce::String VocalSynthEditor::getNoteName (int midiNote)
 juce::String VocalSynthEditor::formatLatency (double milliseconds)
 {
     return juce::String (milliseconds, 1) + " ms";
+}
+
+juce::String VocalSynthEditor::formatTunerHz (float hz)
+{
+    if (! (hz > 0.0f))
+        return "- Hz";
+
+    if (juce::roundToInt (hz) < 1000)
+        return juce::String (juce::roundToInt (hz)) + " Hz";
+
+    return juce::String (hz / 1000.0f, 2) + " kHz";
+}
+
+VocalSynthEditor::LatencyInfo VocalSynthEditor::describeLatency (double analysisMs, int bufferSamples, double sampleRate)
+{
+    LatencyInfo info;
+
+    if (bufferSamples <= 0 || sampleRate <= 0.0)
+    {
+        info.bufferText = "Buffer: - (no audio yet)";
+        info.totalText = "Total: - (needs the buffer size)";
+        return info;
+    }
+
+    const auto bufferMs = 1000.0 * (double) bufferSamples / sampleRate;
+
+    // What the user hears: analysis + input buffer + output buffer (one host block each)
+    const auto totalMs = analysisMs + 2.0 * bufferMs;
+
+    info.bufferText = "Buffer " + juce::String (bufferSamples) + " smp = " + formatLatency (bufferMs);
+    info.totalText = "Total " + approx() + " " + juce::String (juce::roundToInt (totalMs)) + " ms (analysis + in/out buffer)"
+                     + dotSeparator() + "FL MIDI port " + approx() + " +" + juce::String (juce::roundToInt (bufferMs))
+                     + " ms";
+    info.largeBuffer = bufferSamples > largeBufferSamples;
+    return info;
+}
+
+juce::String VocalSynthEditor::largeBufferHint()
+{
+    return "Large audio buffer adds latency " + emDash() + " try 128 or 256 samples in FL's audio settings";
+}
+
+juce::String VocalSynthEditor::formatDspLoad (const DspLoadMeter::Reading& reading)
+{
+    if (! reading.valid)
+        return "VocalSynth DSP: - (no audio yet)";
+
+    return "VocalSynth DSP: avg " + juce::String (100.0f * reading.averageProportion, 1) + " % / peak "
+           + juce::String (100.0f * reading.peakProportion, 1) + " % of the block time";
 }
 
 VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
@@ -360,7 +493,8 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
 
     voicePageComponents.push_back (&legatoButton);
 
-    for (auto* label : { &soundingNoteLabel, &latencyLabel, &voiceHintLabel, &meterCaptionLabel })
+    for (auto* label : { &soundingNoteLabel, &voiceHintLabel, &meterCaptionLabel, &latencyLabel, &totalLatencyLabel,
+                         &bufferWarningLabel, &dspLoadVoiceLabel })
     {
         styleValueLabel (*label);
         addChildComponent (*label);
@@ -370,8 +504,22 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
     voiceHintLabel.setFont (juce::FontOptions (13.0f));
     voiceHintLabel.setColour (juce::Label::textColourId, dimTextColour);
     meterCaptionLabel.setColour (juce::Label::textColourId, dimTextColour);
-    latencyLabel.setTooltip ("Worst-case delay from the start of a sung note to its note-on "
-                             "(analysis window + hops), for the selected voice range");
+    latencyLabel.setTooltip ("Analysis: worst-case delay from the start of a sung note to its note-on (analysis "
+                             "window + hops) for the selected voice range. Buffer: the largest audio block FL "
+                             "sent in the last 1-2 seconds (= the ASIO buffer length)");
+    totalLatencyLabel.setTooltip ("Estimate of what you hear: analysis + audio input buffer + audio output buffer "
+                                  "(driver extras not included). Sending the MIDI through FL's MIDI port to "
+                                  "another plugin can add about one more buffer");
+    bufferWarningLabel.setTooltip (largeBufferHint() + " (Options > Audio settings > Buffer length)");
+    bufferWarningLabel.setFont (juce::FontOptions (13.0f));
+    bufferWarningLabel.setColour (juce::Label::textColourId, warnColour);
+    dspLoadVoiceLabel.setFont (juce::FontOptions (13.0f));
+    dspLoadVoiceLabel.setColour (juce::Label::textColourId, dimTextColour);
+
+    const auto dspTooltip = juce::String ("Time VocalSynth itself needs per audio block, as a share of the block's "
+                                          "duration (average over ~1 s, peak falls back over a few seconds). FL's CPU "
+                                          "meter also includes the synth and everything else");
+    dspLoadVoiceLabel.setTooltip (dspTooltip);
 
     // --- Test & Routing page (M1) ---
     for (auto* label : { &patternLabel, &channelLabel, &tempoLabel, &ccLabel })
@@ -415,7 +563,7 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
         testPageComponents.push_back (&muteDryButton);
 
     for (auto* label : { &virtualMidiStatusLabel, &inputChannelsLabel, &testNoteLabel, &sampleRateLabel,
-                         &sentCountsLabel, &histogramSummaryLabel })
+                         &sentCountsLabel, &dspLoadTestLabel, &histogramSummaryLabel })
     {
         styleValueLabel (*label);
         addChildComponent (*label);
@@ -427,6 +575,8 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
     sentCountsLabel.setJustificationType (juce::Justification::topLeft);
     sentCountsLabel.setFont (juce::FontOptions (13.0f));
     histogramSummaryLabel.setFont (juce::FontOptions (13.0f));
+    dspLoadTestLabel.setFont (juce::FontOptions (13.0f));
+    dspLoadTestLabel.setTooltip (dspTooltip);
 
     // --- Attachments ---
     const auto attachCombo = [this, &apvts] (const juce::ParameterID& id, juce::ComboBox& box)
@@ -460,7 +610,8 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
 
     histogram = vsProcessor.getBlockSizeHistogram();
     updateStatusTexts();
-    updateVoiceTexts (vsProcessor.getVoiceSnapshot());
+    updateVoiceTexts (vsProcessor.getVoiceSnapshot(), 0.0);
+    updateDspLoadTexts();
 
     setSize (defaultWidth, defaultHeight);
     showPage (Page::voice);
@@ -503,9 +654,15 @@ void VocalSynthEditor::paint (juce::Graphics& g)
                 header.removeFromTop (18), juce::Justification::centredLeft);
 
     if (currentPage == Page::voice)
+    {
+        g.setColour (panelColour.withAlpha (0.6f));
+        g.fillRoundedRectangle (infoPanelBounds.toFloat(), 6.0f);
         paintInputMeter (g);
+    }
     else
+    {
         paintHistogram (g);
+    }
 }
 
 void VocalSynthEditor::paintInputMeter (juce::Graphics& g)
@@ -618,9 +775,8 @@ void VocalSynthEditor::layoutVoicePage (juce::Rectangle<int> area)
     tuner.setBounds (left.removeFromTop (172));
     left.removeFromTop (8);
     soundingNoteLabel.setBounds (left.removeFromTop (22));
-    latencyLabel.setBounds (left.removeFromTop (22));
     voiceHintLabel.setBounds (left.removeFromTop (20));
-    left.removeFromTop (6);
+    left.removeFromTop (28);
     meterCaptionLabel.setBounds (left.removeFromTop (20));
     left.removeFromTop (3);
     voiceMeterBounds = left.removeFromTop (16);
@@ -631,6 +787,13 @@ void VocalSynthEditor::layoutVoicePage (juce::Rectangle<int> area)
         label.setBounds (row.removeFromLeft (width));
         control.setBounds (row.reduced (0, 4));
     };
+
+    // Bottom of the middle and right columns: latency / DSP load box
+    auto info = middle.getUnion (right).removeFromBottom (4 * 20 + 2 * 6);
+    infoPanelBounds = info;
+    info.reduce (10, 6);
+    for (auto* label : { &latencyLabel, &totalLatencyLabel, &bufferWarningLabel, &dspLoadVoiceLabel })
+        label->setBounds (info.removeFromTop (20));
 
     // Middle: dropdowns
     layoutRow (middle, sourceLabel, sourceBox, 92);
@@ -695,7 +858,8 @@ void VocalSynthEditor::layoutTestPage (juce::Rectangle<int> area)
     testNoteLabel.setBounds (right.removeFromTop (20));
     sampleRateLabel.setBounds (right.removeFromTop (20));
     sentCountsLabel.setBounds (right.removeFromTop (36));
-    right.removeFromTop (4);
+    dspLoadTestLabel.setBounds (right.removeFromTop (20));
+    right.removeFromTop (2);
 
     auto histogramHeader = right.removeFromTop (24);
     resetHistogramButton.setBounds (histogramHeader.removeFromRight (56).reduced (0, 2));
@@ -704,23 +868,33 @@ void VocalSynthEditor::layoutTestPage (juce::Rectangle<int> area)
     histogramBounds = right.removeFromTop (histogramRowHeight * (int) BlockSizeHistogram::numBins);
 }
 
-void VocalSynthEditor::updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot)
+void VocalSynthEditor::updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot, double elapsedMs)
 {
     const auto voiceSettings = vsProcessor.getVoiceSettings();
     const bool voiceSource = vsProcessor.getSource() == params::Source::voice;
 
-    tuner.setSnapshot (snapshot, voiceSource);
+    // Tuner: the sent note in the sung octave (the Octave shift is shown by "Sounding note")
+    TunerDisplayModel::Input input;
+    input.active = voiceSource;
+    input.frequencyHz = snapshot.frequencyHz;
+    input.nearestNote = snapshot.nearestNote;
+    input.confidence = snapshot.confidence;
+    input.voiced = snapshot.voiced;
+
+    if (snapshot.activeNote >= 0)
+    {
+        const auto sung = snapshot.activeNote - 12 * voiceSettings.octaveShift;
+        input.sungNote = sung >= 0 && sung <= 127 ? sung : -1;
+    }
+
+    tuner.setState (tunerModel.update (input, elapsedMs), voiceSource);
 
     const auto note = voiceSource ? snapshot.activeNote : -1;
     soundingNoteLabel.setText (note >= 0 ? "Sounding note: " + getNoteName (note) + " (" + juce::String (note) + ")"
                                          : juce::String ("Sounding note: -"),
                                juce::dontSendNotification);
 
-    const auto rate = vsProcessor.getCurrentSampleRate();
-    const auto rangeName = params::voiceRangeChoices[static_cast<int> (voiceSettings.range)];
-    latencyLabel.setText ("Latency: " + formatLatency (vsProcessor.getVoiceLatencyMs()) + "  (" + rangeName + ", "
-                              + juce::String ((rate > 0.0 ? rate : 48000.0) / 1000.0, 1) + " kHz)",
-                          juce::dontSendNotification);
+    updateLatencyTexts (voiceSettings);
 
     voiceHintLabel.setText (voiceSource ? "MIDI channel, Monitor Tone: page Test & Routing"
                                         : "Source = Test Pattern: the test MIDI is sent",
@@ -731,15 +905,32 @@ void VocalSynthEditor::updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot)
                                    + " dB",
                                juce::dontSendNotification);
 
-    const auto rmsDb = voiceSource ? snapshot.rmsDb : -100.0f;
-    const auto gateChanged = ! juce::exactlyEqual (voiceSettings.gateThresholdDb, meterGateDb);
-    const auto rmsChanged = ! juce::exactlyEqual (rmsDb, meterRmsDb);
-    meterRmsDb = rmsDb;
+    meterRmsDb = voiceSource ? snapshot.rmsDb : -100.0f;
     meterGateDb = voiceSettings.gateThresholdDb;
-    meterGateOpen = voiceSource && rmsDb >= meterGateDb;
+    meterGateOpen = voiceSource && meterRmsDb >= meterGateDb;
+}
 
-    if ((gateChanged || rmsChanged) && currentPage == Page::voice)
-        repaint (voiceMeterBounds.expanded (20, 20));
+void VocalSynthEditor::updateLatencyTexts (const VoiceSettings& voiceSettings)
+{
+    const auto rate = vsProcessor.getCurrentSampleRate();
+    const auto shownRate = rate > 0.0 ? rate : 48000.0;
+    const auto rangeName = params::voiceRangeChoices[static_cast<int> (voiceSettings.range)];
+    const auto analysisMs = vsProcessor.getVoiceLatencyMs();
+    const auto info = describeLatency (analysisMs, vsProcessor.getRecentMaxBlockSize(), rate);
+
+    latencyLabel.setText ("Analysis " + formatLatency (analysisMs) + " (" + rangeName + ", "
+                              + juce::String (shownRate / 1000.0, 1) + " kHz)" + dotSeparator() + info.bufferText,
+                          juce::dontSendNotification);
+    totalLatencyLabel.setText (info.totalText, juce::dontSendNotification);
+    totalLatencyLabel.setColour (juce::Label::textColourId, info.largeBuffer ? warnColour : textColour);
+    bufferWarningLabel.setText (info.largeBuffer ? largeBufferHint() : juce::String(), juce::dontSendNotification);
+}
+
+void VocalSynthEditor::updateDspLoadTexts()
+{
+    const auto text = formatDspLoad (vsProcessor.getDspLoad());
+    dspLoadVoiceLabel.setText (text, juce::dontSendNotification);
+    dspLoadTestLabel.setText (text, juce::dontSendNotification);
 }
 
 void VocalSynthEditor::updateStatusTexts()
@@ -799,16 +990,31 @@ void VocalSynthEditor::updateStatusTexts()
 
 void VocalSynthEditor::timerCallback()
 {
+    // Real elapsed time, so the tuner's smoothing does not depend on how regularly the timer fires
+    const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+    const auto elapsedMs = lastTickMs > 0.0 ? nowMs - lastTickMs : 1000.0 / refreshHz;
+    lastTickMs = nowMs;
+
     const auto peak = vsProcessor.takeInputPeak();
     displayedLevel = juce::jmax (peak, displayedLevel * meterDecayPerTick);
 
     // Label::setText only repaints when the text actually changes
+    const auto oldMeter = voiceMeterKey();
     updateStatusTexts();
-    updateVoiceTexts (vsProcessor.getVoiceSnapshot());
+    updateVoiceTexts (vsProcessor.getVoiceSnapshot(), elapsedMs);
+
+    sinceDspTextMs += elapsedMs;
+    if (sinceDspTextMs >= dspTextIntervalMs)
+    {
+        sinceDspTextMs = 0.0;
+        updateDspLoadTexts();
+    }
 
     if (currentPage == Page::voice)
     {
-        repaint (voiceMeterBounds.expanded (4, 4));
+        if (voiceMeterKey() != oldMeter)
+            repaint (voiceMeterBounds.expanded (4, 4));
+
         return;
     }
 
@@ -822,6 +1028,16 @@ void VocalSynthEditor::timerCallback()
 
     if (histogramChanged)
         repaint (histogramBounds);
+}
+
+std::array<int, 5> VocalSynthEditor::voiceMeterKey() const noexcept
+{
+    // Pixel positions of everything the Voice page meter draws
+    const auto width = (float) voiceMeterBounds.getWidth();
+    const auto peakDb = juce::Decibels::gainToDecibels (displayedLevel, -100.0f);
+    return { juce::roundToInt (width * proportionOf (peakDb, voiceMeterFloorDb)), peakDb > -3.0f ? 1 : 0,
+             juce::roundToInt (width * proportionOf (meterRmsDb, voiceMeterFloorDb)),
+             juce::roundToInt (width * proportionOf (meterGateDb, voiceMeterFloorDb)), meterGateOpen ? 1 : 0 };
 }
 
 } // namespace vocalsynth

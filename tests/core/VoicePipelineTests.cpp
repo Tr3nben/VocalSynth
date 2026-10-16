@@ -412,9 +412,29 @@ TEST_CASE ("Algorithmic latency budget per range", "[pipeline]")
         }
     }
 
-    // Table values of docs/M2-DESIGN.md 3.11 at 48 kHz
-    CHECK (std::abs (VoicePipeline::computeAlgorithmicLatencyMs (48000.0, VoiceRange::tenor) - 24.21) < 0.01);
-    CHECK (std::abs (VoicePipeline::computeAlgorithmicLatencyMs (48000.0, VoiceRange::bass) - 39.05) < 0.01);
+    // v0.2.1 (docs/M2-DESIGN.md 11): the shown latency is the faster, provisional path; the confirmed
+    // (full-window) path keeps the v0.2.0 formula of 3.11 and is never faster
+    for (const auto sr : { 44100.0, 48000.0, 88200.0, 96000.0 })
+        for (const auto range : allRanges)
+        {
+            CAPTURE (sr, voiceRangeInfo (range).name);
+            const auto fast = VoicePipeline::computeFastOnsetLatencyMs (sr, range);
+            const auto confirmed = VoicePipeline::computeConfirmedLatencyMs (sr, range);
+            CHECK (VoicePipeline::computeAlgorithmicLatencyMs (sr, range) == std::min (fast, confirmed));
+            CHECK (fast < confirmed);
+
+            // Pitch dependent: falls with the pitch, the worst case is f0 min
+            const auto& info = voiceRangeInfo (range);
+            CHECK (VoicePipeline::computeFastOnsetLatencyMs (sr, range, info.f0MinHz) == fast);
+            CHECK (VoicePipeline::computeFastOnsetLatencyMs (sr, range, 0.5 * info.f0MinHz) == fast);
+            CHECK (VoicePipeline::computeFastOnsetLatencyMs (sr, range, 2.0 * info.f0MinHz) < 0.75 * fast);
+        }
+
+    // Table values of docs/M2-DESIGN.md 11 at 48 kHz (confirmed path: 3.11)
+    CHECK (std::abs (VoicePipeline::computeAlgorithmicLatencyMs (48000.0, VoiceRange::tenor) - 23.21) < 0.01);
+    CHECK (std::abs (VoicePipeline::computeAlgorithmicLatencyMs (48000.0, VoiceRange::bass) - 38.05) < 0.01);
+    CHECK (std::abs (VoicePipeline::computeConfirmedLatencyMs (48000.0, VoiceRange::tenor) - 24.21) < 0.01);
+    CHECK (std::abs (VoicePipeline::computeConfirmedLatencyMs (48000.0, VoiceRange::bass) - 39.05) < 0.01);
     CHECK (VoicePipeline::computeAlgorithmicLatencyMs (0.0, VoiceRange::tenor) == 0.0);
 }
 
@@ -483,10 +503,12 @@ TEST_CASE ("Pipeline event capacity: maxEventsForSamples", "[pipeline]")
 
         CHECK (p.maxEventsForSamples (0) == 0);
         CHECK (p.maxEventsForSamples (-5) == 0);
-        CHECK (p.maxEventsForSamples (1) == VoicePipeline::maxEventsPerFlush + VoicePipeline::maxEventsPerHop);
-        CHECK (p.maxEventsForSamples (hop) == VoicePipeline::maxEventsPerFlush + VoicePipeline::maxEventsPerHop);
+        // + one provisional onset (NoteSegmenter::maxEventsPerOnsetFrame) per call, see the class comment
+        const auto onset = NoteSegmenter::maxEventsPerOnsetFrame;
+        CHECK (p.maxEventsForSamples (1) == VoicePipeline::maxEventsPerFlush + VoicePipeline::maxEventsPerHop + onset);
+        CHECK (p.maxEventsForSamples (hop) == VoicePipeline::maxEventsPerFlush + VoicePipeline::maxEventsPerHop + onset);
         CHECK (p.maxEventsForSamples (hop + 1)
-               == VoicePipeline::maxEventsPerFlush + 2 * VoicePipeline::maxEventsPerHop);
+               == VoicePipeline::maxEventsPerFlush + 2 * VoicePipeline::maxEventsPerHop + onset);
 
         // The plugin's VsEventBuffer<1024> with 4096-sample chunks can never fill (lowest supported: 8 kHz)
         CHECK (p.maxEventsForSamples (4096) < 1024);
@@ -494,7 +516,7 @@ TEST_CASE ("Pipeline event capacity: maxEventsForSamples", "[pipeline]")
 
     VoicePipeline p;
     p.prepare (44100.0, 4096);
-    CHECK (p.maxEventsForSamples (4096) == 2 + 3 * 47);
+    CHECK (p.maxEventsForSamples (4096) == 2 + 3 * 47 + 2);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -921,6 +943,43 @@ TEST_CASE ("Pipeline: a held note does not change to the octave of a tone below 
     }
 }
 
+TEST_CASE ("Pipeline: a tone the full window never confirms gives at most one short provisional note", "[pipeline]")
+{
+    // Alto, 462 Hz with the 2nd harmonic 15 dB above the fundamental: YIN/MPM read 2 f0 = 925 Hz, above
+    // the range, so the full window stays unvoiced (v0.2.0: no note), while the provisional path reads
+    // 462 Hz. The provisional note ends at its timeout (false start) and the fast path then waits for a
+    // gap: before that rule it re-triggered every ~21 ms (14 notes in 0.5 s).
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (algorithmName (algorithm), sr);
+
+    constexpr double amplitudes[] = { 0.57, 3.29, 0.44, 0.31, 0.09, 0.11, 0.03, 0.04, 0.12, 0.03, 0.09, 0.02 };
+    test::Signal tone (test::numSamplesFor (0.5, sr));
+
+    for (std::size_t i = 0; i < tone.size(); ++i)
+    {
+        const auto t = static_cast<double> (i) / sr;
+        double v = 0.0;
+
+        for (std::size_t k = 0; k < std::size (amplitudes); ++k)
+            if (static_cast<double> (k + 1) * 462.43 < 6000.0)
+                v += amplitudes[k] * std::sin (2.0 * std::numbers::pi * static_cast<double> (k + 1) * 462.43 * t
+                              + 0.7 * static_cast<double> (k * k)); // without the block: 16-19 notes
+
+        tone[i] = static_cast<float> (0.02 * v * std::min (1.0, t / 0.014));
+    }
+
+    applyFades (tone, sr, 0.01);
+    const auto input = test::concat ({ test::silence (sr, 0.15), tone, test::silence (sr, 0.15) });
+    const auto run = runPipeline (input, sr, settingsFor (VoiceRange::alto, algorithm));
+    const auto notes = notesOf (run.events);
+    CHECK (midiInvariantViolations (run.events) == 0);
+    CHECK (notes.size() <= 1);
+
+    for (const auto& n : notes)
+        CHECK (n.note == nearestMidiNote (462.43));
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // Note logic end to end
 
@@ -1034,8 +1093,10 @@ TEST_CASE ("Pipeline: octave shift and velocity", "[pipeline]")
     REQUIRE (loudNotes.size() == 1);
     CHECK (loudNotes[0].velocity > quietNotes[0].velocity + 20);
 
-    // Velocity formula with the measured onset level (conditioned rms of a -12 dB sine ~ -12 dB, gate -45)
-    CHECK (std::abs (loudNotes[0].velocity - static_cast<int> (NoteSegmenter::velocityFor (-12.0, -45.0, 70.0))) <= 3);
+    // Velocity formula with the measured onset level (conditioned rms of a -12 dB sine ~ -12 dB, default gate)
+    CHECK (std::abs (loudNotes[0].velocity
+                     - static_cast<int> (NoteSegmenter::velocityFor (-12.0, static_cast<double> (VoiceSettings {}.gateThresholdDb), 70.0)))
+           <= 3);
 
     // 0 % sensitivity: fixed 100
     auto fixed = settingsFor (VoiceRange::tenor);
@@ -1203,12 +1264,24 @@ TEST_CASE ("Pipeline gives the same notes at 44.1, 48 and 96 kHz", "[pipeline]")
 
 TEST_CASE ("Pipeline latency: abrupt onset -> note-on within the model and the spec budgets", "[pipeline]")
 {
-    // Sine at -20 dBFS after silence, at f0 min of the range (worst case for the high-pass), one semitone
-    // above it and at a typical pitch (middle of the range), 8 onset phases across one hop, 3 rates, both
-    // algorithms. Prints the worst case per range and pitch.
+    // Sine at -20 dBFS after silence, at f0 min of the range (worst case for the high-pass and the
+    // provisional path), one semitone above it and at a typical pitch (middle of the range), 8 onset
+    // phases across one hop, 3 rates, both algorithms. Every onset must come within the per-pitch model
+    // computeFastOnsetLatencyMs (sr, range, f) (the provisional path fires for these clean onsets), the
+    // shown (worst-case) model and the spec budgets, and within the v0.2.1 limits below (measured worst
+    // case + ~0.75 ms). Prints the worst case per range and pitch.
     enum Pitch { atF0Min, aboveF0Min, typical, numPitches };
     std::map<std::pair<int, int>, double> worst;     // (range, pitch) -> ms
     std::map<std::pair<int, int>, double> worstAlg;  // (range, algorithm) -> ms
+
+    // v0.2.1 limits in ms (docs/M2-DESIGN.md 11): { any pitch, typical pitch }; v0.2.0 measured
+    // Tenor 21.9 / 20.7, Bass 34.4 / 32.2
+    const std::map<VoiceRange, std::pair<double, double>> limits {
+        { VoiceRange::bass, { 34.0, 18.0 } },       { VoiceRange::baritone, { 28.25, 16.25 } },
+        { VoiceRange::tenor, { 22.0, 11.5 } },     { VoiceRange::alto, { 17.25, 9.0 } },
+        { VoiceRange::soprano, { 13.5, 7.5 } }, { VoiceRange::whistle, { 6.75, 4.75 } },
+        { VoiceRange::wide, { 34.0, 13.75 } },
+    };
 
     for (const auto range : allRanges)
     {
@@ -1246,6 +1319,8 @@ TEST_CASE ("Pipeline latency: abrupt onset -> note-on within the model and the s
                         const auto ms = 1000.0 * static_cast<double> (notes[0].on - static_cast<int64_t> (onset)) / sr;
                         CHECK (ms > 0.0);
                         CHECK (ms <= model);
+                        CHECK (ms <= VoicePipeline::computeFastOnsetLatencyMs (sr, range, f));
+                        CHECK (ms <= (pitch == typical ? limits.at (range).second : limits.at (range).first));
 
                         if (range == VoiceRange::tenor)
                             CHECK (ms <= VoicePipeline::tenorLatencyBudgetMs);
@@ -1264,14 +1339,19 @@ TEST_CASE ("Pipeline latency: abrupt onset -> note-on within the model and the s
     }
 
     std::printf ("[pipeline] onset -> note-on latency in ms, worst of 44.1/48/96 kHz x 8 onset phases:\n");
-    std::printf ("  %-8s %8s %8s %8s %8s %8s %10s\n", "range", "f0 min", "+1 st", "typical", "YIN", "MPM", "model@48k");
+    std::printf ("  %-8s %8s %8s %8s %8s %8s %10s %12s %14s\n", "range", "f0 min", "+1 st", "typical", "YIN", "MPM", "model@48k",
+                 "typical@48k", "confirmed@48k");
 
     for (const auto range : allRanges)
     {
         const auto r = static_cast<int> (range);
-        std::printf ("  %-8s %8.2f %8.2f %8.2f %8.2f %8.2f %10.2f\n", voiceRangeInfo (range).name, worst[{ r, atF0Min }],
+        const auto& info = voiceRangeInfo (range);
+        const auto typicalHz = test::midiToHz (std::round (0.5 * (frequencyToMidiNote (info.f0MinHz) + frequencyToMidiNote (info.f0MaxHz))));
+        std::printf ("  %-8s %8.2f %8.2f %8.2f %8.2f %8.2f %10.2f %12.2f %14.2f\n", info.name, worst[{ r, atF0Min }],
                      worst[{ r, aboveF0Min }], worst[{ r, typical }], worstAlg[{ r, 0 }], worstAlg[{ r, 1 }],
-                     VoicePipeline::computeAlgorithmicLatencyMs (48000.0, range));
+                     VoicePipeline::computeAlgorithmicLatencyMs (48000.0, range),
+                     VoicePipeline::computeFastOnsetLatencyMs (48000.0, range, typicalHz),
+                     VoicePipeline::computeConfirmedLatencyMs (48000.0, range));
     }
 }
 
@@ -1640,28 +1720,51 @@ TEST_CASE ("Pipeline CPU sanity check: worst 128-sample block at 48 kHz", "[pipe
         CHECK (r.meanFraction < 0.10);
 #endif
     }
+
+    // Idle (no note, input above the gate): the provisional-onset detector runs every 1 ms in addition
+    // to the full window (v0.2.1). White noise at -30 dBFS never starts a note.
+    const auto noise = test::whiteNoise (sr, 4.0, test::sineAmplitudeForRmsDb (-30.0) * 1.2247f, 7);
+
+    for (const auto algorithm : { PitchAlgorithm::yin, PitchAlgorithm::mpm })
+    {
+        CAPTURE (algorithmName (algorithm));
+        const auto r = measureCpu (noise, sr, settingsFor (VoiceRange::wide, algorithm), 128, 3);
+        std::printf ("[pipeline][cpu] %s Wide idle (noise -30 dBFS), 48 kHz, 128-sample blocks: worst %.2f %%, mean %.2f %% of the block\n",
+                     algorithmName (algorithm), 100.0 * r.worstFraction, 100.0 * r.meanFraction);
+
+#ifdef NDEBUG
+        CHECK (r.worstFraction < 0.50);
+        CHECK (r.meanFraction < 0.10);
+#endif
+    }
 }
 
 TEST_CASE ("Pipeline CPU benchmark (all rates, ranges, algorithms)", "[.benchmark]")
 {
     // Hidden by default: run with  VocalSynthCoreTests "[.benchmark]"
+    // "voiced": 65 Hz saw (a note is on, full window only); "idle": white noise at -30 dBFS (no note,
+    // full window + provisional-onset detector every 1 ms).
     std::printf ("[pipeline][benchmark] 128-sample blocks, 10 s per case, min of 3 runs per block\n");
-    std::printf ("  %-9s %-8s %-4s %10s %10s\n", "rate", "range", "alg", "worst %", "mean %");
+    std::printf ("  %-9s %-8s %-4s %-6s %10s %10s\n", "rate", "range", "alg", "input", "worst %", "mean %");
 
     for (const auto sr : sampleRates)
     {
-        const auto input = cpuTestSignal (sr, 10.0);
+        const auto voiced = cpuTestSignal (sr, 10.0);
+        const auto idle = test::whiteNoise (sr, 10.0, test::sineAmplitudeForRmsDb (-30.0) * 1.2247f, 7);
 
         for (const auto range : { VoiceRange::wide, VoiceRange::bass, VoiceRange::tenor, VoiceRange::whistle })
         {
             for (const auto algorithm : { PitchAlgorithm::yin, PitchAlgorithm::mpm })
             {
-                const auto r = measureCpu (input, sr, settingsFor (range, algorithm), 128, 3);
-                std::printf ("  %-9.0f %-8s %-4s %10.2f %10.2f\n", sr, voiceRangeInfo (range).name, algorithmName (algorithm),
-                             100.0 * r.worstFraction, 100.0 * r.meanFraction);
+                for (const auto* input : { &voiced, &idle })
+                {
+                    const auto r = measureCpu (*input, sr, settingsFor (range, algorithm), 128, 3);
+                    std::printf ("  %-9.0f %-8s %-4s %-6s %10.2f %10.2f\n", sr, voiceRangeInfo (range).name, algorithmName (algorithm),
+                                 input == &voiced ? "voiced" : "idle", 100.0 * r.worstFraction, 100.0 * r.meanFraction);
 
-                if (sr == 48000.0)
-                    CHECK (r.worstFraction < 0.20); // the spec budget, on an idle machine
+                    if (sr == 48000.0)
+                        CHECK (r.worstFraction < 0.20); // the spec budget, on an idle machine
+                }
             }
         }
     }

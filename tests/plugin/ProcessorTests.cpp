@@ -1671,3 +1671,114 @@ TEST_CASE ("Monitor tone bends are rescaled to the selected bend range", "[plugi
     CHECK (monitorBendFor (2000, 12) == 8191);  // > 2 semitones: clamped
     CHECK (monitorBendFor (-2000, 24) == -8192);
 }
+
+//==============================================================================
+// v0.2.1: own DSP load and recent host block size for the UI
+
+TEST_CASE ("DspLoadMeter averages over time and lets the peak decay", "[plugin][ui]")
+{
+    vocalsynth::DspLoadMeter meter;
+    CHECK_FALSE (meter.getReading().valid);
+
+    meter.prepare (48000.0);
+    meter.addBlock (0.0, 480); // 0 % is a valid measurement
+    CHECK (meter.getReading().valid);
+    CHECK (meter.getReading().averageProportion == 0.0f);
+
+    meter.requestReset();
+    CHECK_FALSE (meter.getReading().valid);
+
+    // 10 ms blocks at 10 % load: the first block after the reset sets the values directly
+    meter.addBlock (0.001, 480);
+    CHECK (meter.getReading().averageProportion == Catch::Approx (0.1f));
+    CHECK (meter.getReading().peakProportion == Catch::Approx (0.1f));
+
+    // One second of idle blocks: average falls to 1/e, the peak only by exp(-1/3)
+    for (int i = 0; i < 100; ++i)
+        meter.addBlock (0.0, 480);
+
+    CHECK (meter.getReading().averageProportion
+           == Catch::Approx (0.1 * std::exp (-1.0 / vocalsynth::DspLoadMeter::averageTimeConstantSeconds)).epsilon (0.01));
+    CHECK (meter.getReading().peakProportion
+           == Catch::Approx (0.1 * std::exp (-1.0 / vocalsynth::DspLoadMeter::peakDecayTimeConstantSeconds)).epsilon (0.01));
+
+    // A single slow block shows in the peak at once
+    meter.addBlock (0.01, 480);
+    CHECK (meter.getReading().peakProportion == Catch::Approx (1.0f));
+    CHECK (meter.getReading().averageProportion < 0.1f);
+
+    // The averaging does not depend on the block size: 1 s of 1-sample blocks equals 1 s of 4800-sample blocks
+    vocalsynth::DspLoadMeter tiny, large;
+    tiny.prepare (48000.0);
+    large.prepare (48000.0);
+    tiny.addBlock (0.0, 1);
+    large.addBlock (0.0, 4800);
+    for (int i = 0; i < 48000; ++i)
+        tiny.addBlock (0.05 / 48000.0, 1);
+    for (int i = 0; i < 10; ++i)
+        large.addBlock (0.05 * 0.1, 4800);
+    CHECK (tiny.getReading().averageProportion == Catch::Approx (large.getReading().averageProportion).epsilon (0.02));
+
+    // Nonsense input is ignored
+    meter.addBlock (-1.0, 480);
+    meter.addBlock (0.001, 0);
+    CHECK (meter.getReading().peakProportion == Catch::Approx (1.0f));
+}
+
+TEST_CASE ("RecentBlockSize follows the largest recent host block", "[plugin][ui]")
+{
+    vocalsynth::RecentBlockSize recent;
+    recent.prepare (48000.0);
+    CHECK (recent.get() == 0);
+
+    recent.record (0); // empty blocks do not count
+    CHECK (recent.get() == 0);
+
+    for (int i = 0; i < 10; ++i)
+        recent.record (i % 3 == 0 ? 2048 : 512); // FL splitting its buffer
+    CHECK (recent.get() == 2048);
+
+    // After the buffer was made smaller, the display follows within two windows
+    for (int i = 0; i < 2 * 48000 / 256 + 2; ++i)
+        recent.record (256);
+    CHECK (recent.get() == 256);
+}
+
+TEST_CASE ("The processor reports its DSP load and recent block size", "[plugin][ui]")
+{
+    const auto variant = GENERATE (Variant::fx, Variant::instrument);
+    const auto source = GENERATE (0, 1); // Voice, Test Pattern
+    CAPTURE (variant == Variant::fx ? "fx" : "instrument", source);
+
+    VocalSynthProcessor p (variant);
+    setParameter (p, vocalsynth::params::source, (float) source);
+    p.prepareToPlay (48000.0, 512);
+    CHECK_FALSE (p.getDspLoad().valid);
+    CHECK (p.getRecentMaxBlockSize() == 0);
+
+    juce::AudioBuffer<float> buffer (2, 512);
+    juce::MidiBuffer midi;
+    for (int pos = 0; pos < 48000; pos += 512)
+    {
+        fillWithSine (buffer, 48000.0, pos);
+        midi.clear();
+        p.processBlock (buffer, midi);
+    }
+
+    const auto load = p.getDspLoad();
+    CHECK (load.valid);
+    CHECK (load.averageProportion > 0.0f);
+    CHECK (load.averageProportion < 1.0f); // far below real time, even in a Debug build
+    CHECK (load.peakProportion >= load.averageProportion);
+    CHECK (std::isfinite (load.peakProportion));
+    CHECK (p.getRecentMaxBlockSize() == 512);
+
+    // Bypassed blocks are measured too; prepareToPlay starts afresh
+    p.processBlockBypassed (buffer, midi);
+    CHECK (p.getDspLoad().valid);
+    p.resetDspLoad();
+    CHECK_FALSE (p.getDspLoad().valid);
+    p.prepareToPlay (44100.0, 2048);
+    CHECK (p.getRecentMaxBlockSize() == 0);
+    p.releaseResources();
+}

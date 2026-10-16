@@ -150,8 +150,13 @@ struct AnalysisFrameInfo
     octave reference, so the next onset is never "corrected" into the octave of the previous note.
 
     Event capacity: one call emits at most maxEventsForSamples (numSamples) =
-    maxEventsPerFlush + maxEventsPerHop * ceil (numSamples / getHopInputSamples()) events
-    (< 1024 for numSamples <= 4096 at any rate >= 8 kHz). Events that do not fit are dropped.
+    maxEventsPerFlush + maxEventsPerHop * ceil (numSamples / getHopInputSamples())
+    + NoteSegmenter::maxEventsPerOnsetFrame events (< 1024 for numSamples <= 4096 at any rate >= 8 kHz).
+    Why the fast path adds only one onset: per hop interval (previous hop sample, hop sample] at most
+    3 events, because a provisional onset (2) inside an interval makes the segmenter ignore the full
+    frame at its end (provisionalIgnoreSamples = 1 hop), the fast path does not run while a note is on,
+    and it cannot fire right after a note ends (not armed); a call can end with one more interval that
+    holds only a fast onset. Events that do not fit are dropped.
 
     Real-time safe after prepare(): process(), flush(), reset() and getSnapshot() never allocate, lock or
     throw. Not thread-safe except getSnapshot() and computeAlgorithmicLatencyMs(). */
@@ -161,20 +166,52 @@ public:
     static constexpr int maxEventsPerHop = NoteSegmenter::maxEventsPerFrame;
     static constexpr int maxEventsPerFlush = 2;
 
-    /** Hops of extra delay counted by the latency budget, derived from the tuning constants so the
-        formula can never go stale: frame-clock quantisation (1) + median delay (medianLength / 2 = 1)
-        + extra onset-confirmation frames (onsetConfirmFrames - 1 = 0). */
+    /** Hops of extra delay counted by the latency budget of the CONFIRMED (full-window) onset path,
+        derived from the tuning constants so the formula can never go stale: frame-clock quantisation (1)
+        + median delay (medianLength / 2 = 1) + extra onset-confirmation frames (onsetConfirmFrames - 1 = 0). */
     static constexpr int latencyBudgetHops =
         1 + PitchPostProcessor::defaultMedianLength / 2 + (NoteSegmenter::onsetConfirmFrames - 1);
 
+    /** Provisional onsets (docs/M2-DESIGN.md 11): while no note is on, the FastOnsetDetector runs every
+        getFastHopSamples() = max (1, hop / fastHopDivisor) analysis samples (1 ms) on the Framer window. */
+    static constexpr int fastHopDivisor = 2;
+
+    /** A provisional note that the full window has not confirmed (strong frame) after
+        windowSamples + provisionalTimeoutHops hops ends (false start) unless that frame is weak voiced. */
+    static constexpr int provisionalTimeoutHops = 3;
+
+    /** Fast-path frames (of getFastHopSamples()) in the provisional latency model: frame-clock
+        quantisation (1) + extra confirmation frames (fastOnsetConfirmFrames - 1) + 1 for the onset bias to
+        settle within NoteSegmenter::fastMaxSpreadCents (the first confident frames read sharp while the
+        lagged span is still partly silent). */
+    static constexpr int fastLatencyBudgetHops = NoteSegmenter::fastOnsetConfirmFrames + 1;
+
     /** Worst-case onset -> note-on delay in ms for a host rate and range (pure function, any thread):
+        the faster of the provisional (fast) and the confirmed (full-window) onset path,
+        min (computeFastOnsetLatencyMs(), computeConfirmedLatencyMs()). For a clear voiced onset the
+        fast path fires. This is the worst case (a tone at f0 min); 48 kHz: Tenor 23.2 ms (v0.2.0: 24.2),
+        Bass/Wide 38.0 ms (39.1); higher tones are much faster, see computeFastOnsetLatencyMs (sr, range, f0)
+        (table in docs/M2-DESIGN.md 11). Returns 0 for sampleRate <= 0. */
+    static double computeAlgorithmicLatencyMs (double sampleRate, VoiceRange range) noexcept;
+
+    /** Model of the provisional path for a tone at f0Hz (<= 0 or below the range: f0 min, the worst case):
+        1000 * ((numTaps - 1) / 2 + (D - 1)) / sampleRate + 1000 * InputConditioner::groupDelaySeconds (sampleRate, f)
+        + 1000 * (FastOnsetDetector::requiredSamplesFor (fa, f0Min, f0Max, ceil (fa / f) + 1) + fastLatencyBudgetHops * fastHop) / fa
+        with f = max (f0Hz, f0Min). The provisional path needs about two periods of the tone, so the
+        latency falls with the pitch: 48 kHz Tenor 23.2 ms at A2 (f0 min), 12.6 ms at B3. */
+    static double computeFastOnsetLatencyMs (double sampleRate, VoiceRange range, double f0Hz = 0.0) noexcept;
+
+    /** Model of the confirmed (full-window) path, the v0.2.0 formula (docs/M2-DESIGN.md 3.11):
         1000 * ((numTaps - 1) / 2 + (D - 1)) / sampleRate
         + 1000 * InputConditioner::groupDelaySeconds (sampleRate, f0Min)
         + 1000 * (windowSamples + latencyBudgetHops * hopSamples) / analysisRate
         with D = Decimator::factorFor, numTaps = Decimator::numTapsFor (D), analysisRate = sampleRate / D,
-        hop/window from Framer, f0Min of the range. 48 kHz: Tenor ~24.2 ms, Bass/Wide ~39.1 ms (table in
-        docs/M2-DESIGN.md 3.11; spec budgets 30 / 40 ms). Returns 0 for sampleRate <= 0. */
-    static double computeAlgorithmicLatencyMs (double sampleRate, VoiceRange range) noexcept;
+        hop/window from Framer, f0Min of the range. 48 kHz: Tenor ~24.2 ms, Bass/Wide ~39.1 ms. This is
+        the onset latency when the fast path does not fire (weak or noisy onsets). */
+    static double computeConfirmedLatencyMs (double sampleRate, VoiceRange range) noexcept;
+
+    /** Fast-path frame period in analysis samples for an analysis rate: max (1, hop / fastHopDivisor). */
+    static int fastHopSamplesFor (double analysisSampleRate) noexcept;
 
     /** Spec budgets (docs/M2-SPEC.md): Tenor <= 30 ms, Bass <= 40 ms; Wide shares Bass's window. */
     static constexpr double tenorLatencyBudgetMs = 30.0;
@@ -231,6 +268,7 @@ public:
     int getDecimationFactor() const noexcept { return decimator.getFactor(); }
     int getHopSamples() const noexcept { return framer.getHopSamples(); }        ///< analysis rate
     int getHopInputSamples() const noexcept { return framer.getHopSamples() * decimator.getFactor(); }
+    int getFastHopSamples() const noexcept { return fastHopSamples; }             ///< analysis rate
     int getWindowSamples() const noexcept { return framer.getWindowSamples(); }  ///< analysis rate, current range
 
     /** Delay in input samples from the centre of the analysed window to the input sample that completed
@@ -259,6 +297,8 @@ private:
     Framer framer;
     YinPitchDetector yin;
     MpmPitchDetector mpm;
+    FastOnsetDetector fastDetector;
+    int fastHopSamples = 16;
     PitchPostProcessor postProcessor;
     NoteSegmenter segmenter;
     BendGenerator bend;

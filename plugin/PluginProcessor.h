@@ -34,6 +34,72 @@ enum class Variant
     exceeds that; a larger interval starts a new note). */
 int16_t monitorBendFor (int16_t bend, int rangeSemitones) noexcept;
 
+/** VocalSynth's own DSP load (v0.2.1): processing time of one processBlock as a share of the block's
+    real-time duration (numSamples / sampleRate), so the user can tell VocalSynth apart from the synth
+    in FL's CPU meter. addBlock() runs on the audio thread (wait-free, no allocation: plain members +
+    relaxed atomics); getReading() and requestReset() on any thread.
+    - average: exponential moving average over time (averageTimeConstantSeconds, independent of the
+      block size), the first block after a reset sets it directly;
+    - peak: largest single block, decaying with peakDecayTimeConstantSeconds (a 3 s fall to 1/e). */
+class DspLoadMeter
+{
+public:
+    static constexpr double averageTimeConstantSeconds = 1.0;
+    static constexpr double peakDecayTimeConstantSeconds = 3.0;
+
+    struct Reading
+    {
+        float averageProportion = 0.0f; ///< 0.05 = 5 % of the block time
+        float peakProportion = 0.0f;
+        bool valid = false;             ///< false until a block was measured (after a reset)
+    };
+
+    /** Not concurrent with addBlock() (prepareToPlay). Also resets the reading. */
+    void prepare (double newSampleRate) noexcept;
+
+    /** Audio thread. processingSeconds: wall-clock time spent in processBlock for numSamples samples. */
+    void addBlock (double processingSeconds, int numSamples) noexcept;
+
+    Reading getReading() const noexcept;
+
+    /** Any thread: the next addBlock() starts the reading afresh. */
+    void requestReset() noexcept { resetPending.store (true, std::memory_order_relaxed); }
+
+private:
+    double sampleRate = 0.0;
+    double average = 0.0;
+    double peak = 0.0;
+    std::atomic<bool> resetPending { true };
+    std::atomic<float> publishedAverage { 0.0f };
+    std::atomic<float> publishedPeak { 0.0f };
+    std::atomic<bool> publishedValid { false };
+};
+
+/** Largest host block of the last window (windowSeconds of audio) or of the window in progress, for the
+    buffer / total latency display (v0.2.1). The maximum and not the most frequent size: FL without
+    "fixed size buffers" splits its audio buffer into smaller blocks, and the largest block is the one
+    that matches the ASIO buffer (it also sets the worst-case delay). After the buffer is made smaller
+    the display follows within one to two windows. record(): audio thread (wait-free); get(): any thread. */
+class RecentBlockSize
+{
+public:
+    static constexpr double windowSeconds = 1.0;
+
+    /** Not concurrent with record() (prepareToPlay). Clears the values. */
+    void prepare (double sampleRate) noexcept;
+
+    void record (int numSamples) noexcept;
+
+    /** 0 before the first non-empty block. */
+    int get() const noexcept;
+
+private:
+    int64_t windowSamples = 48000;
+    int64_t samplesInWindow = 0;
+    std::atomic<int> runningMax { 0 };
+    std::atomic<int> previousMax { 0 };
+};
+
 class VocalSynthProcessor final : public juce::AudioProcessor
 {
 public:
@@ -125,6 +191,13 @@ public:
         rate (48 kHz before the first prepareToPlay). Not reported to the host: the audio is not delayed. */
     double getVoiceLatencyMs() const noexcept;
 
+    /** Largest host block size of the last 1-2 seconds (RecentBlockSize), 0 before the first block. */
+    int getRecentMaxBlockSize() const noexcept { return recentBlockSize.get(); }
+
+    /** VocalSynth's own processing time per block as a share of the block duration (DspLoadMeter). */
+    DspLoadMeter::Reading getDspLoad() const noexcept { return dspLoad.getReading(); }
+    void resetDspLoad() noexcept { dspLoad.requestReset(); }
+
     static constexpr std::size_t eventBufferCapacity = 1024;
 
     /** processBlock runs the generator, output stage and monitor synth in chunks of at most this many
@@ -188,6 +261,9 @@ private:
 
     // Audio -> UI
     BlockSizeHistogram blockSizeHistogram;
+    RecentBlockSize recentBlockSize;
+    DspLoadMeter dspLoad;
+    const double secondsPerTick; ///< 1 / juce::Time::getHighResolutionTicksPerSecond()
     std::atomic<double> currentSampleRate { 0.0 };
     std::atomic<int> currentTestNote { -1 };
 

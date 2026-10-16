@@ -59,6 +59,27 @@ struct StickinessParams
     minNoteLength never delays a note-on: it only bounds note duration (deferred note-off and change).
     Short blips never start a note because of the onset confirmation + gate + confidence.
 
+    Provisional onsets (v0.2.1, docs/M2-DESIGN.md 11): processOnsetFrame() takes frames of the
+    FastOnsetDetector (short integration, newest samples), which see a tone several ms before the
+    full-window frames do. While idle and armed, fastOnsetConfirmFrames consecutive fast frames with
+    confidence >= fastConfidenceOn, rmsDb >= gate and pitches within fastMaxSpreadCents of each other
+    start a PROVISIONAL note at the last of them (q = quantize (p, -1), velocity from the max rmsDb of
+    those frames, same event order as a note start). Armed = the fast path saw a frame that was not
+    fast-strong since the last note start (or reset): after a note (also a failed provisional one) the
+    fast path needs a gap in the voice first, so it can never re-trigger in a loop where the full path
+    disagrees. While provisional, the full-window frames (processFrame):
+    - within provisionalIgnoreSamples of the start are ignored (keeps the event bound, see
+      VoicePipeline::maxEventsForSamples);
+    - the first strong frame confirms the note: if its candidate quantize (p, q) wins by 2 h (the usual
+      change condition without T_min and minNoteLength), the note is corrected at once (change with the
+      legato/retrigger order); otherwise the note continues as a normal one, with this frame;
+    - other frames hold the note (no release counting, no bend updates) until provisionalTimeoutSamples
+      after the start; then the note becomes normal if the frame is weak voiced, else it ends at once
+      (false start; minNoteLength does not apply). After a false start the fast path stays off until
+      a frame below gateThresholdDb - gateHysteresisDb (a real gap): where the full window never
+      agrees (e.g. a tone whose 2 f0 lies above the range and whose 2nd harmonic dominates, which YIN
+      rejects as out of range), alternating fast frames would otherwise re-arm it every timeout.
+
     Event order at one sample (binding):
     - note start:            bend.noteStarted, note-on
     - retrigger change:      note-off (old), bend.noteStarted (new q), note-on (new)     [legato == false]
@@ -82,6 +103,12 @@ public:
     static constexpr int maxEventsPerFrame = 3;
     static constexpr float bendHoldDropDb = 3.0f;          ///< see "reliable" above
     static constexpr double levelFallDbPerSecond = 20.0;   ///< level follower for bendHoldDropDb
+
+    // Provisional onsets from FastOnsetDetector frames (see class comment)
+    static constexpr float fastConfidenceOn = 0.95f;
+    static constexpr int fastOnsetConfirmFrames = 2;
+    static constexpr double fastMaxSpreadCents = 20.0;  ///< also absorbs the onset bias (FastOnsetDetector)
+    static constexpr int maxEventsPerOnsetFrame = 2;       ///< bend + note-on
 
     // Thresholds of other modules that are defined relative to these (kept in sync at compile time)
     static_assert (YinPitchDetector::fallbackMaxConfidence >= confidenceOff
@@ -115,6 +142,18 @@ public:
     void processFrame (const PitchFrame& frame, int64_t absoluteSample, int sampleOffset, BendGenerator& bend,
                        VsEventSink out) noexcept;
 
+    /** Provisional-note timing in host samples (VoicePipeline: ignore = 1 hop, timeout = window + a few
+        hops of the current range). Never emits. Values < 0 are treated as 0. */
+    void setOnsetTiming (int64_t provisionalIgnoreSamples, int64_t provisionalTimeoutSamples) noexcept;
+
+    /** One FastOnsetDetector frame (only used while idle, see class comment). Same arguments as
+        processFrame(). Emits at most maxEventsPerOnsetFrame events. */
+    void processOnsetFrame (const PitchFrame& frame, int64_t absoluteSample, int sampleOffset, BendGenerator& bend,
+                            VsEventSink out) noexcept;
+
+    /** True while the active note was started by processOnsetFrame() and not yet confirmed. */
+    bool isProvisional() const noexcept { return provisional; }
+
     /** Ends the active note (note-off + bend.noteEnded) at sampleOffset and goes idle. Emits nothing if
         no note is active. */
     void flush (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
@@ -140,6 +179,9 @@ private:
                            BendGenerator& bend, VsEventSink out) noexcept;
     void processNoteFrame (const PitchFrame& frame, bool weak, double p, int64_t absoluteSample, int sampleOffset,
                            BendGenerator& bend, VsEventSink out) noexcept;
+    /** Provisional-note handling of a full-window frame; true if the frame was consumed. */
+    bool processProvisionalFrame (const PitchFrame& frame, bool strong, bool weak, double p, int64_t absoluteSample,
+                                  int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
     void startNote (int q, int outputNote, uint8_t velocity, float levelDb, double p, int64_t absoluteSample,
                     int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
     /** Updates the level follower with this frame; true if the frame's pitch may drive the bend. */
@@ -174,6 +216,16 @@ private:
     bool lastFrameVoiced = false;
     float noteLevelDb = PitchFrame::silenceDb;  ///< level follower of the active note (bend hold)
     int64_t noteLevelSample = 0;                ///< absolute sample of the last follower update
+
+    // Provisional onsets
+    int64_t provisionalIgnoreSamples = 0;
+    int64_t provisionalTimeoutSamples = 0;
+    bool provisional = false;
+    bool fastArmed = true;         ///< see class comment
+    bool fastBlocked = false;      ///< after a false start: no fast onsets until a gap below the gate
+    int fastFrames = 0;            ///< consecutive agreeing fast-strong frames while idle
+    double fastLastPitch = 0.0;
+    float fastMaxRmsDb = PitchFrame::silenceDb;
 };
 
 } // namespace vocalsynth

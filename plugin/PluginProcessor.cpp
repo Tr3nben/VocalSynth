@@ -19,8 +19,118 @@ int16_t monitorBendFor (int16_t bend, int rangeSemitones) noexcept
     return static_cast<int16_t> (juce::jlimit (-8192L, 8191L, std::lround (scaled)));
 }
 
+//==============================================================================
+void DspLoadMeter::prepare (double newSampleRate) noexcept
+{
+    sampleRate = newSampleRate;
+    average = 0.0;
+    peak = 0.0;
+    resetPending.store (true, std::memory_order_relaxed);
+    publishedAverage.store (0.0f, std::memory_order_relaxed);
+    publishedPeak.store (0.0f, std::memory_order_relaxed);
+    publishedValid.store (false, std::memory_order_relaxed);
+}
+
+void DspLoadMeter::addBlock (double processingSeconds, int numSamples) noexcept
+{
+    if (numSamples <= 0 || sampleRate <= 0.0 || ! (processingSeconds >= 0.0))
+        return;
+
+    const auto blockSeconds = static_cast<double> (numSamples) / sampleRate;
+    const auto load = processingSeconds / blockSeconds;
+
+    if (resetPending.exchange (false, std::memory_order_relaxed))
+    {
+        average = load;
+        peak = load;
+    }
+    else
+    {
+        average += (load - average) * (1.0 - std::exp (-blockSeconds / averageTimeConstantSeconds));
+        peak = juce::jmax (load, peak * std::exp (-blockSeconds / peakDecayTimeConstantSeconds));
+    }
+
+    publishedAverage.store (static_cast<float> (average), std::memory_order_relaxed);
+    publishedPeak.store (static_cast<float> (peak), std::memory_order_relaxed);
+    publishedValid.store (true, std::memory_order_relaxed);
+}
+
+DspLoadMeter::Reading DspLoadMeter::getReading() const noexcept
+{
+    Reading r;
+    r.valid = publishedValid.load (std::memory_order_relaxed) && ! resetPending.load (std::memory_order_relaxed);
+
+    if (r.valid)
+    {
+        r.averageProportion = publishedAverage.load (std::memory_order_relaxed);
+        r.peakProportion = publishedPeak.load (std::memory_order_relaxed);
+    }
+
+    return r;
+}
+
+void RecentBlockSize::prepare (double sampleRate) noexcept
+{
+    windowSamples = juce::jmax ((int64_t) 1, (int64_t) std::llround ((sampleRate > 0.0 ? sampleRate : 48000.0) * windowSeconds));
+    samplesInWindow = 0;
+    runningMax.store (0, std::memory_order_relaxed);
+    previousMax.store (0, std::memory_order_relaxed);
+}
+
+void RecentBlockSize::record (int numSamples) noexcept
+{
+    if (numSamples <= 0)
+        return;
+
+    if (numSamples > runningMax.load (std::memory_order_relaxed)) // single writer: no CAS needed
+        runningMax.store (numSamples, std::memory_order_relaxed);
+
+    samplesInWindow += numSamples;
+
+    if (samplesInWindow >= windowSamples)
+    {
+        previousMax.store (runningMax.load (std::memory_order_relaxed), std::memory_order_relaxed);
+        runningMax.store (0, std::memory_order_relaxed);
+        samplesInWindow = 0;
+    }
+}
+
+int RecentBlockSize::get() const noexcept
+{
+    return juce::jmax (previousMax.load (std::memory_order_relaxed), runningMax.load (std::memory_order_relaxed));
+}
+
 namespace
 {
+/** Measures the enclosing processBlock for the DspLoadMeter (high-resolution ticks: QueryPerformanceCounter /
+    clock_gettime, no allocation, no lock). */
+class ScopedLoadMeasurement
+{
+public:
+    ScopedLoadMeasurement (DspLoadMeter& m, int samples, double secondsPerHighResTick) noexcept
+        : meter (m),
+          numSamples (samples),
+          secondsPerTick (secondsPerHighResTick),
+          startTicks (juce::Time::getHighResolutionTicks())
+    {
+    }
+
+    ~ScopedLoadMeasurement()
+    {
+        const auto elapsed = juce::Time::getHighResolutionTicks() - startTicks;
+        meter.addBlock (static_cast<double> (elapsed) * secondsPerTick, numSamples);
+    }
+
+    ScopedLoadMeasurement (const ScopedLoadMeasurement&) = delete;
+    ScopedLoadMeasurement& operator= (const ScopedLoadMeasurement&) = delete;
+
+private:
+    DspLoadMeter& meter;
+    const int numSamples;
+    const double secondsPerTick;
+    const juce::int64 startTicks;
+};
+
 /** Brings a saved state up to the current parameter layout before it is loaded. replaceState() keeps
     the CURRENT value of every parameter the state does not mention (JUCE flushes the live values into
     the missing children), so without this the result of loading an older state would depend on what
@@ -71,7 +181,8 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
     : AudioProcessor (makeBusesProperties (v)),
       variant (v),
       apvts (*this, nullptr, "PARAMS", params::createLayout()),
-      virtualMidiPort (v == Variant::instrument ? "VocalSynth Instrument" : "VocalSynth FX")
+      virtualMidiPort (v == Variant::instrument ? "VocalSynth Instrument" : "VocalSynth FX"),
+      secondsPerTick (1.0 / static_cast<double> (juce::jmax ((juce::int64) 1, juce::Time::getHighResolutionTicksPerSecond())))
 {
     static_assert (static_cast<int> (TestPattern::all) == 4, "testPattern choice index == TestPattern");
 
@@ -131,6 +242,8 @@ void VocalSynthProcessor::prepareToPlay (double sampleRate, int maximumExpectedS
     monitorSynth.prepare (sampleRate);
     currentSampleRate.store (sampleRate, std::memory_order_relaxed);
     currentTestNote.store (-1, std::memory_order_relaxed);
+    recentBlockSize.prepare (sampleRate);
+    dspLoad.prepare (sampleRate);
     reset();
 }
 
@@ -168,13 +281,15 @@ bool VocalSynthProcessor::isBusesLayoutSupported (const BusesLayout& layouts) co
 //==============================================================================
 void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    const auto numSamples = buffer.getNumSamples();
+    const ScopedLoadMeasurement loadMeasurement (dspLoad, numSamples, secondsPerTick);
     juce::ScopedNoDenormals noDenormals;
 
     // No MIDI input is accepted; the buffer is ours to fill
     midi.clear();
 
-    const auto numSamples = buffer.getNumSamples();
     blockSizeHistogram.record (numSamples);
+    recentBlockSize.record (numSamples);
     virtualMidiPort.setEnabled (virtualMidiOutParam->load (std::memory_order_relaxed) >= 0.5f);
 
     // No MIDI is allowed in a 0-sample block; a pending flush waits for the next real block
@@ -313,10 +428,12 @@ void VocalSynthProcessor::prepareMonitorEvents (int rangeSemitones) noexcept
 
 void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    const auto numSamples = buffer.getNumSamples();
+    const ScopedLoadMeasurement loadMeasurement (dspLoad, numSamples, secondsPerTick);
     midi.clear();
 
-    const auto numSamples = buffer.getNumSamples();
     blockSizeHistogram.record (numSamples);
+    recentBlockSize.record (numSamples);
     virtualMidiPort.setEnabled (virtualMidiOutParam->load (std::memory_order_relaxed) >= 0.5f);
     currentTestNote.store (-1, std::memory_order_relaxed);
 

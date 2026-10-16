@@ -121,7 +121,7 @@ struct VoiceSettings
     int key = 0;                             ///< 0..11 = C, C#, ..., B
     Scale scale = Scale::chromatic;
     float stickinessPercent = 50.0f;         ///< 0..100
-    float gateThresholdDb = -45.0f;          ///< -70..-10 dBFS (RMS of the conditioned signal)
+    float gateThresholdDb = -40.0f;          ///< -70..-10 dBFS (RMS of the conditioned signal)
     float minNoteLengthMs = 60.0f;           ///< 20..250
     int octaveShift = 0;                     ///< -3..+3 octaves, applied to the output note
     BendMode bendMode = BendMode::off;
@@ -165,7 +165,7 @@ constexpr VoiceSettings sanitise (VoiceSettings s) noexcept
     s.key = std::clamp (s.key, 0, 11);
     s.scale = clampEnum (s.scale, numScales);
     s.stickinessPercent = clampFloat (s.stickinessPercent, minStickinessPercent, maxStickinessPercent, 50.0f);
-    s.gateThresholdDb = clampFloat (s.gateThresholdDb, minGateThresholdDb, maxGateThresholdDb, -45.0f);
+    s.gateThresholdDb = clampFloat (s.gateThresholdDb, minGateThresholdDb, maxGateThresholdDb, -40.0f);
     s.minNoteLengthMs = clampFloat (s.minNoteLengthMs, minMinNoteLengthMs, maxMinNoteLengthMs, 60.0f);
     s.octaveShift = std::clamp (s.octaveShift, minOctaveShift, maxOctaveShift);
     s.bendMode = clampEnum (s.bendMode, numBendModes);

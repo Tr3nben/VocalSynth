@@ -1,5 +1,7 @@
 #include "vocalsynth/PitchDetector.h"
 
+#include "vocalsynth/Framer.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -180,6 +182,76 @@ float frequencyInRange (double fa, double period, double f0MinHz, double f0MaxHz
         return 0.0f;
 
     return static_cast<float> (f);
+}
+
+/** MPM key-maximum selection on a lag function n[0..lags.maxLag] (NSDF-like, 1 = periodic). Skips the
+    lobe around tau = 0 (up to the first value <= 0); every later positive lobe (a lobe still open at
+    maxLag ends there) contributes its highest value. Only key maxima at tau >= scanMin take part
+    (scanMin < tauMin, so a period above f0 max is seen and then rejected by the edge rule). Key
+    maxima are compared by their interpolated (vertex) values, as in McLeod & Wyvill: with periods of
+    a few lags the integer peak can be far below the true one and lose against 2 T. (A lobe still open
+    at maxLag has no right neighbour: its value is n(maxLag), never interpolated.)
+    Returns the first key maximum with value >= keyThreshold * (highest of them), or -1 if there is
+    none. The caller applies the edge rule. */
+int selectKeyMaximum (const float* n, const LagRange& lags, float keyThreshold) noexcept
+{
+    const auto vertexAt = [n, &lags] (int tau) noexcept
+    { return tau < lags.maxLag ? parabolicVertexValue (n[tau - 1], n[tau], n[tau + 1]) : n[tau]; };
+
+    const auto forEachKeyMaximum = [&] (auto&& visit) noexcept
+    {
+        int tau = 1;
+
+        while (tau <= lags.maxLag && n[tau] > 0.0f)
+            ++tau;
+
+        while (tau <= lags.maxLag)
+        {
+            while (tau <= lags.maxLag && n[tau] <= 0.0f)
+                ++tau;
+
+            if (tau > lags.maxLag)
+                break;
+
+            int best = tau;
+
+            for (; tau <= lags.maxLag && n[tau] > 0.0f; ++tau)
+                if (n[tau] > n[best])
+                    best = tau;
+
+            if (best >= lags.scanMin && visit (best))
+                return;
+        }
+    };
+
+    float highest = 0.0f;
+    forEachKeyMaximum ([&] (int tau) noexcept
+    {
+        highest = std::max (highest, vertexAt (tau));
+        return false;
+    });
+
+    if (! (highest > 0.0f))
+        return -1;
+
+    int chosen = -1;
+    const auto threshold = keyThreshold * highest;
+    forEachKeyMaximum ([&] (int tau) noexcept
+    {
+        if (vertexAt (tau) < threshold)
+            return false;
+
+        chosen = tau;
+        return true;
+    });
+
+    return chosen;
+}
+
+/** Value of the lag function at the chosen key maximum (interpolated if it has a right neighbour). */
+float keyMaximumValue (const float* n, const LagRange& lags, int tau) noexcept
+{
+    return tau < lags.maxLag ? parabolicVertexValue (n[tau - 1], n[tau], n[tau + 1]) : n[tau];
 }
 } // namespace
 
@@ -369,61 +441,8 @@ PitchFrame MpmPitchDetector::analyse (std::span<const float> input, double f0Min
         n[tau] = m > 0.0 ? static_cast<float> (2.0 * r / m) : 0.0f;
     }
 
-    // Key maxima: skip the lobe around tau = 0 (up to the first value <= 0), then every positive lobe
-    // (a lobe still open at maxLag ends there) contributes its highest value. Only key maxima at
-    // tau >= scanMin take part (scanMin < tauMin, so a period above f0 max is seen and rejected below).
-    // Key maxima are compared by their interpolated (vertex) values, as in McLeod & Wyvill: with
-    // periods of a few lags the integer peak can be far below the true one and lose against 2 T.
-    // (A lobe still open at maxLag has no right neighbour: its value is n(maxLag), never interpolated.)
-    const auto vertexAt = [n, &lags] (int tau) noexcept
-    { return tau < lags.maxLag ? parabolicVertexValue (n[tau - 1], n[tau], n[tau + 1]) : n[tau]; };
-
-    const auto forEachKeyMaximum = [&] (auto&& visit) noexcept
-    {
-        int tau = 1;
-
-        while (tau <= lags.maxLag && n[tau] > 0.0f)
-            ++tau;
-
-        while (tau <= lags.maxLag)
-        {
-            while (tau <= lags.maxLag && n[tau] <= 0.0f)
-                ++tau;
-
-            if (tau > lags.maxLag)
-                break;
-
-            int best = tau;
-
-            for (; tau <= lags.maxLag && n[tau] > 0.0f; ++tau)
-                if (n[tau] > n[best])
-                    best = tau;
-
-            if (best >= lags.scanMin && visit (best))
-                return;
-        }
-    };
-
-    float highest = 0.0f;
-    forEachKeyMaximum ([&] (int tau) noexcept
-    {
-        highest = std::max (highest, vertexAt (tau));
-        return false;
-    });
-
-    if (! (highest > 0.0f))
-        return frame;
-
-    int chosen = -1;
-    const auto threshold = keyThreshold * highest;
-    forEachKeyMaximum ([&] (int tau) noexcept
-    {
-        if (vertexAt (tau) < threshold)
-            return false;
-
-        chosen = tau;
-        return true;
-    });
+    // Key maxima (selectKeyMaximum): the first one with n >= keyThreshold * (highest of them)
+    const auto chosen = selectKeyMaximum (n, lags, keyThreshold);
 
     // Edge rule: the peak must lie inside the range (a key maximum below tauMin is a period above
     // f0 max; one at tauMax + 1 = maxLag is a lobe still rising at the end, i.e. a period below f0 min)
@@ -436,7 +455,137 @@ PitchFrame MpmPitchDetector::analyse (std::span<const float> input, double f0Min
     if (frequency > 0.0f)
     {
         frame.frequencyHz = frequency;
-        frame.confidence = std::clamp (vertexAt (chosen), 0.0f, 1.0f);
+        frame.confidence = std::clamp (keyMaximumValue (n, lags, chosen), 0.0f, 1.0f);
+    }
+
+    return frame;
+}
+
+//==============================================================================
+int FastOnsetDetector::integrationFloorFor (double analysisSampleRate, double f0MinHz) noexcept
+{
+    if (! (analysisSampleRate > 0.0) || ! (f0MinHz > 0.0))
+        return minIntegrationSamples;
+
+    return std::max (minIntegrationSamples,
+                     static_cast<int> (std::ceil (integrationFloorPeriods * analysisSampleRate / f0MinHz)));
+}
+
+int FastOnsetDetector::integrationSamplesFor (int tau, int integrationFloor, int windowSize) noexcept
+{
+    return std::max (1, std::min (std::max (integrationFloor, tau), windowSize - tau));
+}
+
+int FastOnsetDetector::requiredSamplesFor (double analysisSampleRate, double f0MinHz, double f0MaxHz,
+                                           int periodSamples) noexcept
+{
+    const auto window = Framer::windowSamplesFor (analysisSampleRate, f0MinHz);
+    const auto lags = lagRangeFor (analysisSampleRate, static_cast<std::size_t> (window), f0MinHz, f0MaxHz);
+    const auto tau = periodSamples > 0 ? std::min (periodSamples, lags.maxLag) : lags.maxLag;
+    return tau + integrationSamplesFor (tau, integrationFloorFor (analysisSampleRate, f0MinHz), window);
+}
+
+void FastOnsetDetector::prepare (double analysisSampleRate, int maxWindowSamples)
+{
+    sampleRate = analysisSampleRate > 0.0 ? analysisSampleRate : 16000.0;
+    maxWindow = std::max (1, maxWindowSamples);
+    nsdf.assign (lagBufferSizeFor (maxWindow), 0.0f);
+    cumulativeEnergy.assign (static_cast<std::size_t> (maxWindow) + 1, 0.0);
+    smoothed.assign (static_cast<std::size_t> (maxWindow), 0.0f);
+}
+
+PitchFrame FastOnsetDetector::analyse (std::span<const float> input, double f0MinHz, double f0MaxHz, float minRmsDb) noexcept
+{
+    PitchFrame frame;
+    const auto window = limitWindow (input, maxWindow);
+    frame.rmsDb = frameRmsDb (window, sampleRate, f0MinHz);
+
+    // Same lag range as the full-window detectors (the window is the Framer's window of the range)
+    const auto lags = lagRangeFor (sampleRate, window.size(), f0MinHz, f0MaxHz);
+    const auto integrationFloor = integrationFloorFor (sampleRate, f0MinHz);
+    const auto size = static_cast<int> (window.size());
+
+    if (frame.rmsDb < silenceFloorDb || frame.rmsDb < minRmsDb || ! lags.valid
+        || nsdf.size() < static_cast<std::size_t> (lags.maxLag + 2) || cumulativeEnergy.size() < window.size() + 1 || smoothed.size() < window.size() || integrationFloor + lags.tauMin < 3
+        || integrationFloor + lags.tauMin > size)
+        return frame;
+
+    // Zero-phase [1 2 1] / 4 smoothing (zero at fa / 2, -6 dB at fa / 4): the correlation is sampled at
+    // integer lags, and with strong harmonics near fa / 2 its peak at a non-integer period is so narrow
+    // that the sampled (and interpolated) value falls below the one at 2 T (a missing-fundamental tone
+    // at 653 Hz = 24.5 lags read 0.91 at T and 0.999 at 49 lags, and started an octave low). The pitch
+    // information of a voice lies far below fa / 4. Edges: the outer sample is repeated.
+    {
+        const auto* raw = window.data();
+        auto* y = smoothed.data();
+        y[0] = 0.75f * raw[0] + 0.25f * raw[1];
+
+        for (int j = 1; j + 1 < size; ++j)
+            y[j] = 0.25f * raw[j - 1] + 0.5f * raw[j] + 0.25f * raw[j + 1];
+
+        y[size - 1] = 0.25f * raw[size - 2] + 0.75f * raw[size - 1];
+    }
+
+    // Newest-anchored normalised cross-correlation: a(tau) = the newest Wi(tau) samples, b(tau) = the
+    // same span tau samples earlier, n(tau) = <a, b> / (|a| |b|), Wi(tau) = integrationSamplesFor (tau).
+    // - Wi >= tau (one candidate period, up to the window end): with less than a period, a waveform
+    //   can be locally simple (the ramp of a saw), and the correlation is ambiguous: a 92.5 Hz saw read
+    //   85 Hz with 1.000 when Wi was a fixed half period of f0 min.
+    // - The cosine, not the NSDF 2 <a, b> / (|a|^2 + |b|^2): the NSDF's energy factor
+    //   2 sqrt (q) / (1 + q), q = |b|^2 / |a|^2, falls with tau whenever the level changes (onset ramp,
+    //   decay) and pulls the peak to shorter lags (59.6 Hz read 64 Hz with 0.97 at a 10 ms fade-out,
+    //   inside the Bass range). A partly filled b (onset) still costs: voiced fraction v gives
+    //   n(T) = sqrt (v), so n >= 0.9 needs v >= 0.81.
+    // Energies come from prefix sums of x^2 (double, fixed order: deterministic).
+    const auto* x = smoothed.data();
+    auto* cum = cumulativeEnergy.data();
+    cum[0] = 0.0;
+
+    for (int j = 0; j < size; ++j)
+        cum[j + 1] = cum[j] + static_cast<double> (x[j]) * static_cast<double> (x[j]);
+
+    const auto energy = [cum] (int from, int count) noexcept { return std::max (0.0, cum[from + count] - cum[from]); };
+
+    auto* n = nsdf.data();
+    n[0] = 1.0f;
+
+    for (int tau = 1; tau <= lags.maxLag; ++tau)
+    {
+        const auto wi = integrationSamplesFor (tau, integrationFloor, size);
+        const auto start = size - wi;
+        const auto m = energy (start, wi) * energy (start - tau, wi);
+        const auto r = static_cast<double> (dotProduct (x + start, x + start - tau, wi));
+        n[tau] = m > 0.0 ? static_cast<float> (r / std::sqrt (m)) : 0.0f;
+    }
+
+    const auto chosen = selectKeyMaximum (n, lags, keyThreshold);
+
+    // Edge rule as in MPM
+    if (chosen < lags.tauMin || chosen > lags.tauMax)
+        return frame;
+
+    // Level step: at the true period of a steady tone both spans hold the same energy; a much louder or
+    // quieter b means a fast onset or decay inside the analysed span. Same limit as the full-window
+    // detectors (6 dB). (With 1.5 dB the gate also blocked ordinary 25 ms raised-cosine voice attacks
+    // until they were over: no latency gain on voice-like onsets. The short-integration bias it was
+    // first added for - a below-range tone read in range at a 10 ms fade - is gone since Wi >= tau and
+    // the cosine; the out-of-range pipeline tests pass without any gate.)
+    {
+        const auto wi = integrationSamplesFor (chosen, integrationFloor, size);
+        const auto energyA = energy (size - wi, wi);
+        const auto energyB = energy (size - wi - chosen, wi);
+
+        if (! (energyA > 0.0) || ! (energyB > 0.0) || std::abs (10.0 * std::log10 (energyB / energyA)) > maxEnergyStepDb)
+            return frame;
+    }
+
+    const auto offset = parabolicOffset (n[chosen - 1], n[chosen], n[chosen + 1]);
+    const auto frequency = frequencyInRange (sampleRate, static_cast<double> (chosen) + offset, f0MinHz, f0MaxHz);
+
+    if (frequency > 0.0f)
+    {
+        frame.frequencyHz = frequency;
+        frame.confidence = std::clamp (keyMaximumValue (n, lags, chosen), 0.0f, 1.0f);
     }
 
     return frame;
