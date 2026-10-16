@@ -274,7 +274,7 @@ Umgesetzt in Version 0.2.0, Feinschliff nach dem Nutzertest in 0.2.1 (Vorgabe `d
   - [x] Eigene DSP-Last im Plugin (Mittel und Spitze in % der Blockzeit), um VocalSynth vom Synth zu unterscheiden.
   - [x] Gate-Standard −40 dB (vorher −45), alle Regler bleiben einstellbar.
   - [x] Auswertung mit öffentlichen Gesangs-Datensätzen vorbereitet (`docs/CORPUS.md`, manueller Workflow `corpus-eval.yml`: vocadito, Dagstuhl ChoirSet, VocalSet).
-- [ ] Test von 0.2.1 durch den Nutzer (Kurztest in `docs/M2-TESTING.md`, Abschnitt 0).
+- [x] Test von 0.2.1 durch den Nutzer (Kurztest in `docs/M2-TESTING.md`, Abschnitt 0): am 2026-10-16 in FL Studio 2026 „funktioniert alles super“.
 - [ ] Abnahme der Korpus-Kriterien unten auf echten Gesangsaufnahmen: öffentliche Datensätze per `corpus-eval.yml` (erster Lauf steht aus), optional Aufnahmen des Nutzers.
 - [x] Stretch: Note-On beim Onset mit vorläufiger Tonhöhe (0.2.1). Korrigiert wird nicht per Bend, sondern durch sofortigen Notenwechsel, wenn das volle Fenster eine andere Note findet.
 

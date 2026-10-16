@@ -331,6 +331,17 @@ to report), LIESMICH.txt update (CRLF), README status, PLAN.md M3 checkboxes, CI
 - Block-size invariant capture and byte-identical `.mid` exports (section 2).
 - All existing gates stay green.
 
+## Decisions (confirmed by the user on 2026-10-16)
+
+The user chose "alle 6 übernehmen" for the open questions below, so these are binding for M3:
+
+1. MIDI file starts at the bar where the take starts (bar number in the file name).
+2. Voice is captured as WAV too: on by default, 10 minutes look-back, dragged WAVs kept in `Documents\VocalSynth\Takes`.
+3. Latency compensation "Auto" (2 × buffer) plus a fine offset in ms; clap calibration later (not in M3).
+4. Takes are not saved in the project, only the capture settings.
+5. Drag default: Clean, no quantize, pitch bend as configured in the plugin.
+6. Free mode: a pause of 3 s (adjustable) starts a new take.
+
 ## Open questions for the user (German; each with the recommended default)
 
 1. **Ausrichtung der MIDI-Datei:** Soll die Datei am Taktanfang des Takes beginnen (Dateiname enthält die

@@ -48,7 +48,9 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2 in `master` gemergt.
   (Schleifer: falscher Halbton am Notenanfang); nach dem Fix 0,278/0,304.
 - **M3-Vorgabe als Entwurf:** [docs/M3-SPEC.md](M3-SPEC.md) (Aufnahme + Drag & Drop, Ziel 0.3.0). **Wartet auf die
   Antworten des Nutzers** zu den 6 offenen Fragen am Ende und auf seine Freigabe; erst dann Branch `m3-capture`.
-- Danach: Commit/Push von `m2.1-polish`, CI, Windows-ZIP 0.2.1 an den Nutzer, PR nach `master`.
+- 2026-10-16: 0.2.1 vom Nutzer in FL getestet („funktioniert alles super“), PR nach `master`.
+- Nächster Meilenstein: M3 (Capture + Drag & Drop) nach [docs/M3-SPEC.md](M3-SPEC.md). Der Nutzer hat alle 6
+  empfohlenen Antworten bestätigt (Abschnitt „Decisions“ dort). Branch `m3-capture`.
 
 ## Arbeitsweise (vom Nutzer gewünscht)
 
