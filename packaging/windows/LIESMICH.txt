@@ -28,7 +28,7 @@ Installation
    FL Studio durchsucht auch Unterordner, der Ordner "VocalSynth" wird also
    gefunden.
 
-Was ist das für eine Version? (0.2.0, Meilenstein 2)
+Was ist das für eine Version? (0.2.1, Meilenstein 2)
 ----------------------------------------------------
 Ab dieser Version wird deine Stimme zu MIDI: Du singst oder summst ins
 Mikrofon, VocalSynth erkennt die Tonhöhe und schickt Noten (und auf Wunsch
@@ -44,6 +44,11 @@ Zahnrad-Menü (VST wrapper settings > MIDI) "Output port" z. B. auf 1
 stellen, beim Synth (z. B. Vital) "Input port" ebenfalls auf 1. Im
 Plugin-Reiter "Voice": Source = Voice, Voice Range = Tenor (oder deine
 Stimmlage), dann singen.
+
+Neu in 0.2.1: ruhigeres Stimmgerät, schnellere Notenanfänge, Gate-Standard
+-40 dB, Anzeige von Puffer, Gesamt-Latenz und eigener DSP-Last. Tipp: ASIO-Puffer auf 128 oder 256 Samples stellen
+(Options > Audio settings > Buffer length); 2048 Samples kosten allein
+ca. 46 ms pro Puffer, und der Puffer zählt doppelt (Ein- und Ausgang).
 
 Hinweis: FL Studio nimmt das MIDI eines Plugins nicht in die Piano Roll
 auf. Die eigene Aufnahme mit Drag & Drop kommt in Meilenstein 3.

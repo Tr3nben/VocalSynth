@@ -1,0 +1,13 @@
+# tools/corpus (docs/CORPUS.md). Python 3.12 / 3.13. Install: python -m pip install -r tools/corpus/requirements.txt
+numpy==2.2.6
+soundfile==0.13.1
+soxr==0.5.0.post1
+# librosa only for the pYIN reference of VocalSet (no annotations there); its numerics pinned as well
+librosa==0.11.0
+numba==0.68.0
+llvmlite==0.50.0
+scipy==1.18.1
+scikit-learn==1.9.1
+# tests (tests/tools/corpus)
+pytest==8.4.2
+PyYAML==6.0.2

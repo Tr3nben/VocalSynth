@@ -4,9 +4,10 @@
 
 VocalSynth ist ein geplantes Open-Source-Plugin (VST3 + CLAP) für FL Studio. Hauptplattform ist Windows, macOS folgt später. Das Plugin macht aus einem Mikrofonsignal in Echtzeit MIDI: gesungene Töne werden zu Noten, Beatbox-Laute zu Drum-Triggern, Lautstärke und Vokale zu Controller-Daten. Vom Funktionsumfang her orientiert es sich an Vochlea Dubler 2.
 
-> **Status: Meilenstein 2 – Singen wird zu MIDI (Version 0.2.0, Testbuild).**
-> Das Plugin erkennt die Tonhöhe deiner Stimme in Echtzeit (MPM, wahlweise YIN) und schickt saubere MIDI-Noten, auf Wunsch mit Pitchbend, über den MIDI-Port von FL Studio an einen Synth. Einstellbar sind Stimmlage (Bass bis Sopran, Whistle, Wide; Standard Tenor), Tonart und Skala, Stickiness, Gate, Mindest-Notenlänge, Velocity, Oktave, Legato sowie Bend-Modus und Bend-Range. Das Fenster zeigt ein Stimmgerät (Notennamen wie in FL, C5 = 60), die gesendete Note und die Analyse-Latenz in ms (Tenor ca. 24 ms, Bass ca. 39 ms). Der Testmodus aus M1 bleibt im Reiter „Test & Routing“ erreichbar.
-> **Noch offen:** der Test durch den Nutzer in FL Studio 2026 (Anleitung: [docs/M2-TESTING.md](docs/M2-TESTING.md)) und die Feinabstimmung mit echten Gesangsaufnahmen. FL nimmt Plugin-MIDI nicht in die Piano Roll auf; die eigene Aufnahme mit Drag & Drop kommt in Meilenstein 3.
+> **Status: Meilenstein 2 – Singen wird zu MIDI (Version 0.2.1, Testbuild).**
+> Das Plugin erkennt die Tonhöhe deiner Stimme in Echtzeit (MPM, wahlweise YIN) und schickt saubere MIDI-Noten, auf Wunsch mit Pitchbend, über den MIDI-Port von FL Studio an einen Synth. Einstellbar sind Stimmlage (Bass bis Sopran, Whistle, Wide; Standard Tenor), Tonart und Skala, Stickiness, Gate (Standard −40 dB), Mindest-Notenlänge, Velocity, Oktave, Legato sowie Bend-Modus und Bend-Range. Das Fenster zeigt ein ruhiges Stimmgerät (Notennamen wie in FL, C5 = 60), die gesendete Note, die Latenz (Analyse, Audio-Puffer, geschätzte Gesamt-Latenz) und die eigene DSP-Last. Der Testmodus aus M1 bleibt im Reiter „Test & Routing“ erreichbar.
+> **M2-Ergebnis (2026-10-15):** Vom Nutzer in FL Studio 2026 getestet: Einzeltöne, Tonleitern, Vibrato und Legato funktionieren, MPM ist etwas besser als YIN. **0.2.1** setzt die Rückmeldung um: ruhigere Anzeige des Stimmgeräts, schnellere Notenanfänge (Tenor bei mittlerer Tonlage ca. 11 statt 20 ms), Puffer- und Gesamt-Latenz mit Hinweis bei großem ASIO-Puffer, Anzeige der eigenen DSP-Last, Gate-Standard −40 dB. Anleitung: [docs/M2-TESTING.md](docs/M2-TESTING.md).
+> **Als Nächstes:** Feinabstimmung mit öffentlichen Gesangs-Datensätzen ([docs/CORPUS.md](docs/CORPUS.md)) und Meilenstein 3, Aufnahme mit Drag & Drop (Entwurf [docs/M3-SPEC.md](docs/M3-SPEC.md), wartet auf die Freigabe). FL nimmt Plugin-MIDI nicht in die Piano Roll auf, deshalb kommt die eigene Aufnahme in M3.
 > **M1-Ergebnis (2026-10-15):** VocalSynth FX auf dem Mikro-Insert schickt Noten, Pitchbend und CC über einen MIDI-Port an jeden VST3-Synth. Das ist der Hauptweg ([docs/FL-ROUTING.md](docs/FL-ROUTING.md)).
 > Grundlage sind die technische Recherche ([docs/RESEARCH.md](docs/RESEARCH.md)) und der Plan ([docs/PLAN.md](docs/PLAN.md)). Die Features unten beschreiben das Ziel, nicht den aktuellen Stand.
 
@@ -109,6 +110,7 @@ VocalSynth/
 ├── plugin/                    # Processor, Editor, Parameter, createPluginFilter
 ├── tests/                     # Catch2: core/ (DSP) und plugin/ (Processor ohne Host)
 ├── tools/vs-eval/             # Auswertung der Tonhöhenerkennung auf WAV-Dateien (JSON-Metriken, YIN vs. MPM)
+├── tools/corpus/              # Download und Aufbereitung öffentlicher Gesangs-Datensätze für vs-eval (docs/CORPUS.md)
 ├── docs/                      # RESEARCH.md, PLAN.md, M1-/M2-Design, FL-ROUTING.md, M2-TESTING.md
 └── .github/workflows/         # Build, Tests, pluginval, VST3- und CLAP-Validator
 ```
@@ -194,6 +196,9 @@ Im Ordner [`.claude/skills/`](.claude/skills) liegen Skills für die Entwicklung
 - [docs/M1-DESIGN.md](docs/M1-DESIGN.md): technisches Design des M1-Testbuilds (englisch)
 - [docs/M2-SPEC.md](docs/M2-SPEC.md) und [docs/M2-DESIGN.md](docs/M2-DESIGN.md): Vorgabe und technisches Design von M2, Pitch → MIDI (englisch)
 - [docs/M2-TESTING.md](docs/M2-TESTING.md): Testanleitung für Singen → MIDI in FL Studio, mit Erklärung aller Regler und Checkliste
+- [docs/CORPUS.md](docs/CORPUS.md): Auswertung mit öffentlichen Gesangs-Datensätzen (vocadito, Dagstuhl ChoirSet, VocalSet) per manuellem GitHub-Workflow
+- [docs/M3-SPEC.md](docs/M3-SPEC.md): Entwurf der Vorgabe für M3, Aufnahme und Drag & Drop (englisch, wartet auf Freigabe)
+- [docs/STATUS.md](docs/STATUS.md): aktueller Projektstand (Übergabe-Notiz)
 
 ---
 

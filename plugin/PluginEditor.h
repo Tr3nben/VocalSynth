@@ -1,10 +1,12 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "TunerDisplayModel.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -15,12 +17,13 @@ namespace vocalsynth
 /** M2 UI (docs/M2-DESIGN.md 4.3), for FX and Instrument alike. Two pages:
 
     - "Voice" (default): tuner (note name in FL convention C5 = 60, cents needle, Hz, confidence bar +
-      voiced LED), sounding note, analysis latency in ms, the voice settings (Source, Voice Range,
+      voiced LED; calmed by TunerDisplayModel), sounding note, the voice settings (Source, Voice Range,
       Algorithm, Key, Scale, Bend Mode, Bend Range, Stickiness, Gate, Min Note, Velocity Sens., Octave,
-      Legato) and an input meter with the gate line.
+      Legato), an input meter with the gate line, and the latency / DSP load box (analysis latency,
+      host buffer, estimated total, large-buffer warning, VocalSynth's own DSP load).
     - "Test & Routing": the M1 routing test build controls and diagnostics (docs/M1-DESIGN.md 4.6):
       test pattern, MIDI channel, tempo, CC, monitor tone, virtual MIDI, mute dry, sent counters,
-      block-size histogram, drag sources for the test clips.
+      DSP load, block-size histogram, drag sources for the test clips.
 
     Runs on the message thread; reads the processor only through atomics/accessors from a Timer. */
 class VocalSynthEditor final : public juce::AudioProcessorEditor,
@@ -56,6 +59,41 @@ public:
     /** "24.2 ms" etc. for the latency display. */
     static juce::String formatLatency (double milliseconds);
 
+    /** Tuner frequency text: whole Hz below 1 kHz ("262 Hz"), else kHz with two decimals ("1.05 kHz"),
+        "- Hz" for 0. */
+    static juce::String formatTunerHz (float hz);
+
+    /** Host buffers above this many samples get the amber large-buffer warning. */
+    static constexpr int largeBufferSamples = 512;
+
+    /** Buffer and total-latency texts of the Voice page. The total is an estimate of what the user hears:
+        analysis + the audio interface's input buffer + its output buffer (one host block each; driver and
+        converter extras not included). Routing through FL's MIDI port to another plugin can add about
+        one more buffer, shown separately. bufferSamples = 0: no audio seen yet. */
+    struct LatencyInfo
+    {
+        juce::String bufferText; ///< "Buffer 2048 smp = 46.4 ms"
+        juce::String totalText;  ///< "Total ~ 139 ms (analysis + in/out buffer) ..." (U+2248, U+00B7 in the UI)
+        bool largeBuffer = false; ///< bufferSamples > largeBufferSamples: show largeBufferHint()
+    };
+
+    static LatencyInfo describeLatency (double analysisMs, int bufferSamples, double sampleRate);
+
+    /** "Large audio buffer adds latency - try 128 or 256 samples in FL's audio settings" */
+    static juce::String largeBufferHint();
+
+    /** "VocalSynth DSP: avg 2.1 % / peak 5.3 % of the block time" */
+    static juce::String formatDspLoad (const DspLoadMeter::Reading& reading);
+
+    /** Current calm tuner values (for the tests). */
+    const TunerDisplayModel::State& getTunerState() const noexcept { return tunerModel.getState(); }
+
+    /** Number of Voice-page meter repaints the timer requested so far (for the tests). */
+    int getVoiceMeterRepaintCount() const noexcept { return voiceMeterRepaints; }
+
+    /** Runs one display update tick now, as the timer does (for the tests). */
+    void runTimerTickForTests() { timerCallback(); }
+
 private:
     /** A labelled box that, when dragged, exports a file and starts an external file drag
         (drop it into an FL pattern or the playlist). */
@@ -79,22 +117,65 @@ private:
     };
 
     /** Tuner: note name, Hz, cents needle (-50..+50), confidence bar and voiced LED. Painted from the
-        last snapshot the editor's timer handed it. */
+        TunerDisplayModel state the editor's timer hands it; repaints only the parts whose pixels change. */
     class TunerDisplay final : public juce::Component
     {
     public:
         /** active = false while source = Test Pattern (the analysis does not run, the tuner is greyed). */
-        void setSnapshot (const VoiceAnalysisSnapshot& snapshot, bool active);
+        void setState (const TunerDisplayModel::State& state, bool active);
         void paint (juce::Graphics& g) override;
+        void resized() override;
 
     private:
-        VoiceAnalysisSnapshot shown;
+        /** What each region shows, quantised to what can be seen (pixels, fade steps). */
+        struct NoteKey
+        {
+            int note = -1;
+            bool segmented = false;
+            int alphaStep = 0;
+            bool operator== (const NoteKey&) const = default;
+        };
+
+        struct TextKey
+        {
+            int hzTenths = 0;
+            int cents = 0;
+            bool operator== (const TextKey&) const = default;
+        };
+
+        struct NeedleKey
+        {
+            int halfPixels = -1; ///< -1 = no needle
+            int alphaStep = 0;
+            bool inTune = false;
+            bool operator== (const NeedleKey&) const = default;
+        };
+
+        struct BottomKey
+        {
+            bool led = false;
+            int barPixels = 0;
+            bool operator== (const BottomKey&) const = default;
+        };
+
+        NoteKey noteKey() const noexcept;
+        TextKey textKey() const noexcept;
+        NeedleKey needleKey() const noexcept;
+        BottomKey bottomKey() const noexcept;
+        float needleX (float cents) const noexcept;
+
+        TunerDisplayModel::State shown;
         bool isActive = true;
+
+        juce::Rectangle<int> noteArea, textArea, scaleArea, scaleLineArea, bottomArea, barArea;
     };
 
     void timerCallback() override;
     void updateStatusTexts();
-    void updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot);
+    void updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot, double elapsedMs);
+    void updateLatencyTexts (const VoiceSettings& voiceSettings);
+    void updateDspLoadTexts();
+    std::array<int, 5> voiceMeterKey() const noexcept;
     void layoutVoicePage (juce::Rectangle<int> area);
     void layoutTestPage (juce::Rectangle<int> area);
     void paintInputMeter (juce::Graphics& g);
@@ -139,9 +220,15 @@ private:
     juce::ToggleButton legatoButton { "Legato" };
 
     juce::Label soundingNoteLabel;
-    juce::Label latencyLabel;
     juce::Label voiceHintLabel;
     juce::Label meterCaptionLabel;
+
+    // Latency / DSP load box (below the dropdowns and sliders)
+    juce::Label latencyLabel;       ///< "Analysis 21.9 ms (Tenor, 44.1 kHz) | Buffer 2048 smp = 46.4 ms"
+    juce::Label totalLatencyLabel;  ///< "Total ~ ..." (amber with a large buffer)
+    juce::Label bufferWarningLabel; ///< largeBufferHint() or empty
+    juce::Label dspLoadVoiceLabel;  ///< formatDspLoad()
+    juce::Rectangle<int> infoPanelBounds;
 
     //==============================================================================
     // Test & Routing page (M1 controls)
@@ -164,6 +251,7 @@ private:
     juce::Label testNoteLabel;
     juce::Label sampleRateLabel;
     juce::Label sentCountsLabel;
+    juce::Label dspLoadTestLabel;
     juce::Label histogramSummaryLabel;
 
     FileDragSource midiDragSource;
@@ -188,9 +276,14 @@ private:
     juce::Rectangle<int> histogramBounds;
     float displayedLevel = 0.0f; // linear peak gain, decays smoothly
     float meterRmsDb = -100.0f;  // analysis RMS (gate input) of the newest snapshot
-    float meterGateDb = -45.0f;  // gateThreshold
+    float meterGateDb = params::defaultGateThresholdDb; // gateThreshold
     bool meterGateOpen = false;
+    int voiceMeterRepaints = 0;
     BlockSizeHistogram::Snapshot histogram;
+
+    TunerDisplayModel tunerModel;
+    double lastTickMs = 0.0;     // juce::Time::getMillisecondCounterHiRes() of the previous update, 0 = none
+    double sinceDspTextMs = 0.0; // the DSP load texts change at most every dspTextIntervalMs
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VocalSynthEditor)
 };

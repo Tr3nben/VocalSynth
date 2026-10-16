@@ -45,6 +45,87 @@ void NoteSegmenter::reset() noexcept
     lastFrameVoiced = false;
     noteLevelDb = PitchFrame::silenceDb;
     noteLevelSample = 0;
+    provisional = false;
+    provisionalStartSample = 0;
+    provisionalSeenStrong = false;
+    fastArmed = true;
+    fastBlocked = false;
+    fastFrames = 0;
+    fastLastPitch = 0.0;
+    fastMaxRmsDb = PitchFrame::silenceDb;
+}
+
+void NoteSegmenter::setOnsetTiming (int64_t ignoreSamples, int64_t timeoutSamples, int64_t settleSamples) noexcept
+{
+    provisionalIgnoreSamples = std::max<int64_t> (0, ignoreSamples);
+    provisionalTimeoutSamples = std::max<int64_t> (0, timeoutSamples);
+    provisionalSettleSamples = std::max<int64_t> (0, settleSamples);
+}
+
+void NoteSegmenter::processOnsetFrame (const PitchFrame& frame, int64_t absoluteSample, int sampleOffset,
+                                       BendGenerator& bend, VsEventSink out) noexcept
+{
+    if (activeOutputNote >= 0)
+        return;
+
+    // After a false start the fast path waits for a gap (a level below the gate). Such a frame is
+    // never fast-strong, so isFastPathBlocked() callers may pass an RMS-only frame (same result).
+    if (frame.rmsDb < gateThresholdDb)
+        fastBlocked = false;
+
+    if (fastBlocked)
+        return;
+
+    const auto hasPitch = frame.frequencyHz > 0.0f && std::isfinite (frame.frequencyHz);
+    const auto strong = hasPitch && frame.confidence >= fastConfidenceOn && frame.rmsDb >= gateThresholdDb;
+
+    if (! strong)
+    {
+        fastArmed = true;
+        fastFrames = 0;
+        return;
+    }
+
+    if (! fastArmed)
+        return;
+
+    const auto p = frequencyToMidiNote (static_cast<double> (frame.frequencyHz));
+
+    if (fastFrames > 0 && std::abs (p - fastLastPitch) * 100.0 > fastMaxSpreadCents)
+        fastFrames = 0;
+
+    fastMaxRmsDb = fastFrames == 0 ? frame.rmsDb : std::max (fastMaxRmsDb, frame.rmsDb);
+    fastLastPitch = p;
+
+    fastFrames = std::min (fastFrames + 1, fastOnsetConfirmFrames); // bounded: a run can go on (below)
+
+    if (fastFrames < fastOnsetConfirmFrames)
+        return;
+
+    // The note identity must be clear: a pitch within fastNoteMarginSemitones of the boundary between two
+    // allowed notes (a vibrato trough at the onset, a scoop, the sharp first frames of an onset) is not
+    // started from; the run goes on, so the next frame starts the note once the pitch has moved inside
+    // a note (still within fastMaxSpreadCents), else the full window decides.
+    const auto q = quantizer.quantize (p, -1);
+
+    if (quantizer.quantize (p - fastNoteMarginSemitones, -1) != q || quantizer.quantize (p + fastNoteMarginSemitones, -1) != q)
+        return;
+
+    const auto outputNote = q + 12 * octaveShift;
+
+    if (! isPlayable (outputNote))
+    {
+        fastFrames = 0;
+        return;
+    }
+
+    const auto velocity = velocityFor (static_cast<double> (fastMaxRmsDb), static_cast<double> (gateThresholdDb),
+                                       velocitySensitivityPercent);
+    startNote (q, outputNote, velocity, fastMaxRmsDb, p, absoluteSample, sampleOffset, bend, out);
+    provisional = true;
+    provisionalStartSample = absoluteSample;
+    provisionalSeenStrong = false;
+    lastFrameVoiced = true;
 }
 
 void NoteSegmenter::setSettings (const VoiceSettings& settings) noexcept
@@ -79,8 +160,71 @@ void NoteSegmenter::processFrame (const PitchFrame& frame, int64_t absoluteSampl
 
     if (activeOutputNote < 0)
         processIdleFrame (frame, strong, p, absoluteSample, sampleOffset, bend, out);
-    else
+    else if (! provisional || ! processProvisionalFrame (frame, strong, weak, p, absoluteSample, sampleOffset, bend, out))
         processNoteFrame (frame, weak, p, absoluteSample, sampleOffset, bend, out);
+}
+
+bool NoteSegmenter::processProvisionalFrame (const PitchFrame& frame, bool strong, bool weak, double p,
+                                             int64_t absoluteSample, int sampleOffset, BendGenerator& bend,
+                                             VsEventSink out) noexcept
+{
+    const auto age = absoluteSample - provisionalStartSample;
+
+    // The octave shift moved the note out of 0..127: the normal path ends it at once
+    if (! isPlayable (activeQuantisedNote + 12 * octaveShift))
+    {
+        provisional = false;
+        return false;
+    }
+
+    if (age < provisionalIgnoreSamples)
+        return true;
+
+    if (strong)
+    {
+        // The full window is trusted for a fine decision only once it no longer holds audio from before
+        // the start (the onset, the start of a scoop into the note), i.e. after provisionalSettleSamples:
+        // before that it lags behind the fast frames, and a small margin corrected towards the stale
+        // part (a rising scoop read as the semitone below). So while settling only a clear error of the
+        // fast frames (another note or octave: the candidate wins by 2 h) is corrected at once, and the
+        // note stays provisional; the first strong frame after that moves it to its nearest note
+        // (margin provisionalSettleMarginSemitones, 2 cents: a pitch midway between two allowed notes
+        // reads 54.002 or 53.998 by detector noise, which must not flip the note) and ends the provisional
+        // state. With 2 h there, a
+        // mid-scoop reading kept a wrong-semitone start for T_min + minNoteLength (v0.2.1 review,
+        // vocadito_1: note F1 0.264 -> 0.225; now 0.278).
+        const auto settling = age < provisionalSettleSamples;
+        const auto candidate = quantizer.quantize (p, activeQuantisedNote);
+        const auto q = static_cast<double> (activeQuantisedNote);
+        const auto advantage = std::abs (p - q) - std::abs (p - static_cast<double> (candidate));
+        const auto needed = settling ? 2.0 * hysteresisSemitones
+                                     : std::min (provisionalSettleMarginSemitones, 2.0 * hysteresisSemitones);
+        provisionalSeenStrong = true;
+        provisional = settling;
+
+        if (candidate != activeQuantisedNote && advantage >= needed - stickinessEpsilonSemitones
+            && isPlayable (candidate + 12 * octaveShift))
+        {
+            unvoicedFrames = 0;
+            changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out);
+            return true; // a normal note from now on (startNote() cleared provisional)
+        }
+
+        return false; // processed like a normal note's frame (still provisional while settling)
+    }
+
+    if (age < provisionalTimeoutSamples)
+        return true; // hold: the full window is still filling
+
+    provisional = false;
+
+    // A note the full window has already seen (strong) is a normal one now, also when it ends here
+    if (weak || provisionalSeenStrong)
+        return false;
+
+    endNote (absoluteSample, sampleOffset, bend, out); // false start
+    fastBlocked = true;
+    return true;
 }
 
 void NoteSegmenter::processIdleFrame (const PitchFrame& frame, bool strong, double p, int64_t absoluteSample,
@@ -107,6 +251,7 @@ void NoteSegmenter::processIdleFrame (const PitchFrame& frame, bool strong, doub
     const auto velocity = velocityFor (static_cast<double> (onsetMaxRmsDb), static_cast<double> (gateThresholdDb),
                                        velocitySensitivityPercent);
     startNote (q, outputNote, velocity, onsetMaxRmsDb, p, absoluteSample, sampleOffset, bend, out);
+    fastBlocked = false; // the full window agrees with a voice again: the false start was a one-off
 }
 
 bool NoteSegmenter::isPitchReliable (const PitchFrame& frame, int64_t absoluteSample) noexcept
@@ -216,6 +361,9 @@ void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float le
     changeTimerRunning = false;
     onsetFrames = 0;
     onsetMaxRmsDb = PitchFrame::silenceDb;
+    provisional = false;
+    fastArmed = false;
+    fastFrames = 0;
 
     bend.noteStarted (100.0 * (p - static_cast<double> (q)), absoluteSample, sampleOffset, activeChannel, out);
     out.push (VsEvent::makeNoteOn (sampleOffset, activeChannel, static_cast<uint8_t> (outputNote), velocity));
@@ -252,6 +400,7 @@ void NoteSegmenter::endNote (int64_t absoluteSample, int sampleOffset, BendGener
     onsetFrames = 0;
     onsetMaxRmsDb = PitchFrame::silenceDb;
     lastFrameVoiced = false;
+    provisional = false;
 }
 
 void NoteSegmenter::flush (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept

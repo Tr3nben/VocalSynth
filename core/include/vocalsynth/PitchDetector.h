@@ -143,4 +143,63 @@ private:
     std::vector<float> nsdf; ///< n(tau) for tau = 0..maxLag (<= maxWindowSamples * 17 / 32 + 1, + spare)
 };
 
+/** Newest-anchored normalised cross-correlation for PROVISIONAL onsets (docs/M2-DESIGN.md 11).
+
+    Why: YIN integrates over the OLDEST half of the window and MPM normalises over the whole window, so
+    after an onset both need the window almost completely filled with voice before they are confident
+    (YIN ~100 %, MPM ~83 % at f0 min), whatever the pitch: most of the 18-31 ms window per range. This
+    detector compares the NEWEST Wi(tau) samples (a) with the same span tau samples earlier (b):
+    n(tau) = <a, b> / (|a| |b|), tau = 0..maxLag, with Wi(tau) = integrationSamplesFor (tau) =
+    max (floor, tau) (at least one candidate period; capped at windowSize - tau for the guard lags), so
+    a tone of period T is seen once the newest T + Wi(T) (~ 2 T, at least T + floor) samples hold it,
+    instead of the whole window: in Tenor at 16 kHz a 220 Hz tone needs ~9 ms instead of ~17 ms. At
+    f0 min (T ~ window / 2) there is little gain: a period cannot be measured reliably from less than
+    about two periods (with Wi < T, ramp-like waveforms such as a saw gave confident wrong periods).
+    Lag range, scan start, MPM key-maximum selection (first one >= keyThreshold * highest), edge rule
+    and range tolerance as in MpmPitchDetector, on the same Framer window. Unvoiced if, at the chosen
+    lag, |a|^2 and |b|^2 differ by more than maxEnergyStepDb (a level step inside the analysed span).
+    The analysed span is [1 2 1] / 4 smoothed (see PitchDetector.cpp). confidence = the key maximum's
+    (interpolated) value; rmsDb as in PitchDetector (newest period of f0 min).
+    The NoteSegmenter starts a note from these frames only with fastConfidenceOn and
+    fastOnsetConfirmFrames consecutive agreeing frames, and the full-window detector must confirm (or
+    correct) it afterwards.
+    Stateless between frames, deterministic, real-time safe (O(maxLag^2) per frame, below a YIN frame). */
+class FastOnsetDetector
+{
+public:
+    /** floor = max (minIntegrationSamples, ceil (integrationFloorPeriods * fa / f0Min)). */
+    static constexpr double integrationFloorPeriods = 0.5;
+    static constexpr int minIntegrationSamples = 16;
+    static constexpr float keyThreshold = 0.9f;
+    static constexpr float silenceFloorDb = PitchDetector::silenceFloorDb;
+    /** Unvoiced if the energies of a and b (chosen lag) differ by more than this (level step), as
+        PitchDetector::maxLevelStepDb for the full window. */
+    static constexpr double maxEnergyStepDb = static_cast<double> (PitchDetector::maxLevelStepDb);
+
+    static int integrationFloorFor (double analysisSampleRate, double f0MinHz) noexcept;
+
+    /** Wi (tau) = clamp (max (floor, tau), 1, windowSize - tau). */
+    static int integrationSamplesFor (int tau, int integrationFloor, int windowSize) noexcept;
+
+    /** Newest analysis samples needed to see period periodSamples (<= 0: the longest lag of the range,
+        the worst case): tau + Wi (tau). */
+    static int requiredSamplesFor (double analysisSampleRate, double f0MinHz, double f0MaxHz, int periodSamples = 0) noexcept;
+
+    /** Allocates the lag and energy buffers for windows up to maxWindowSamples (NOT real-time; may throw). */
+    void prepare (double analysisSampleRate, int maxWindowSamples);
+
+    /** window = the Framer's window of the range (oldest first). Frames with rmsDb < minRmsDb are
+        returned unvoiced (with their rmsDb) without searching: the pipeline passes the gate, below
+        which a frame can never start a note, so a quiet room costs (almost) nothing. */
+    PitchFrame analyse (std::span<const float> window, double f0MinHz, double f0MaxHz,
+                        float minRmsDb = PitchDetector::silenceFloorDb) noexcept;
+
+private:
+    double sampleRate = 16000.0;
+    int maxWindow = 0;
+    std::vector<float> nsdf;
+    std::vector<double> cumulativeEnergy; ///< prefix sums of x^2 over the window
+    std::vector<float> smoothed;          ///< [1 2 1] / 4 smoothed window
+};
+
 } // namespace vocalsynth

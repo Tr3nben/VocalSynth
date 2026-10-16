@@ -234,6 +234,7 @@ NoteMetrics computeNoteMetrics (const std::vector<DetectedNote>& detected, const
         const auto latency = detected[p.detection].onsetSeconds - labels[p.reference].onsetSeconds;
         m.sumOnsetLatencySeconds += latency;
         m.maxOnsetLatencySeconds = std::max (m.maxOnsetLatencySeconds, latency);
+        m.onsetLatencies.push_back (latency);
     }
 
     // Categories: a note is a "change" if it starts where the previous one ends (1 ms slack)
@@ -257,8 +258,41 @@ NoteMetrics computeNoteMetrics (const std::vector<DetectedNote>& detected, const
             ++category.matched;
     }
 
+    // Onset latency after a rest, independent of the matching: first note-on (any pitch) near the onset
+    for (std::size_t r = 0; r < labels.size(); ++r)
+    {
+        if (isReferenceChange (r))
+            continue;
+
+        auto first = 1.0e9;
+
+        for (const auto& d : detected)
+        {
+            const auto delay = d.onsetSeconds - labels[r].onsetSeconds;
+
+            if (delay >= -restLatencyEarlySeconds && delay <= restLatencyLateSeconds)
+                first = std::min (first, delay);
+        }
+
+        if (first < 1.0e9)
+        {
+            ++m.restLatencyCount;
+            m.restLatencies.push_back (first);
+        }
+        else
+        {
+            ++m.restLatencyMissing;
+        }
+    }
+
     for (std::size_t d = 0; d < detected.size(); ++d)
-        ++(isDetectedChange (d) ? m.change : m.fromRest).detectedNotes;
+    {
+        auto& category = isDetectedChange (d) ? m.change : m.fromRest;
+        ++category.detectedNotes;
+
+        if (detectionUsed[d])
+            ++category.matchedDetections;
+    }
 
     // How late are the changes? Nearest same-note detection 0..150 ms after the reference change
     for (std::size_t r = 0; r < labels.size(); ++r)
@@ -295,11 +329,12 @@ void accumulate (NoteCategory& total, const NoteCategory& add)
     total.referenceNotes += add.referenceNotes;
     total.detectedNotes += add.detectedNotes;
     total.matched += add.matched;
+    total.matchedDetections += add.matchedDetections;
 }
 
 void finalise (NoteCategory& c)
 {
-    c.precision = c.detectedNotes > 0 ? static_cast<double> (c.matched) / static_cast<double> (c.detectedNotes) : 1.0;
+    c.precision = c.detectedNotes > 0 ? static_cast<double> (c.matchedDetections) / static_cast<double> (c.detectedNotes) : 1.0;
     c.recall = c.referenceNotes > 0 ? static_cast<double> (c.matched) / static_cast<double> (c.referenceNotes) : 1.0;
     c.f1 = c.precision + c.recall > 0.0 ? 2.0 * c.precision * c.recall / (c.precision + c.recall) : 0.0;
 }
@@ -317,6 +352,10 @@ void accumulate (NoteMetrics& total, const NoteMetrics& add)
     total.matched += add.matched;
     total.sumOnsetLatencySeconds += add.sumOnsetLatencySeconds;
     total.maxOnsetLatencySeconds = std::max (total.maxOnsetLatencySeconds, add.maxOnsetLatencySeconds);
+    total.onsetLatencies.insert (total.onsetLatencies.end(), add.onsetLatencies.begin(), add.onsetLatencies.end());
+    total.restLatencyCount += add.restLatencyCount;
+    total.restLatencyMissing += add.restLatencyMissing;
+    total.restLatencies.insert (total.restLatencies.end(), add.restLatencies.begin(), add.restLatencies.end());
 }
 
 void finalise (NoteMetrics& m)
@@ -327,8 +366,261 @@ void finalise (NoteMetrics& m)
     m.f1 = m.precision + m.recall > 0.0 ? 2.0 * m.precision * m.recall / (m.precision + m.recall) : 0.0;
     m.meanOnsetLatencySeconds = m.matched > 0 ? m.sumOnsetLatencySeconds / static_cast<double> (m.matched) : 0.0;
     m.meanChangeDelaySeconds = m.changeDelayCount > 0 ? m.sumChangeDelaySeconds / static_cast<double> (m.changeDelayCount) : 0.0;
+    m.medianOnsetLatencySeconds = percentile (m.onsetLatencies, 50.0);
+    m.p95OnsetLatencySeconds = percentile (m.onsetLatencies, 95.0);
+
+    auto restSum = 0.0;
+
+    for (const auto v : m.restLatencies)
+        restSum += v;
+
+    m.meanRestLatencySeconds = m.restLatencies.empty() ? 0.0 : restSum / static_cast<double> (m.restLatencies.size());
+    m.medianRestLatencySeconds = percentile (m.restLatencies, 50.0);
+    m.p95RestLatencySeconds = percentile (m.restLatencies, 95.0);
     finalise (m.fromRest);
     finalise (m.change);
+}
+
+double percentile (std::vector<double> values, double percent)
+{
+    if (values.empty())
+        return 0.0;
+
+    std::sort (values.begin(), values.end());
+    // Nearest rank: the smallest value with at least percent % of the values <= it
+    const auto rank = static_cast<std::size_t> (std::ceil (std::clamp (percent, 0.0, 100.0) / 100.0
+                                                           * static_cast<double> (values.size())));
+    return values[std::clamp<std::size_t> (rank, 1, values.size()) - 1];
+}
+
+// --- Reference f0 ---------------------------------------------------------------------------------------
+
+namespace
+{
+/** Voicing state of a reference value: 1 voiced, 0 unvoiced, -1 unknown. */
+int voicingState (double f0) { return f0 > 0.0 ? 1 : (f0 < 0.0 ? -1 : 0); }
+
+double centsBetween (double estimateHz, double referenceHz) { return 1200.0 * std::log2 (estimateHz / referenceHz); }
+} // namespace
+
+void finaliseReference (ReferenceF0& ref)
+{
+    std::vector<double> gaps;
+
+    for (std::size_t i = 1; i < ref.times.size(); ++i)
+        gaps.push_back (ref.times[i] - ref.times[i - 1]);
+
+    ref.hopSeconds = gaps.empty() ? 0.01 : percentile (gaps, 50.0);
+    ref.transitions.clear();
+
+    // Unknown samples do not count as a state: a transition is a change between the last known state and
+    // the next known one (at the midpoint of the two samples)
+    int lastState = -1;
+    double lastTime = 0.0;
+
+    for (std::size_t i = 0; i < ref.times.size(); ++i)
+    {
+        const auto state = voicingState (ref.f0[i]);
+
+        if (state < 0)
+            continue;
+
+        if (lastState >= 0 && state != lastState)
+            ref.transitions.push_back (0.5 * (lastTime + ref.times[i]));
+
+        lastState = state;
+        lastTime = ref.times[i];
+    }
+}
+
+bool readReferenceF0Csv (const std::string& path, ReferenceF0& out, std::string& error)
+{
+    out = {};
+    std::ifstream file (path);
+
+    if (! file)
+    {
+        error = "cannot open f0 reference: " + path;
+        return false;
+    }
+
+    std::string line;
+    int lineNumber = 0;
+    bool sawData = false;
+
+    while (std::getline (file, line))
+    {
+        ++lineNumber;
+        line = trim (line);
+
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        std::replace (line.begin(), line.end(), ',', ' ');
+        std::replace (line.begin(), line.end(), ';', ' ');
+        std::istringstream in (line);
+        double t = 0.0, f = 0.0;
+
+        if (! (in >> t >> f) || ! std::isfinite (t) || ! std::isfinite (f))
+        {
+            if (! sawData) // header line
+                continue;
+
+            error = path + ":" + std::to_string (lineNumber) + ": expected time_s,f0_hz";
+            return false;
+        }
+
+        if (! out.times.empty() && ! (t > out.times.back()))
+        {
+            error = path + ":" + std::to_string (lineNumber) + ": times must be strictly ascending";
+            return false;
+        }
+
+        sawData = true;
+        out.times.push_back (t);
+        out.f0.push_back (f);
+    }
+
+    if (out.times.empty())
+    {
+        error = path + ": no f0 samples";
+        return false;
+    }
+
+    finaliseReference (out);
+    return true;
+}
+
+double referenceAt (const ReferenceF0& ref, double timeSeconds)
+{
+    if (ref.times.empty())
+        return -1.0;
+
+    const auto it = std::lower_bound (ref.times.begin(), ref.times.end(), timeSeconds);
+    const auto upper = static_cast<std::size_t> (it - ref.times.begin()); // first sample >= t
+
+    if (upper < ref.times.size() && upper > 0)
+    {
+        const auto a = upper - 1, b = upper;
+
+        if (ref.f0[a] > 0.0 && ref.f0[b] > 0.0 && ref.times[b] - ref.times[a] <= 1.5 * ref.hopSeconds)
+        {
+            const auto w = (timeSeconds - ref.times[a]) / (ref.times[b] - ref.times[a]);
+            return std::exp2 ((1.0 - w) * std::log2 (ref.f0[a]) + w * std::log2 (ref.f0[b]));
+        }
+    }
+
+    // Nearest sample
+    std::size_t nearest = upper;
+
+    if (upper == ref.times.size()
+        || (upper > 0 && timeSeconds - ref.times[upper - 1] <= ref.times[upper] - timeSeconds))
+        nearest = upper - 1;
+
+    if (std::abs (ref.times[nearest] - timeSeconds) > 0.75 * ref.hopSeconds)
+        return -1.0;
+
+    return ref.f0[nearest] < 0.0 ? -1.0 : ref.f0[nearest];
+}
+
+F0Metrics computeF0Metrics (const std::vector<FramePitch>& frames, const ReferenceF0& ref, double collarSeconds)
+{
+    F0Metrics m;
+
+    for (const auto& frame : frames)
+    {
+        const auto reference = referenceAt (ref, frame.timeSeconds);
+
+        // Collar: nearest voicing transition of the reference
+        bool nearTransition = false;
+        const auto it = std::lower_bound (ref.transitions.begin(), ref.transitions.end(), frame.timeSeconds);
+
+        if (it != ref.transitions.end() && *it - frame.timeSeconds < collarSeconds)
+            nearTransition = true;
+
+        if (it != ref.transitions.begin() && frame.timeSeconds - *(it - 1) < collarSeconds)
+            nearTransition = true;
+
+        if (reference < 0.0 || nearTransition)
+        {
+            ++m.excludedFrames;
+            continue;
+        }
+
+        if (reference == 0.0)
+        {
+            ++m.referenceUnvoicedFrames;
+
+            if (frame.voiced)
+                ++m.falseAlarmFrames;
+
+            continue;
+        }
+
+        ++m.referenceVoicedFrames;
+
+        if (frame.voiced)
+            ++m.voicedRecallFrames;
+
+        if (! (frame.frequencyHz > 0.0))
+            continue;
+
+        const auto cents = centsBetween (frame.frequencyHz, reference);
+        const auto folded = cents - 1200.0 * std::round (cents / 1200.0);
+
+        if (std::abs (cents) <= 50.0)
+        {
+            ++m.pitchCorrectFrames;
+            ++m.absCentsHistogram[static_cast<std::size_t> (std::min (50.0, std::floor (std::abs (cents))))];
+        }
+
+        if (std::abs (folded) <= 50.0)
+            ++m.chromaCorrectFrames;
+    }
+
+    finalise (m);
+    return m;
+}
+
+void accumulate (F0Metrics& total, const F0Metrics& add)
+{
+    total.referenceVoicedFrames += add.referenceVoicedFrames;
+    total.referenceUnvoicedFrames += add.referenceUnvoicedFrames;
+    total.excludedFrames += add.excludedFrames;
+    total.pitchCorrectFrames += add.pitchCorrectFrames;
+    total.chromaCorrectFrames += add.chromaCorrectFrames;
+    total.voicedRecallFrames += add.voicedRecallFrames;
+    total.falseAlarmFrames += add.falseAlarmFrames;
+
+    for (std::size_t i = 0; i < total.absCentsHistogram.size(); ++i)
+        total.absCentsHistogram[i] += add.absCentsHistogram[i];
+}
+
+void finalise (F0Metrics& m)
+{
+    const auto voiced = static_cast<double> (std::max (1, m.referenceVoicedFrames));
+    const auto unvoiced = static_cast<double> (std::max (1, m.referenceUnvoicedFrames));
+    m.rawPitchAccuracy = static_cast<double> (m.pitchCorrectFrames) / voiced;
+    m.rawChromaAccuracy = static_cast<double> (m.chromaCorrectFrames) / voiced;
+    m.octaveErrorRate = static_cast<double> (m.chromaCorrectFrames - m.pitchCorrectFrames) / voiced;
+    m.voicingRecall = static_cast<double> (m.voicedRecallFrames) / voiced;
+    m.voicingFalseAlarm = static_cast<double> (m.falseAlarmFrames) / unvoiced;
+
+    // Median of the 1-cent histogram (bin centre)
+    m.medianAbsCents = 0.0;
+    const auto half = (m.pitchCorrectFrames + 1) / 2;
+    int seen = 0;
+
+    for (std::size_t i = 0; i < m.absCentsHistogram.size() && m.pitchCorrectFrames > 0; ++i)
+    {
+        seen += m.absCentsHistogram[i];
+
+        if (seen >= half)
+        {
+            m.medianAbsCents = static_cast<double> (i) + 0.5;
+            break;
+        }
+    }
 }
 
 } // namespace vseval

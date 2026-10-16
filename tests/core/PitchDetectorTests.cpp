@@ -610,3 +610,349 @@ TEST_CASE ("Front end + detectors are exactly block-size invariant", "[pitchdete
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// FastOnsetDetector (provisional onsets, docs/M2-DESIGN.md 11)
+
+namespace
+{
+
+struct FastDetector
+{
+    FastOnsetDetector detector;
+    explicit FastDetector (double fa) { detector.prepare (fa, Framer::windowSamplesFor (fa, lowestF0MinHz)); }
+};
+
+/** Windows of the range's length from a signal at the analysis rate (as analyseFrames()). */
+std::vector<PitchFrame> analyseFastFrames (FastOnsetDetector& detector, double fa, const test::Signal& signal,
+                                           const VoiceRangeInfo& range, int numFrames = 6)
+{
+    const auto w = static_cast<std::size_t> (Framer::windowSamplesFor (fa, range.f0MinHz));
+    REQUIRE (signal.size() >= w + static_cast<std::size_t> (numFrames) * 37);
+    std::vector<PitchFrame> frames;
+
+    for (int i = 0; i < numFrames; ++i)
+        frames.push_back (detector.analyse (std::span<const float> (signal).subspan (static_cast<std::size_t> (i) * 37, w),
+                                            range.f0MinHz, range.f0MaxHz));
+
+    return frames;
+}
+
+/** Every frame with fastConfidenceOn is within tolerance; at least minVoiced of them reach it. The
+    tolerance is +-25 cents (the provisional pitch only picks the note and the first bend; the full
+    window takes over after the confirmation): with harmonics up to fa / 2 the interpolated peak of a
+    short-integration correlation is off by up to ~15 cents (band-limited saw at 559 Hz). */
+void checkFastAccurate (const std::vector<PitchFrame>& frames, double f0, double toleranceCents, std::size_t minVoiced)
+{
+    REQUIRE (! frames.empty());
+    std::size_t voiced = 0;
+
+    for (const auto& frame : frames)
+    {
+        if (frame.frequencyHz > 0.0f && frame.confidence >= NoteSegmenter::fastConfidenceOn)
+        {
+            ++voiced;
+            REQUIRE (std::abs (centsBetween (frame.frequencyHz, f0)) <= toleranceCents);
+        }
+    }
+
+    CHECK (voiced >= minVoiced);
+}
+
+} // namespace
+
+TEST_CASE ("FastOnsetDetector: integration length and required samples", "[pitchdetector][fastonset]")
+{
+    // floor = ceil (0.5 * fa / f0Min); Wi (tau) = max (floor, tau), capped at the window end
+    CHECK (FastOnsetDetector::integrationFloorFor (16000.0, 110.0) == 73);
+    CHECK (FastOnsetDetector::integrationFloorFor (16000.0, 500.0) == 16);
+    CHECK (FastOnsetDetector::integrationFloorFor (0.0, 110.0) == FastOnsetDetector::minIntegrationSamples);
+    CHECK (FastOnsetDetector::integrationSamplesFor (10, 73, 294) == 73);
+    CHECK (FastOnsetDetector::integrationSamplesFor (100, 73, 294) == 100);
+    CHECK (FastOnsetDetector::integrationSamplesFor (151, 73, 294) == 143);
+
+    for (const auto fa : analysisRates)
+        for (const auto& range : voiceRangeTable)
+        {
+            CAPTURE (fa, range.name);
+            const auto window = Framer::windowSamplesFor (fa, range.f0MinHz);
+            const auto worst = FastOnsetDetector::requiredSamplesFor (fa, range.f0MinHz, range.f0MaxHz);
+
+            // The worst case (f0 min) needs the whole window; an octave higher about half of it plus the floor
+            CHECK (worst == window);
+            const auto octaveUp = FastOnsetDetector::requiredSamplesFor (fa, range.f0MinHz, range.f0MaxHz,
+                                                                         static_cast<int> (std::ceil (fa / (2.0 * range.f0MinHz))) + 1);
+            CHECK (octaveUp < window * 3 / 4);
+        }
+}
+
+TEST_CASE ("FastOnsetDetector: steady sines and saws within +-10 cents in every range", "[pitchdetector][fastonset]")
+{
+    for (const auto fa : analysisRates)
+    {
+        FastDetector fast (fa);
+
+        for (const auto& range : voiceRangeTable)
+            for (const auto f0 : gridFor (range))
+            {
+                CAPTURE (fa, range.name, f0);
+                // 12 windows; with a strong 2nd harmonic, windows below 2 f0 min can be unvoiced (the
+                // T / 2 candidate is compared over less than one period of f0 there and fails the
+                // energy check, depending on the phase), never wrong; the full path then starts the note.
+                const auto check = [&] (const char* kind, const test::Signal& signal, std::size_t minVoiced)
+                {
+                    CAPTURE (kind);
+                    checkFastAccurate (analyseFastFrames (fast.detector, fa, signal, range, 12), f0, 25.0, minVoiced);
+                };
+
+                const auto seconds12 = secondsFor (fa, range, 12);
+                check ("sine", test::sine (fa, f0, seconds12), 12);
+                check ("quiet sine", test::sine (fa, f0, seconds12, test::sineAmplitudeForRmsDb (-40.0)), 12);
+
+                // Harmonic-rich signals with >= 16 lags per period (<= 1 kHz at 16 kHz; the spec's range
+                // is 65-1047 Hz; whistling is close to a sine)
+                if (fa / f0 >= 16.0)
+                {
+                    check ("saw", bandLimitedSaw (fa, f0, seconds12), 12);
+                    check ("harmonics 2..8", test::harmonicStack (fa, f0, seconds12, 2, 8), 10);
+                    check ("3x 2nd harmonic", test::harmonicStack (fa, f0, seconds12, 1, 2, 0.5f, 6.0), 6);
+                    check ("voice-like, 3x 2nd harmonic", test::harmonicStack (fa, f0, seconds12, 1, 8, 0.5f, 3.0), 6);
+                }
+            }
+    }
+}
+
+TEST_CASE ("FastOnsetDetector: silence, white and pink noise never reach fastConfidenceOn", "[pitchdetector][fastonset]")
+{
+    for (const auto fa : analysisRates)
+    {
+        FastDetector fast (fa);
+
+        for (const auto& range : voiceRangeTable)
+        {
+            const auto w = static_cast<std::size_t> (Framer::windowSamplesFor (fa, range.f0MinHz));
+            const auto hop = static_cast<std::size_t> (Framer::hopSamplesFor (fa)) / 2;
+            const std::size_t numFrames = 800;
+            const auto seconds = static_cast<double> (w + numFrames * hop) / fa + 0.01;
+            const test::Signal silent (w, 0.0f);
+            CHECK (fast.detector.analyse (silent, range.f0MinHz, range.f0MaxHz) == PitchFrame {});
+
+            const std::array<std::pair<const char*, test::Signal>, 2> noises { {
+                { "white", test::whiteNoise (fa, seconds, 0.3f, 1234) },
+                { "pink", test::pinkNoise (fa, seconds, 0.5f, 99) },
+            } };
+
+            for (const auto& [noiseName, noise] : noises)
+            {
+                CAPTURE (fa, range.name, noiseName);
+                std::size_t confident = 0;
+
+                for (std::size_t i = 0; i < numFrames; ++i)
+                {
+                    const auto frame = fast.detector.analyse (std::span<const float> (noise).subspan (i * hop, w), range.f0MinHz,
+                                                              range.f0MaxHz);
+                    REQUIRE (frame.rmsDb > -30.0f);
+
+                    if (frame.frequencyHz > 0.0f && frame.confidence >= NoteSegmenter::fastConfidenceOn)
+                        ++confident;
+                }
+
+                CHECK (confident == 0);
+            }
+        }
+    }
+}
+
+TEST_CASE ("FastOnsetDetector: tones 1.5 semitones outside the range are unvoiced", "[pitchdetector][fastonset]")
+{
+    for (const auto fa : analysisRates)
+    {
+        FastDetector fast (fa);
+
+        for (const auto& range : voiceRangeTable)
+        {
+            for (const auto f : { range.f0MinHz * std::exp2 (-1.5 / 12.0), range.f0MaxHz * std::exp2 (1.5 / 12.0) })
+            {
+                if (fa / f < 8.0) // Whistle above 2.5 kHz: see the PitchDetector edge-rule test
+                    continue;
+
+                CAPTURE (fa, range.name, f);
+
+                for (const auto& frame : analyseFastFrames (fast.detector, fa, test::sine (fa, f, secondsFor (fa, range)), range))
+                    CHECK ((frame.frequencyHz == 0.0f || frame.confidence < NoteSegmenter::fastConfidenceOn));
+            }
+        }
+    }
+}
+
+TEST_CASE ("FastOnsetDetector: an onset is seen after about two periods of the tone",
+           "[pitchdetector][fastonset]")
+{
+    // Silence, then a sine at the analysis rate; frames every fast hop (1 ms) as in the pipeline. Like
+    // the NoteSegmenter, the onset is the first frame that, with the frame before it, has
+    // fastConfidenceOn and agrees within fastMaxSpreadCents: it must have the right pitch (+-25 cents:
+    // while b(T) is still partly silent the peak reads sharp, up to ~50 cents, and the agreement rule
+    // waits for that to settle), come after more than one period of signal and no later than
+    // requiredSamplesFor (period) + 2 fast hops (the full-window detectors need about the whole window
+    // whatever the pitch; the pipeline latency test shows the end-to-end gain).
+    const auto fa = 16000.0;
+    const auto fastHop = static_cast<std::size_t> (Framer::hopSamplesFor (fa) / 2);
+    FastDetector fast (fa);
+
+    for (const auto& range : voiceRangeTable)
+    {
+        for (const auto f0 : { range.f0MinHz * 1.02, range.f0MinHz * 1.5, range.f0MinHz * 2.2 })
+        {
+            if (f0 > range.f0MaxHz)
+                continue;
+
+            const auto w = static_cast<std::size_t> (Framer::windowSamplesFor (fa, range.f0MinHz));
+            auto signal = test::Signal (w, 0.0f);
+            const auto tone = test::sine (fa, f0, 2.0 * static_cast<double> (w) / fa, 0.3f);
+            signal.insert (signal.end(), tone.begin(), tone.end());
+
+            // fill = voiced samples at the end of the window
+            const auto windowWith = [&] (std::size_t fill) { return std::span<const float> (signal).subspan (fill, w); };
+
+            for (std::size_t phase = 0; phase < fastHop; phase += 5)
+            {
+                CAPTURE (range.name, f0, phase);
+                int fastFill = -1;
+                float previous = 0.0f;
+
+                for (auto fill = phase + 1; fill <= w + 3 * fastHop; fill += fastHop)
+                {
+                    const auto frame = fast.detector.analyse (windowWith (fill), range.f0MinHz, range.f0MaxHz);
+                    const auto strong = frame.frequencyHz > 0.0f && frame.confidence >= NoteSegmenter::fastConfidenceOn;
+
+                    if (strong && previous > 0.0f
+                        && std::abs (centsBetween (frame.frequencyHz, previous)) <= NoteSegmenter::fastMaxSpreadCents)
+                    {
+                        CHECK (std::abs (centsBetween (frame.frequencyHz, f0)) <= 25.0);
+                        fastFill = static_cast<int> (fill);
+                        break;
+                    }
+
+                    previous = strong ? frame.frequencyHz : 0.0f;
+                }
+
+                const auto period = static_cast<int> (std::ceil (fa / f0)) + 1;
+                const auto required = FastOnsetDetector::requiredSamplesFor (fa, range.f0MinHz, range.f0MaxHz, period);
+                CAPTURE (fastFill, required, period);
+                REQUIRE (fastFill > 0);
+                CHECK (fastFill > period);
+                CHECK (fastFill <= required + 2 * static_cast<int> (fastHop));
+            }
+        }
+    }
+}
+
+TEST_CASE ("FastOnsetDetector: level steps are unvoiced, ordinary attack ramps are not", "[pitchdetector][fastonset]")
+{
+    // A tone whose level changes by 8 dB per period: |a|^2 and |b|^2 differ by more than maxEnergyStepDb.
+    // 3 dB per period (a 25 ms attack over ~20 dB at 200 Hz) stays voiced and in tune: soft voice attacks
+    // must not lose the provisional path.
+    const auto fa = 16000.0;
+    FastDetector fast (fa);
+    const auto& range = voiceRangeInfo (VoiceRange::tenor);
+    REQUIRE (FastOnsetDetector::maxEnergyStepDb > 3.0);
+    REQUIRE (FastOnsetDetector::maxEnergyStepDb < 8.0);
+
+    for (const auto f0 : { 130.0, 220.0, 440.0 })
+        for (const auto dbPerPeriod : { -8.0, 8.0, -3.0, 3.0 })
+        {
+            CAPTURE (f0, dbPerPeriod);
+            const auto seconds = secondsFor (fa, range);
+            auto tone = test::sine (fa, f0, seconds, 1.0f);
+            const auto totalDb = dbPerPeriod * f0 * seconds;
+
+            for (std::size_t i = 0; i < tone.size(); ++i)
+            {
+                const auto db = dbPerPeriod * f0 * static_cast<double> (i) / fa - std::max (0.0, totalDb);
+                tone[i] *= static_cast<float> (0.3 * std::pow (10.0, db / 20.0));
+            }
+
+            for (const auto& frame : analyseFastFrames (fast.detector, fa, tone, range))
+            {
+                if (std::abs (dbPerPeriod) > FastOnsetDetector::maxEnergyStepDb)
+                    CHECK (frame.frequencyHz == 0.0f);
+                else
+                {
+                    CHECK (frame.confidence >= NoteSegmenter::fastConfidenceOn);
+                    CHECK (std::abs (centsBetween (frame.frequencyHz, f0)) <= 10.0);
+                }
+            }
+        }
+}
+
+TEST_CASE ("FastOnsetDetector: regression cases through the front end", "[pitchdetector][fastonset]")
+{
+    // Every fast frame with fastConfidenceOn, from the onset on, must be within 50 cents of f0:
+    // - a 92.5 Hz saw onset in Bass (with a fixed half-period integration it read 85 Hz with 1.000);
+    // - a bright missing-fundamental tone at 653 Hz in Soprano (2 T = 49 lags read 0.999, T = 24.5 lags
+    //   only 0.91 before the [1 2 1] smoothing: notes started an octave low).
+    struct Case
+    {
+        VoiceRange range;
+        double f0;
+        std::array<double, 10> amplitudes;
+    };
+
+    const std::array cases { Case { VoiceRange::bass, 92.5, { 1.0, 0.5, 0.333, 0.25, 0.2, 0.167, 0.143, 0.125, 0.111, 0.1 } },
+                             Case { VoiceRange::soprano, 653.2, { 0.0, 0.32, 0.20, 0.26, 0.24, 0.11, 0.05, 0.22, 0.18, 0.10 } } };
+
+    for (const auto hostRate : hostRates)
+        for (const auto& c : cases)
+        {
+            const auto& range = voiceRangeInfo (c.range);
+            CAPTURE (hostRate, range.name, c.f0);
+            auto signal = test::Signal (test::numSamplesFor (0.05, hostRate), 0.0f);
+
+            for (std::size_t i = 0; i < test::numSamplesFor (0.3, hostRate); ++i)
+            {
+                double v = 0.0;
+
+                for (std::size_t k = 0; k < c.amplitudes.size(); ++k)
+                    if (static_cast<double> (k + 1) * c.f0 < 6000.0)
+                        v += c.amplitudes[k] * std::sin (2.0 * std::numbers::pi * static_cast<double> (k + 1) * c.f0 * static_cast<double> (i) / hostRate);
+
+                signal.push_back (static_cast<float> (0.2 * v));
+            }
+
+            InputConditioner conditioner;
+            Decimator decimator;
+            Framer framer;
+            FastOnsetDetector fast;
+            conditioner.prepare (hostRate);
+            decimator.prepare (hostRate);
+            const auto fa = decimator.getOutputSampleRate();
+            framer.prepare (fa, Framer::windowSamplesFor (fa, lowestF0MinHz));
+            framer.setWindowSamples (Framer::windowSamplesFor (fa, range.f0MinHz));
+            fast.prepare (fa, framer.getMaxWindowSamples());
+            int confident = 0;
+
+            for (std::size_t n = 0; n < signal.size(); ++n)
+            {
+                float y = 0.0f;
+
+                if (! decimator.pushSample (conditioner.processSample (signal[n]), y))
+                    continue;
+
+                framer.pushSample (y);
+
+                if (framer.getNumSamplesPushed() % 8 != 0)
+                    continue;
+
+                const auto frame = fast.analyse (framer.getWindow(), range.f0MinHz, range.f0MaxHz);
+
+                if (frame.frequencyHz > 0.0f && frame.confidence >= NoteSegmenter::fastConfidenceOn)
+                {
+                    ++confident;
+                    CAPTURE (n, frame.frequencyHz, frame.confidence);
+                    CHECK (std::abs (centsBetween (frame.frequencyHz, c.f0)) <= 50.0);
+                }
+            }
+
+            CHECK (confident > 100); // the steady part is seen
+        }
+}

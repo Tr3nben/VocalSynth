@@ -256,7 +256,7 @@ Ziel: klären, auf welchem Weg MIDI zuverlässig von VocalSynth zum Klangerzeuge
 
 Ziel: Singen erzeugt in FL saubere Noten mit Bend.
 
-Umgesetzt in Version 0.2.0 (Vorgabe `docs/M2-SPEC.md`, Design `docs/M2-DESIGN.md`).
+Umgesetzt in Version 0.2.0, Feinschliff nach dem Nutzertest in 0.2.1 (Vorgabe `docs/M2-SPEC.md`, Design `docs/M2-DESIGN.md`, 0.2.1 in Abschnitt 11).
 
 - [x] `Framer`, `InputConditioner` und `Decimator` mit Blockgrößen-Invarianztests.
 - [x] `Yin` und `Mpm` hinter einem gemeinsamen Interface. Stimmlage als Dropdown wie bei Auto-Tune (Bass, Baritone, Tenor, Alto, Soprano, Whistle, Wide; Standard Tenor), Details in `docs/M2-SPEC.md`.
@@ -266,9 +266,17 @@ Umgesetzt in Version 0.2.0 (Vorgabe `docs/M2-SPEC.md`, Design `docs/M2-DESIGN.md
 - [x] Ein minimales UI zeigt Tuner, aktuelle Note und Latenz in ms (Fenster + Gate + Stickiness). Dazu alle M2-Regler im Reiter „Voice“; die M1-Testelemente liegen im Reiter „Test & Routing“.
 - [x] `vs-eval` misst den Pitch-Teil des Korpus und vergleicht YIN mit MPM (Werkzeug fertig, synthetischer Korpus aus den Tests; echte Gesangsaufnahmen fehlen noch). Ergebnis auf dem synthetischen Korpus: MPM ist Standard (`docs/M2-DESIGN.md` Abschnitt 10).
 - [x] Testanleitung `docs/M2-TESTING.md` (Deutsch) und Windows-Paket 0.2.0 mit der Anleitung.
-- [ ] Test durch den Nutzer in FL Studio 2026 (Checkliste in `docs/M2-TESTING.md`), danach Standardwerte (YIN/MPM, Gate, Stickiness) festlegen.
-- [ ] Gesangsaufnahmen des Nutzers als Korpus (`tests/corpus/`) und Abnahme der Korpus-Kriterien unten.
-- [ ] Stretch: Note-On beim Onset mit vorläufiger Tonhöhe, danach Korrektur per Bend (RESEARCH 5.4).
+- [x] Test durch den Nutzer in FL Studio 2026 am 2026-10-15 (Checkliste in `docs/M2-TESTING.md`): Einzeltöne, Tonleitern, Vibrato und Legato o.k., MPM etwas besser als YIN (bleibt Standard). Gate −35 … −40 dB passt am besten. Zur Stickiness hat der Nutzer nichts gesagt: 50 % ist nur der Standard, nicht bestätigt (Sweep im Korpus-Workflow und Nachfrage beim Nutzer offen). Rückmeldung: Stimmgerät-Anzeige zu unruhig, Latenz fühlt sich bei ASIO-Puffer 2048 träge an.
+- [x] v0.2.1 Feinschliff:
+  - [x] Ruhiges Stimmgerät (`TunerDisplayModel`: Notenname erst nach 100 ms Stabilität, gedämpfte Nadel, Hz/Cent höchstens 5-mal pro Sekunde, Lämpchen mit Haltezeit); MIDI unverändert.
+  - [x] Schnellere Notenanfänge mit vorläufiger Note (`FastOnsetDetector`, Bestätigung durch das volle Fenster): Tenor bei mittlerer Tonlage ca. 11 statt 20 ms, am tiefsten Ton 21,4 statt 21,9 ms; angezeigte Latenz Tenor 23,2 statt 24,2 ms. Nach dem Review: Schleifer in den Ton (die vorläufige Note folgt nach einer Fensterlänge der nächsten Note statt erst nach T_min + Mindestlänge; vocadito_1 Note-F1 MPM 0,225 → 0,278, v0.2.0: 0,264) und Sperre des schnellen Pfads nach einem Fehlstart (endet jetzt unter dem Gate oder mit einer Note des vollen Fensters).
+  - [x] Latenz-Anzeige mit Audio-Puffer, geschätzter Gesamt-Latenz, Hinweis bei Puffer > 512 Samples und Puffer-Tipp in `docs/M2-TESTING.md` (1.1).
+  - [x] Eigene DSP-Last im Plugin (Mittel und Spitze in % der Blockzeit), um VocalSynth vom Synth zu unterscheiden.
+  - [x] Gate-Standard −40 dB (vorher −45), alle Regler bleiben einstellbar.
+  - [x] Auswertung mit öffentlichen Gesangs-Datensätzen vorbereitet (`docs/CORPUS.md`, manueller Workflow `corpus-eval.yml`: vocadito, Dagstuhl ChoirSet, VocalSet).
+- [x] Test von 0.2.1 durch den Nutzer (Kurztest in `docs/M2-TESTING.md`, Abschnitt 0): am 2026-10-16 in FL Studio 2026 „funktioniert alles super“.
+- [ ] Abnahme der Korpus-Kriterien unten auf echten Gesangsaufnahmen: öffentliche Datensätze per `corpus-eval.yml` (erster Lauf steht aus), optional Aufnahmen des Nutzers.
+- [x] Stretch: Note-On beim Onset mit vorläufiger Tonhöhe (0.2.1). Korrigiert wird nicht per Bend, sondern durch sofortigen Notenwechsel, wenn das volle Fenster eine andere Note findet.
 
 **Abnahme** (gesetzte Projektziele, keine gemessenen Fakten):
 - Sinus und Sägezahn von 80–1000 Hz werden auf ±10 Cent genau erkannt.
@@ -282,6 +290,8 @@ Umgesetzt in Version 0.2.0 (Vorgabe `docs/M2-SPEC.md`, Design `docs/M2-DESIGN.md
 - MIDI-Invarianten: Jede Note-On hat eine Note-Off, keine doppelten Note-Ons.
 
 ### M3 – Capture und Drag & Drop (3–4 Wochen)
+
+Entwurf der Vorgabe: `docs/M3-SPEC.md` (Ziel 0.3.0), wartet auf die Antworten des Nutzers zu den offenen Fragen am Ende und auf seine Freigabe.
 
 - [ ] `CaptureRecorder` mit SPSC-FIFO zum Writer-Thread, BPM und Position aus der Playhead. Aufnahme läuft bei laufendem Transport oder manuell.
 - [ ] `CaptureExporter` erzeugt `.mid` (Raw/Clean) und `.wav`. Die bekannte Detektionsverzögerung wird herausgerechnet.

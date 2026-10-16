@@ -4,26 +4,60 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace vocalsynth
 {
 
-double VoicePipeline::computeAlgorithmicLatencyMs (double sampleRate, VoiceRange range) noexcept
+namespace
+{
+/** Delay in ms common to both onset paths: decimator FIR group delay + decimation phase + conditioner
+    group delay at f0 min. */
+double frontEndDelayMs (double sampleRate, double f0MinHz) noexcept
+{
+    const auto factor = Decimator::factorFor (sampleRate);
+    const auto firDelay = static_cast<double> ((Decimator::numTapsFor (factor) - 1) / 2);
+    const auto phaseDelay = static_cast<double> (factor - 1);
+    return 1000.0 * (firDelay + phaseDelay) / sampleRate + 1000.0 * InputConditioner::groupDelaySeconds (sampleRate, f0MinHz);
+}
+} // namespace
+
+int VoicePipeline::fastHopSamplesFor (double analysisSampleRate) noexcept
+{
+    return std::max (1, Framer::hopSamplesFor (analysisSampleRate) / fastHopDivisor);
+}
+
+double VoicePipeline::computeConfirmedLatencyMs (double sampleRate, VoiceRange range) noexcept
 {
     if (! (sampleRate > 0.0))
         return 0.0;
 
-    const auto factor = Decimator::factorFor (sampleRate);
-    const auto analysisRate = sampleRate / static_cast<double> (factor);
-    const auto firDelay = static_cast<double> ((Decimator::numTapsFor (factor) - 1) / 2);
-    const auto phaseDelay = static_cast<double> (factor - 1);
+    const auto analysisRate = sampleRate / static_cast<double> (Decimator::factorFor (sampleRate));
     const auto f0Min = voiceRangeInfo (range).f0MinHz;
     const auto window = static_cast<double> (Framer::windowSamplesFor (analysisRate, f0Min));
     const auto hops = static_cast<double> (latencyBudgetHops * Framer::hopSamplesFor (analysisRate));
 
-    return 1000.0 * (firDelay + phaseDelay) / sampleRate
-           + 1000.0 * InputConditioner::groupDelaySeconds (sampleRate, f0Min)
-           + 1000.0 * (window + hops) / analysisRate;
+    return frontEndDelayMs (sampleRate, f0Min) + 1000.0 * (window + hops) / analysisRate;
+}
+
+double VoicePipeline::computeFastOnsetLatencyMs (double sampleRate, VoiceRange range, double f0Hz) noexcept
+{
+    if (! (sampleRate > 0.0))
+        return 0.0;
+
+    const auto analysisRate = sampleRate / static_cast<double> (Decimator::factorFor (sampleRate));
+    const auto& info = voiceRangeInfo (range);
+    const auto f = f0Hz > info.f0MinHz ? f0Hz : info.f0MinHz; // NaN -> f0 min
+    const auto period = static_cast<int> (std::ceil (analysisRate / f)) + 1;
+    const auto required = static_cast<double> (FastOnsetDetector::requiredSamplesFor (analysisRate, info.f0MinHz, info.f0MaxHz, period));
+    const auto hops = static_cast<double> (fastLatencyBudgetHops * fastHopSamplesFor (analysisRate));
+
+    return frontEndDelayMs (sampleRate, f) + 1000.0 * (required + hops) / analysisRate;
+}
+
+double VoicePipeline::computeAlgorithmicLatencyMs (double sampleRate, VoiceRange range) noexcept
+{
+    return std::min (computeFastOnsetLatencyMs (sampleRate, range), computeConfirmedLatencyMs (sampleRate, range));
 }
 
 VoicePipeline::VoicePipeline()
@@ -44,6 +78,8 @@ void VoicePipeline::prepare (double newSampleRate, int /*maxBlockSize*/)
     framer.prepare (analysisRate, maxWindow);
     yin.prepare (analysisRate, maxWindow);
     mpm.prepare (analysisRate, maxWindow);
+    fastDetector.prepare (analysisRate, maxWindow);
+    fastHopSamples = fastHopSamplesFor (analysisRate);
 
     const auto hopSeconds = static_cast<double> (framer.getHopSamples()) / analysisRate;
     postProcessor.prepare (1.0 / hopSeconds);
@@ -73,8 +109,13 @@ void VoicePipeline::reset() noexcept
 
 void VoicePipeline::applySettings (const VoiceSettings& s) noexcept
 {
-    framer.setWindowSamples (Framer::windowSamplesFor (decimator.getOutputSampleRate(), voiceRangeInfo (s.range).f0MinHz));
+    const auto window = Framer::windowSamplesFor (decimator.getOutputSampleRate(), voiceRangeInfo (s.range).f0MinHz);
+    const auto factor = static_cast<int64_t> (decimator.getFactor());
+    const auto hop = static_cast<int64_t> (framer.getHopSamples());
+    framer.setWindowSamples (window);
     segmenter.setSettings (s);
+    segmenter.setOnsetTiming (hop * factor, (static_cast<int64_t> (window) + provisionalTimeoutHops * hop) * factor,
+                              static_cast<int64_t> (window) * factor);
     bend.setMode (s.bendMode, s.bendRange);
 }
 
@@ -117,23 +158,44 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
         const auto x = conditioner.processSample (mono != nullptr ? mono[i] : 0.0f);
         float decimated = 0.0f;
 
-        if (! decimator.pushSample (x, decimated) || ! framer.pushSample (decimated))
+        if (! decimator.pushSample (x, decimated))
+            continue;
+
+        const auto hopCompleted = framer.pushSample (decimated);
+        const auto fastDue = framer.getNumSamplesPushed() % fastHopSamples == 0;
+
+        if (! hopCompleted && ! fastDue)
             continue;
 
         const auto hopSample = samplePosition + i;
-        const auto raw = detector.analyse (framer.getWindow(), range.f0MinHz, range.f0MaxHz);
-        lastFrame = postProcessor.process (raw);
-        const auto noteWasActive = segmenter.getActiveNote() >= 0;
-        segmenter.processFrame (lastFrame, hopSample, i, bend, out);
-        ++frameCounter;
 
-        // A released note ends the octave context: the next onset may start in any octave
-        if (noteWasActive && segmenter.getActiveNote() < 0)
-            postProcessor.forgetOctaveReference();
+        if (hopCompleted)
+        {
+            const auto raw = detector.analyse (framer.getWindow(), range.f0MinHz, range.f0MaxHz);
+            lastFrame = postProcessor.process (raw);
+            const auto noteWasActive = segmenter.getActiveNote() >= 0;
+            segmenter.processFrame (lastFrame, hopSample, i, bend, out);
+            ++frameCounter;
 
-        if (frameObserver != nullptr)
-            frameObserver (frameObserverContext,
-                           { hopSample, raw, lastFrame, segmenter.getActiveNote(), segmenter.isFrameVoiced() });
+            // A released note ends the octave context: the next onset may start in any octave
+            if (noteWasActive && segmenter.getActiveNote() < 0)
+                postProcessor.forgetOctaveReference();
+
+            if (frameObserver != nullptr)
+                frameObserver (frameObserverContext,
+                               { hopSample, raw, lastFrame, segmenter.getActiveNote(), segmenter.isFrameVoiced() });
+        }
+
+        // Provisional onsets: only while no note is on (after the full frame of this sample, if any).
+        // Below the gate a frame cannot start a note, and while the fast path is blocked the segmenter
+        // reads only the level: no search then (same result for the segmenter).
+        if (fastDue && segmenter.getActiveNote() < 0)
+        {
+            const auto minRmsDb = segmenter.isFastPathBlocked() ? std::numeric_limits<float>::infinity()
+                                                                : s.gateThresholdDb;
+            segmenter.processOnsetFrame (fastDetector.analyse (framer.getWindow(), range.f0MinHz, range.f0MaxHz, minRmsDb),
+                                         hopSample, i, bend, out);
+        }
     }
 
     samplePosition += numSamples;
@@ -167,7 +229,7 @@ int VoicePipeline::maxEventsForSamples (int numSamples) const noexcept
         return 0;
 
     const auto hop = std::max (1, getHopInputSamples());
-    return maxEventsPerFlush + maxEventsPerHop * ((numSamples + hop - 1) / hop);
+    return maxEventsPerFlush + maxEventsPerHop * ((numSamples + hop - 1) / hop) + NoteSegmenter::maxEventsPerOnsetFrame;
 }
 
 void VoicePipeline::setFrameObserver (FrameObserver observer, void* context) noexcept
@@ -184,6 +246,7 @@ void VoicePipeline::publishSnapshot() noexcept
     s.rmsDb = lastFrame.rmsDb;
     s.voiced = segmenter.isFrameVoiced();
     s.activeNote = segmenter.getActiveNote();
+    s.quantisedNote = segmenter.getQuantisedNote();
     s.latencyMs = static_cast<float> (getAlgorithmicLatencyMs());
     s.frameCounter = frameCounter;
 
