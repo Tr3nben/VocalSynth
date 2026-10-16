@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vocalsynth/CaptureOptions.h"
 #include "vocalsynth/VoiceSettings.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -36,6 +37,14 @@ inline const juce::ParameterID bendMode { "bendMode", 1 };
 inline const juce::ParameterID bendRange { "bendRange", 1 };
 inline const juce::ParameterID velocitySensitivity { "velocitySensitivity", 1 };
 inline const juce::ParameterID legato { "legato", 1 };
+
+// M3 capture (docs/M3-SPEC.md 9, docs/M3-DESIGN.md 13). Version 1 like the M2 parameters (appended at the
+// end of the layout; hosts identify them by ID). captureFineOffsetMs is the fine offset of decision 3.
+inline const juce::ParameterID captureEnabled { "captureEnabled", 1 };
+inline const juce::ParameterID captureAudio { "captureAudio", 1 };
+inline const juce::ParameterID captureOffsetMode { "captureOffsetMode", 1 };
+inline const juce::ParameterID captureOffsetMs { "captureOffsetMs", 1 };
+inline const juce::ParameterID captureFineOffsetMs { "captureFineOffsetMs", 1 };
 
 /** Choice index == static_cast<int> (vocalsynth::TestPattern). Only append new entries at the end. */
 inline const juce::StringArray testPatternChoices { "Off", "Notes", "Pitch Bend", "CC Sweep", "All" };
@@ -93,6 +102,7 @@ inline constexpr std::array<const char*, numScales> scaleNames { "Chromatic",   
                                                                  "Blues",            "Dorian",
                                                                  "Mixolydian" };
 inline constexpr std::array<const char*, numBendModes> bendModeNames { "Off", "Anchored", "True" };
+inline constexpr std::array<const char*, numCaptureOffsetModes> captureOffsetModeNames { "Auto", "Manual", "Off" };
 // U+00B1 PLUS-MINUS SIGN as UTF-8; the literal is split so the hex escape does not swallow the digit
 inline constexpr std::array<const char*, numBendRanges> bendRangeNames {
     "\xc2\xb1" "2", "\xc2\xb1" "12", "\xc2\xb1" "24", "\xc2\xb1" "48"
@@ -101,7 +111,7 @@ inline constexpr std::array<const char*, numBendRanges> bendRangeNames {
 static_assert (detail::allNamed (sourceNames) && detail::allNamed (voiceRangeNames)
                && detail::allNamed (pitchAlgorithmNames) && detail::allNamed (keyNames)
                && detail::allNamed (scaleNames) && detail::allNamed (bendModeNames)
-               && detail::allNamed (bendRangeNames));
+               && detail::allNamed (bendRangeNames) && detail::allNamed (captureOffsetModeNames));
 
 inline const juce::StringArray sourceChoices = detail::toStringArray (sourceNames);
 inline const juce::StringArray voiceRangeChoices = detail::toStringArray (voiceRangeNames);
@@ -110,6 +120,7 @@ inline const juce::StringArray keyChoices = detail::toStringArray (keyNames);
 inline const juce::StringArray scaleChoices = detail::toStringArray (scaleNames);
 inline const juce::StringArray bendModeChoices = detail::toStringArray (bendModeNames);
 inline const juce::StringArray bendRangeChoices = detail::toStringArray (bendRangeNames);
+inline const juce::StringArray captureOffsetModeChoices = detail::toStringArray (captureOffsetModeNames);
 
 // Defaults (docs/M2-SPEC.md). They must equal the core VoiceSettings defaults, checked below.
 inline constexpr int defaultSourceIndex = static_cast<int> (Source::voice);
@@ -138,6 +149,18 @@ static_assert (static_cast<int> (VoiceSettings {}.bendMode) == defaultBendModeIn
 static_assert (static_cast<int> (VoiceSettings {}.bendRange) == defaultBendRangeIndex);
 static_assert (detail::sameValue (VoiceSettings {}.velocitySensitivityPercent, defaultVelocitySensitivityPercent));
 static_assert (VoiceSettings {}.legato == defaultLegato);
+
+// M3 capture defaults (docs/M3-SPEC.md 9 and the decisions of 2026-10-16), ranges from the core
+inline constexpr bool defaultCaptureEnabled = true;
+inline constexpr bool defaultCaptureAudio = true;                     // decision 2
+inline constexpr int defaultCaptureOffsetModeIndex = static_cast<int> (CaptureOffsetMode::automatic); // decision 3
+inline constexpr float defaultCaptureOffsetMs = 0.0f;                 // used in Manual
+inline constexpr float defaultCaptureFineOffsetMs = 0.0f;             // added in Auto
+inline constexpr float minCaptureOffsetMsParam = static_cast<float> (vocalsynth::minCaptureOffsetMs);
+inline constexpr float maxCaptureOffsetMsParam = static_cast<float> (vocalsynth::maxCaptureOffsetMs);
+inline constexpr float minCaptureFineOffsetMsParam = static_cast<float> (vocalsynth::minCaptureFineOffsetMs);
+inline constexpr float maxCaptureFineOffsetMsParam = static_cast<float> (vocalsynth::maxCaptureFineOffsetMs);
+static_assert (static_cast<int> (CaptureOffsetMode::automatic) == 0 && static_cast<int> (CaptureOffsetMode::off) == 2);
 
 /** Bend Range text -> choice index. Accepts the exact choice names and anything that carries the semitone
     number ("12", "+-12", the UTF-8 name read as Latin-1, ...): CLAP hosts pass UTF-8 text, which the
@@ -241,6 +264,20 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
                     maxVelocitySensitivityPercent, defaultVelocitySensitivityPercent, "%", integerText);
 
     layout.add (std::make_unique<juce::AudioParameterBool> (legato, "Legato", defaultLegato));
+
+    // --- M3 capture (appended after the M2 parameters, docs/M3-DESIGN.md 13) ---
+    layout.add (std::make_unique<juce::AudioParameterBool> (captureEnabled, "Capture", defaultCaptureEnabled));
+
+    layout.add (std::make_unique<juce::AudioParameterBool> (captureAudio, "Capture Audio", defaultCaptureAudio));
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (captureOffsetMode, "Capture Offset Mode",
+                                                              captureOffsetModeChoices, defaultCaptureOffsetModeIndex));
+
+    floatParameter (captureOffsetMs, "Capture Offset", minCaptureOffsetMsParam, maxCaptureOffsetMsParam,
+                    defaultCaptureOffsetMs, "ms", oneDecimalText);
+
+    floatParameter (captureFineOffsetMs, "Capture Fine Offset", minCaptureFineOffsetMsParam,
+                    maxCaptureFineOffsetMsParam, defaultCaptureFineOffsetMs, "ms", oneDecimalText);
 
     return layout;
 }

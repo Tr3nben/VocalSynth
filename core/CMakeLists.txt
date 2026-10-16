@@ -28,7 +28,29 @@ add_library(VocalSynthCore STATIC
     src/ScaleQuantizer.cpp
     src/NoteSegmenter.cpp
     src/BendGenerator.cpp
-    src/VoicePipeline.cpp)
+    src/VoicePipeline.cpp
+    # M3 capture (docs/M3-DESIGN.md): A = capture, B = render
+    include/vocalsynth/EventTiming.h
+    include/vocalsynth/CaptureRecord.h
+    include/vocalsynth/CaptureOptions.h
+    include/vocalsynth/SpscRing.h
+    include/vocalsynth/CaptureTap.h
+    include/vocalsynth/CaptureHistory.h
+    include/vocalsynth/TakeTimeline.h
+    include/vocalsynth/Take.h
+    include/vocalsynth/TakeSegmenter.h
+    include/vocalsynth/TakeRenderer.h
+    include/vocalsynth/SmfWriter.h
+    include/vocalsynth/WavWriter.h
+    src/CaptureRecord.cpp
+    src/CaptureOptions.cpp
+    src/CaptureTap.cpp
+    src/CaptureHistory.cpp
+    src/TakeTimeline.cpp
+    src/TakeSegmenter.cpp
+    src/TakeRenderer.cpp
+    src/SmfWriter.cpp
+    src/WavWriter.cpp)
 
 target_include_directories(VocalSynthCore PUBLIC include)
 target_compile_features(VocalSynthCore PUBLIC cxx_std_23)

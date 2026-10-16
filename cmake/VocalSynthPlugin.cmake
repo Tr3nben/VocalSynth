@@ -31,7 +31,20 @@ target_sources(VocalSynthPluginCode INTERFACE
     ${CMAKE_SOURCE_DIR}/plugin/TunerDisplayModel.h
     ${CMAKE_SOURCE_DIR}/plugin/TunerDisplayModel.cpp
     ${CMAKE_SOURCE_DIR}/plugin/VirtualMidiPort.h
-    ${CMAKE_SOURCE_DIR}/plugin/VirtualMidiPort.cpp)
+    ${CMAKE_SOURCE_DIR}/plugin/VirtualMidiPort.cpp
+    # M3 capture (docs/M3-DESIGN.md 12-14)
+    ${CMAKE_SOURCE_DIR}/plugin/CaptureExporter.h
+    ${CMAKE_SOURCE_DIR}/plugin/CaptureExporter.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/CapturePanel.h
+    ${CMAKE_SOURCE_DIR}/plugin/CapturePanel.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/CaptureSettings.h
+    ${CMAKE_SOURCE_DIR}/plugin/CaptureSettings.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/CaptureWorker.h
+    ${CMAKE_SOURCE_DIR}/plugin/CaptureWorker.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ExportFiles.h
+    ${CMAKE_SOURCE_DIR}/plugin/ExportFiles.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/FileDragSource.h
+    ${CMAKE_SOURCE_DIR}/plugin/FileDragSource.cpp)
 
 target_include_directories(VocalSynthPluginCode INTERFACE ${CMAKE_SOURCE_DIR}/plugin)
 
