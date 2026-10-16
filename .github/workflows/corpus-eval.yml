@@ -102,14 +102,18 @@ jobs:
       # that adds a dataset saves a new entry (run id suffix) and the next run restores the newest one.
       # The download step always runs: datasets whose files are cached with their md5 are skipped, the
       # others (e.g. one that failed last time) are fetched.
+      # Cache keys must not contain commas: "vocadito,dcs" -> "vocadito-dcs"
+      - name: Cache key for the selected datasets
+        run: echo "DATASETS_KEY=$(printf '%s' "$IN_DATASETS" | tr -c 'a-z0-9' '-')" >> "$GITHUB_ENV"
+
       - name: Restore the corpus from the cache
         id: cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/corpus/raw
-          key: corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets || 'vocadito,dcs,vocalset' }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-${{ github.run_id }}
+          key: corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ env.DATASETS_KEY }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-${{ github.run_id }}
           restore-keys: |
-            corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ inputs.datasets || 'vocadito,dcs,vocalset' }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-
+            corpus-raw-${{ env.CORPUS_CACHE_VERSION }}-${{ env.DATASETS_KEY }}-${{ hashFiles('tools/corpus/manifests/*.json', 'tools/corpus/vscorpus/datasets.py') }}-
 
       - name: Free disk space for whole-archive downloads
         run: |
