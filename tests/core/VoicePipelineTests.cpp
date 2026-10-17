@@ -1924,3 +1924,303 @@ TEST_CASE ("Pipeline CPU benchmark (all rates, ranges, algorithms)", "[.benchmar
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// M3 detection-delay side output (docs/M3-DESIGN.md 7.1): the timing overloads give the same events and one
+// VsEventTiming per event. Accuracy against true onsets: CaptureCompensationTests.cpp.
+
+namespace
+{
+/** One event's timing as an absolute estimate (block-size independent). */
+struct TimedEstimate
+{
+    int64_t estimate = 0; ///< emit position - delaySamples
+    EventTimingKind kind = EventTimingKind::none;
+    uint8_t flags = 0;
+
+    bool operator== (const TimedEstimate&) const = default;
+};
+
+struct TimingRun
+{
+    std::vector<TimedEvent> events;
+    std::vector<TimedEstimate> timings;
+    std::vector<int32_t> delays;
+    std::size_t flushedFrom = 0; ///< index of the first event of the final flush
+    int mismatches = 0;          ///< calls whose timing count differed from the event count
+};
+
+TimingRun runTimed (std::span<const float> input, double sampleRate, const VoiceSettings& settings, int blockSize,
+                    bool flushAtEnd = true)
+{
+    TimingRun run;
+    VoicePipeline pipeline;
+    pipeline.prepare (sampleRate, std::max (1, blockSize));
+    VsEventBuffer<1024> buffer;
+    VsEventTimingBuffer<1024> timings;
+    std::size_t pos = 0;
+    std::size_t blockIndex = 0;
+
+    const auto collect = [&] (int64_t start)
+    {
+        if (timings.size() != buffer.size())
+            ++run.mismatches;
+
+        for (std::size_t i = 0; i < buffer.size(); ++i)
+        {
+            const auto t = i < timings.size() ? timings[i] : VsEventTiming {};
+            const auto e = timed (start, buffer[i]);
+            run.events.push_back (e);
+            run.timings.push_back ({ e.position - t.delaySamples, t.kind, t.flags });
+            run.delays.push_back (t.delaySamples);
+        }
+    };
+
+    while (pos < input.size())
+    {
+        const auto wanted = blockSize > 0 ? blockSize : variableBlocks[blockIndex++ % std::size (variableBlocks)];
+        const auto n = static_cast<int> (std::min<std::size_t> (static_cast<std::size_t> (wanted), input.size() - pos));
+        const auto start = pipeline.getSamplePosition();
+        buffer.clear();
+        timings.clear();
+        pipeline.process (input.data() + pos, n, settings, buffer, timings);
+        collect (start);
+        pos += static_cast<std::size_t> (n);
+    }
+
+    run.flushedFrom = run.events.size();
+
+    if (flushAtEnd)
+    {
+        buffer.clear();
+        timings.clear();
+        pipeline.flush (0, buffer, timings);
+        collect (pipeline.getSamplePosition());
+    }
+
+    return run;
+}
+} // namespace
+
+TEST_CASE ("Pipeline timing side output: same events, one timing per event, block-size invariant estimates",
+           "[pipeline][timing]")
+{
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto config = GENERATE (0, 1);
+    CAPTURE (sr, config);
+
+    auto s = settingsFor (VoiceRange::tenor, config == 0 ? PitchAlgorithm::yin : PitchAlgorithm::mpm);
+    s.bendMode = config == 0 ? BendMode::trueBend : BendMode::anchored;
+    s.legato = config == 1;
+    s.scale = config == 1 ? Scale::major : Scale::chromatic;
+
+    const auto input = mixedMelody (sr);
+    const auto plain = runPipeline (input, sr, s, 512, false, true); // the existing overloads
+    const auto reference = runTimed (input, sr, s, 512);
+
+    REQUIRE (reference.mismatches == 0);
+    REQUIRE (reference.events == plain.events); // the side output never changes the events
+    REQUIRE (reference.timings.size() == reference.events.size());
+    REQUIRE (notesOf (reference.events).size() >= 12);
+
+    int measuredOns = 0;
+
+    for (std::size_t i = 0; i < reference.events.size(); ++i)
+    {
+        CAPTURE (i, reference.events[i].position);
+        const auto& e = reference.events[i].event;
+        const auto& t = reference.timings[i];
+        CHECK (reference.delays[i] >= 0);
+        CHECK ((t.flags & EventTimingFlags::resync) == 0); // the tap's flag, never the pipeline's
+
+        if (i >= reference.flushedFrom)
+        {
+            CHECK (t.kind == EventTimingKind::none); // a flush happens when it is sent
+            CHECK (reference.delays[i] == 0);
+            continue;
+        }
+
+        if (e.type == VsEventType::noteOn)
+        {
+            CHECK (t.kind != EventTimingKind::none);
+            measuredOns += t.kind == EventTimingKind::measured ? 1 : 0;
+            // never more than the confirmed-path latency + a window before the emit sample
+            CHECK (reference.delays[i] <= static_cast<int32_t> (sr * 0.2));
+        }
+        else if (e.type == VsEventType::noteOff)
+        {
+            CHECK (reference.delays[i] <= static_cast<int32_t> (sr * 0.3));
+        }
+    }
+
+    CHECK (measuredOns >= 8);
+
+    // Note-on / note-off pairs: the estimated end never lies before the estimated start
+    for (std::size_t i = 0; i < reference.events.size(); ++i)
+    {
+        if (reference.events[i].event.type != VsEventType::noteOn)
+            continue;
+
+        for (auto j = i + 1; j < reference.events.size(); ++j)
+        {
+            const auto& off = reference.events[j].event;
+
+            if (off.type == VsEventType::noteOff && off.data1 == reference.events[i].event.data1)
+            {
+                CAPTURE (i, j);
+                CHECK (reference.timings[j].estimate >= reference.timings[i].estimate);
+                break;
+            }
+        }
+    }
+
+    for (const auto block : { 1, 7, 64, 480, 4096, 0 })
+    {
+        CAPTURE (block);
+        const auto run = runTimed (input, sr, s, block);
+        CHECK (run.mismatches == 0);
+        CHECK (run.events == reference.events);
+        CHECK (run.timings == reference.timings);
+    }
+}
+
+TEST_CASE ("Pipeline timing: onset, note change, release and bend estimates", "[pipeline][timing]")
+{
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (algorithmName (algorithm), sr);
+
+    VoicePipeline geometry;
+    geometry.prepare (sr, 512);
+    const auto hop = static_cast<int64_t> (geometry.getHopInputSamples());
+
+    // Silence, A3 (0.4 s) -> B3 (0.4 s) phase-continuous, silence
+    const auto onset = static_cast<int64_t> (test::numSamplesFor (0.1, sr));
+    const auto change = onset + static_cast<int64_t> (test::numSamplesFor (0.4, sr));
+    const auto end = change + static_cast<int64_t> (test::numSamplesFor (0.4, sr));
+    const auto input = test::toneSequence (sr, { { 0.0, 0.1 }, { 220.0, 0.4 }, { 246.94, 0.4 }, { 0.0, 0.3 } }, 0.3f);
+
+    for (const bool legato : { false, true })
+    {
+        CAPTURE (legato);
+        auto s = settingsFor (VoiceRange::tenor, algorithm);
+        s.legato = legato;
+        s.bendMode = BendMode::trueBend;
+        const auto run = runTimed (input, sr, s, 512, false);
+        REQUIRE (noteNumbers (notesOf (run.events)) == std::vector<int> { 57, 59 });
+
+        const auto find = [&] (VsEventType type, int note)
+        {
+            for (std::size_t i = 0; i < run.events.size(); ++i)
+                if (run.events[i].event.type == type && run.events[i].event.data1 == note)
+                    return i;
+
+            FAIL ("event not found");
+            return std::size_t { 0 };
+        };
+
+        // Note start from silence: the level onset, within a quarter hop
+        const auto firstOn = find (VsEventType::noteOn, 57);
+        CHECK (run.timings[firstOn].kind == EventTimingKind::measured);
+        CHECK (run.timings[firstOn].flags == 0);
+        CHECK (std::abs (run.timings[firstOn].estimate - onset) <= hop / 4);
+
+        // Note change: flag noteChange, the old note ends where the new one starts; T_min (35 ms) is
+        // removed: within 3 hops of the true change (the change timer starts when the window has moved
+        // far enough into the new pitch)
+        const auto secondOn = find (VsEventType::noteOn, 59);
+        const auto firstOff = find (VsEventType::noteOff, 57);
+        CHECK (run.timings[secondOn].kind == EventTimingKind::measured);
+        CHECK ((run.timings[secondOn].flags & EventTimingFlags::noteChange) != 0);
+        CHECK (run.timings[firstOff].estimate == run.timings[secondOn].estimate);
+        CHECK (std::abs (run.timings[secondOn].estimate - change) <= 3 * hop);
+        CHECK (run.events[secondOn].position - change > static_cast<int64_t> (0.035 * sr)); // it was emitted late
+
+        // Release: the level crossing, within a hop of the end of the tone
+        const auto secondOff = find (VsEventType::noteOff, 59);
+        CHECK (run.timings[secondOff].kind == EventTimingKind::measured);
+        CHECK (std::abs (run.timings[secondOff].estimate - end) <= hop);
+        CHECK (run.events[secondOff].position - end > 2 * hop);
+
+        // Bends: a start bend carries its note-on's timing, the centre after the last note-off that
+        // note-off's, held-note updates the frame-centre delay (measured)
+        for (std::size_t i = 0; i < run.events.size(); ++i)
+        {
+            if (run.events[i].event.type != VsEventType::pitchBend)
+                continue;
+
+            CAPTURE (i);
+
+            if (i + 1 < run.events.size() && run.events[i + 1].event.type == VsEventType::noteOn
+                && run.events[i + 1].position == run.events[i].position)
+                CHECK (run.timings[i] == run.timings[i + 1]);
+            else if (i > 0 && run.events[i - 1].event.type == VsEventType::noteOff
+                     && run.events[i - 1].position == run.events[i].position)
+                CHECK (run.timings[i] == run.timings[i - 1]);
+            else
+                CHECK (run.timings[i].kind == EventTimingKind::measured);
+        }
+    }
+}
+
+TEST_CASE ("Pipeline timing: settings flushes and flush() are kind none; a low tone has one onset", "[pipeline][timing]")
+{
+    const auto sr = 48000.0;
+    const auto input = test::toneSequence (sr, { { 0.0, 0.1 }, { 220.0, 0.6 } }, 0.3f);
+    auto s = settingsFor (VoiceRange::tenor);
+    VoicePipeline p;
+    p.prepare (sr, 512);
+    VsEventBuffer<1024> events;
+    VsEventTimingBuffer<1024> timings;
+    std::vector<std::pair<VsEvent, VsEventTiming>> all;
+
+    const auto run = [&] (std::size_t from, std::size_t to, const VoiceSettings& settings)
+    {
+        for (auto pos = from; pos < to; pos += 512)
+        {
+            events.clear();
+            timings.clear();
+            p.process (input.data() + pos, static_cast<int> (std::min<std::size_t> (512, to - pos)), settings, events, timings);
+            REQUIRE (timings.size() == events.size());
+
+            for (std::size_t i = 0; i < events.size(); ++i)
+                all.emplace_back (events[i], timings[i]);
+        }
+    };
+
+    run (0, input.size() / 2, s);
+    REQUIRE (p.getActiveNote() == 57);
+    all.clear();
+
+    auto changed = s;
+    changed.range = VoiceRange::baritone; // a flushing settings change: note-off at offset 0
+    run (input.size() / 2, input.size() / 2 + 512, changed);
+    REQUIRE (! all.empty());
+    CHECK (all.front().first.type == VsEventType::noteOff);
+    CHECK (all.front().second == VsEventTiming {});
+
+    events.clear();
+    timings.clear();
+    p.flush (0, events, timings);
+    CHECK (timings.size() == events.size());
+
+    for (std::size_t i = 0; i < timings.size(); ++i)
+        CHECK (timings[i] == VsEventTiming {});
+
+    // A bass tone near f0 min: its power dips to ~0 twice per period, still one onset estimate at the start
+    const auto hop = static_cast<int64_t> (p.getHopInputSamples());
+
+    for (const auto f : { 65.4, 73.4, 98.0 })
+    {
+        CAPTURE (f);
+        const auto onset = static_cast<int64_t> (test::numSamplesFor (0.25, sr));
+        const auto tone = test::toneSequence (sr, { { 0.0, 0.25 }, { f, 0.5 }, { 0.0, 0.3 } }, 0.3f);
+        const auto r = runTimed (tone, sr, settingsFor (VoiceRange::bass), 512);
+        const auto on = std::find_if (r.events.begin(), r.events.end(),
+                                      [] (const TimedEvent& e) { return e.event.type == VsEventType::noteOn; });
+        REQUIRE (on != r.events.end());
+        const auto& t = r.timings[static_cast<std::size_t> (on - r.events.begin())];
+        CHECK (t.kind == EventTimingKind::measured);
+        CHECK (std::abs (t.estimate - onset) <= hop);
+    }
+}

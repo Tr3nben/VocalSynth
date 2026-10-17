@@ -589,8 +589,27 @@ void TakeSegmenter::endOpenTake (int64_t endSample, bool withTail, std::vector<T
 
     take.captureEndSample = take.endSample;
 
-    // Nothing after the end belongs to the take (free: bends / CCs in the silence before the gap closed it)
-    std::erase_if (take.events, [end = take.endSample] (const CapturedEvent& e) { return e.sample >= end; });
+    // Nothing after the end belongs to the take (free: bends / CCs in the silence before the gap closed it).
+    // Note-offs AT the end stay: they close notes at the boundary (the tap's capture-only note-offs come
+    // right before a captureOff marker at the same sample). The open-note set is rebuilt from what is
+    // left, so finish() closes exactly the notes the remaining events leave open.
+    const auto end = take.endSample;
+    const auto removed = std::erase_if (take.events, [end] (const CapturedEvent& e)
+                                        { return e.sample > end || (e.sample == end && ! isNoteOff (e.event)); });
+
+    if (removed > 0)
+    {
+        builder.notes = {};
+
+        for (const auto& e : take.events)
+        {
+            if (isNoteOn (e.event))
+                builder.notes[channelIndex (e.event)][noteIndex (e.event)] = true;
+            else if (isNoteOff (e.event))
+                builder.notes[channelIndex (e.event)][noteIndex (e.event)] = false;
+        }
+    }
+
     finish (std::move (builder), closedTakes);
 }
 
@@ -719,8 +738,11 @@ std::optional<Take> TakeSegmenter::buildGrab (const CaptureHistory& history, int
     take.settings = history.getSettingsAt (start);
     take.freeBpm = timeline.empty() ? TakeTimeline::fallbackBpm : timeline.bpmAt (marker_);
 
+    // Segments of [start, captureEnd) only: a transport record AT captureEnd may or may not be in the
+    // history yet when the grab is built (it arrives with the record that triggers the build, or with a
+    // later drain), so including it would make the grab depend on the drain pattern.
     if (synced)
-        take.timeline = timeline.slice (start, captureEnd);
+        take.timeline = timeline.slice (start, std::max (start, captureEnd - 1));
     else
         take.timeline.reset (sr);
 

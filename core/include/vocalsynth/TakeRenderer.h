@@ -94,8 +94,9 @@ struct RenderedTake
          * ppq);
        - free: s0 = o - freePreRollMs; ticks = llround ((t - s0) / sr * freeBpm / 60 * ppq).
        Events before the origin clamp to tick 0.
-    2. Version: Raw = the events as sent (EventTimingFlags::resync note-ons and synthetic events included, so
-       notes stay paired). Clean (first stage): correction merge (EventTimingFlags::correction), ghost notes
+    2. Version: Raw = the events as sent (synthetic events included, so notes stay paired; a resync note-on
+       re-opens the note that the segmenter's synthetic note-off ended at the same gap sample, so a note held
+       across a ring overflow stays one note, as the synth heard it). Clean (first stage): correction merge (EventTimingFlags::correction), ghost notes
        < max (cleanMinNoteMs, settings.minNoteLengthMs) removed, transition notes (< cleanTransitionMaxMs
        between two notes with a gap <= cleanTransitionMaxGapMs, pitch between its neighbours) merged into
        the following note, octave strays (< cleanOctaveStrayMaxMs, >= cleanOctaveStraySemitones from both
@@ -127,11 +128,12 @@ public:
     static constexpr int cleanOctaveStraySemitones = 11;
     /** refineNoteOnsets() searches [estimate - onsetRefineWindowMs, emit sample]. */
     static constexpr double onsetRefineWindowMs = 15.0;
-    /** refineNoteOnsets(): energy in frames of refineFrameMs; reference = the loudest frame of the last
-        refineReferenceMs before the emit sample; the onset follows the newest frame more than
-        refineQuietDb below the reference (no such frame: no clear onset, nothing refined). */
-    static constexpr double refineFrameMs = 1.0;
-    static constexpr double refineReferenceMs = 5.0;
+    /** refineNoteOnsets(): reference = the peak |x| of the last refineQuietMs before the emit sample; the
+        onset is the first sample after the newest run of at least refineQuietMs whose samples all stay
+        more than refineQuietDb below that peak (refineQuietMs >= one period of the lowest range's f0
+        min, so the zero crossings of a low tone never look like a pause), moved back to where the
+        signal left the run's noise floor. No such run (breath, noise, a note change): nothing refined. */
+    static constexpr double refineQuietMs = 16.0;
     static constexpr double refineQuietDb = 20.0;
 
     static RenderedTake render (const Take& take, const RenderOptions& options);

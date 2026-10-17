@@ -14,6 +14,7 @@ std::size_t CaptureDrain::drain (CaptureTap& tap, CaptureHistory& history, TakeS
     auto& recordRing = tap.getRecordRing();
     auto& audioRing = tap.getAudioRing();
     std::size_t handled = 0;
+    bool emptied = false;
 
     // Bounded: at most one ring capacity per call (records pushed meanwhile wait for the next call)
     for (std::size_t round = 0; round <= recordRing.getCapacity() / recordsPerPop; ++round)
@@ -41,11 +42,21 @@ std::size_t CaptureDrain::drain (CaptureTap& tap, CaptureHistory& history, TakeS
         handled += n;
 
         if (n < records.size())
+        {
+            emptied = true;
             break;
+        }
     }
 
-    segmenter.advanceTo (clock, history, closedTakes);
-    lastClock = clock;
+    // Only when every record loaded before the clock was handled: stopping at the bound with records
+    // still queued must not let advanceTo() run ahead of them (e.g. close a free take before a queued
+    // note-on). The next call catches up.
+    if (emptied)
+    {
+        segmenter.advanceTo (clock, history, closedTakes);
+        lastClock = clock;
+    }
+
     return handled;
 }
 

@@ -285,10 +285,12 @@ public:
     /** Level envelope for the onset / release estimates of the timing side output: one-pole power
         smoother (time constant in ms) on the conditioned input at the host rate. Its upward crossings
         of gateThresholdDb - NoteSegmenter::gateHysteresisDb and downward crossings of that level minus
-        levelReleaseHysteresisDb (a Schmitt trigger: the ripple of a low tone's power around one level
-        does not count as many crossings) are passed to the NoteSegmenter
+        levelReleaseHysteresisDb (a Schmitt trigger) are passed to the NoteSegmenter
         (setLevelOnsetSample / setLevelReleaseSample; the release corrected for the envelope's decay:
-        max (newest rise of the envelope, crossing - tau * ln (envelope at that rise / level))).
+        max (newest rise of the envelope, crossing - tau * ln (envelope at that rise / level))). A release
+        counts only once the envelope stayed below the on level for one period of the range's f0 min
+        (reported then); a rise before that is the same sound (the power of a low tone dips to ~0 twice per
+        period), so it gives no new onset.
         Per sample and only on absolute samples, so block-size invariant. */
     static constexpr double onsetEnvelopeTimeConstantMs = 1.0;
     static constexpr double levelReleaseHysteresisDb = 6.0;
@@ -385,7 +387,19 @@ private:
     double levelEnvelope = 0.0;
     double levelOnPower = 0.0;
     double levelOffPower = 0.0;
-    bool levelAbove = false;
+    /** silent -> above (onset) -> falling (below the off level) -> silent after levelHoldSamples below the
+        on level (release); falling -> above again without an onset (the power of a low tone dips to ~0
+        twice per period: one tone, one onset). */
+    enum class LevelState : uint8_t
+    {
+        silent,
+        above,
+        falling
+    };
+    LevelState levelState = LevelState::silent;
+    int64_t levelHoldSamples = 1;       ///< one period of the range's f0 min
+    int64_t levelFallingSamples = 0;
+    int64_t levelPendingRelease = 0;
     double levelLastRise = 0.0;
     int64_t levelLastRiseSample = 0;
 

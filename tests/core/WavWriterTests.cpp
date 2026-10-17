@@ -116,7 +116,8 @@ TEST_CASE ("WavWriter: sample rate rounded, frame count clamped to the RIFF limi
         const auto riffSize = [&] (uint64_t n) { return header - 8 + n * bps + ((n * bps) & 1u); };
         CHECK (riffSize (maxFrames) <= 0xFFFFFFFFull);
         CHECK (riffSize (maxFrames + 1) > 0xFFFFFFFFull);
-        CHECK (maxFrames / 48000 / 3600 >= 8); // > 8 h of 48 kHz mono: never reached
+        // 24-bit: > 8 h of 48 kHz mono, float: > 6 h; never reached (history <= 30 min)
+        CHECK (maxFrames / 48000 / 3600 >= (format == WavSampleFormat::pcm24 ? 8u : 6u));
 
         const auto h = WavWriter::makeHeader (format, 48000.0, maxFrames + 12345);
         CHECK (readU32 (h, h.size() - 4) == static_cast<uint32_t> (maxFrames * bps));

@@ -105,7 +105,9 @@ void VoicePipeline::reset() noexcept
     samplePosition = 0;
     lastFrame = {};
     levelEnvelope = 0.0;
-    levelAbove = false;
+    levelState = LevelState::silent;
+    levelFallingSamples = 0;
+    levelPendingRelease = 0;
     levelLastRise = 0.0;
     levelLastRiseSample = 0;
     applySettings (sanitise (VoiceSettings {}));
@@ -139,6 +141,7 @@ void VoicePipeline::applySettings (const VoiceSettings& s) noexcept
 
     levelOnPower = std::pow (10.0, static_cast<double> (s.gateThresholdDb - NoteSegmenter::gateHysteresisDb) / 10.0);
     levelOffPower = levelOnPower * std::pow (10.0, -levelReleaseHysteresisDb / 10.0);
+    levelHoldSamples = std::max<int64_t> (1, static_cast<int64_t> (std::llround (sampleRate / voiceRangeInfo (s.range).f0MinHz)));
 }
 
 int64_t VoicePipeline::fastOnsetDelayFor (const void* pipeline, double f0Hz) noexcept
@@ -163,27 +166,46 @@ void VoicePipeline::updateLevelEnvelope (float conditionedSample, int64_t absolu
         levelLastRiseSample = absoluteSample;
     }
 
-    if (! levelAbove)
+    switch (levelState)
     {
-        if (levelEnvelope >= levelOnPower)
-        {
-            levelAbove = true;
-            segmenter.setLevelOnsetSample (absoluteSample);
-        }
+        case LevelState::silent:
+            if (levelEnvelope >= levelOnPower)
+            {
+                levelState = LevelState::above;
+                segmenter.setLevelOnsetSample (absoluteSample);
+            }
 
-        return;
-    }
+            return;
 
-    if (levelEnvelope < levelOffPower)
-    {
-        levelAbove = false;
+        case LevelState::above:
+            if (levelEnvelope < levelOffPower)
+            {
+                // Exponential decay since the newest rise: that is where the sound stopped (abrupt end) or
+                // a little before the crossing (slow fade, the envelope follows the input)
+                const auto tauSamples = onsetEnvelopeTimeConstantMs * sampleRate / 1000.0;
+                const auto decay = levelLastRise > levelOffPower ? tauSamples * std::log (levelLastRise / levelOffPower) : 0.0;
+                const auto estimate = absoluteSample - static_cast<int64_t> (std::llround (std::min (decay, 1.0e9)));
+                levelPendingRelease = std::max (levelLastRiseSample, estimate);
+                levelState = LevelState::falling;
+                levelFallingSamples = 0;
+            }
 
-        // Exponential decay since the newest rise: that is where the sound stopped (abrupt end) or a
-        // little before the crossing (slow fade, the envelope follows the input)
-        const auto tauSamples = onsetEnvelopeTimeConstantMs * sampleRate / 1000.0;
-        const auto decay = levelLastRise > levelOffPower ? tauSamples * std::log (levelLastRise / levelOffPower) : 0.0;
-        const auto estimate = absoluteSample - static_cast<int64_t> (std::llround (std::min (decay, 1.0e9)));
-        segmenter.setLevelReleaseSample (std::max (levelLastRiseSample, estimate));
+            return;
+
+        case LevelState::falling:
+            if (levelEnvelope >= levelOnPower)
+            {
+                levelState = LevelState::above; // a dip of a low tone's power, not a release
+                return;
+            }
+
+            if (++levelFallingSamples >= levelHoldSamples)
+            {
+                levelState = LevelState::silent;
+                segmenter.setLevelReleaseSample (levelPendingRelease);
+            }
+
+            return;
     }
 }
 

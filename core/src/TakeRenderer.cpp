@@ -141,6 +141,7 @@ struct Note
     int64_t offEmit = 0;
     uint8_t onFlags = 0;
     uint8_t offFlags = 0;
+    bool offSynthetic = false;    ///< ended by the segmenter (take end, gap), not by a sent note-off
     std::size_t onOrder = 0;      ///< index of the note-on in take.events
     std::size_t offOrder = noIndex;
     int64_t startTick = 0;
@@ -195,7 +196,12 @@ void buildNotes (const Take& take, bool useRefined, int64_t roundTrip, std::vect
         return t - roundTrip;
     };
 
-    const auto endNote = [&] (std::size_t index, int64_t time, int64_t emit, uint8_t flags, std::size_t order)
+    std::array<std::array<std::size_t, 128>, 16> lastEndedPitch {}; // newest ended note per channel + pitch
+
+    for (auto& ch : lastEndedPitch)
+        ch.fill (noIndex);
+
+    const auto endNote = [&] (std::size_t index, int64_t time, int64_t emit, uint8_t flags, std::size_t order, bool synthetic)
     {
         auto& n = notes[index];
         n.end = std::max (time, n.start);
@@ -203,6 +209,8 @@ void buildNotes (const Take& take, bool useRefined, int64_t roundTrip, std::vect
         n.offEmit = emit;
         n.offFlags = flags;
         n.offOrder = order;
+        n.offSynthetic = synthetic;
+        lastEndedPitch[static_cast<std::size_t> (n.channel - 1)][n.pitch] = index;
         const auto ch = static_cast<std::size_t> (n.channel - 1);
         open[ch][n.pitch] = noIndex;
         lastEnded[ch] = index;
@@ -229,8 +237,34 @@ void buildNotes (const Take& take, bool useRefined, int64_t roundTrip, std::vect
         {
             const auto pitch = static_cast<uint8_t> (std::min<int> (e.data1, 127));
 
+            // A resync note-on (the tap re-states a note that is still on in the MIDI output after a ring
+            // overflow) was never sent: the note continues. The segmenter ended it at the gap (synthetic
+            // note-off at the same sample): re-open it instead of splitting it there.
+            if ((ce.timing.flags & EventTimingFlags::resync) != 0)
+            {
+                const auto ended = lastEndedPitch[ch][pitch];
+
+                if (open[ch][pitch] == noIndex && ended != noIndex && notes[ended].offSynthetic
+                    && notes[ended].offEmit == ce.sample)
+                {
+                    auto& n = notes[ended];
+                    n.closed = false;
+                    n.end = n.start;
+                    n.offOrder = noIndex;
+                    n.offSynthetic = false;
+                    open[ch][pitch] = ended;
+                    sounding[ch] = ended;
+                    lastEndedPitch[ch][pitch] = noIndex;
+                    pendingStart[ch].clear();
+                    continue;
+                }
+
+                if (open[ch][pitch] != noIndex)
+                    continue; // still open here: nothing to re-state
+            }
+
             if (open[ch][pitch] != noIndex) // a repeated note-on ends the earlier note (MidiOutputStage rule)
-                endNote (open[ch][pitch], timeOf (ce, false), ce.sample, ce.timing.flags, i);
+                endNote (open[ch][pitch], timeOf (ce, false), ce.sample, ce.timing.flags, i, false);
 
             Note n;
             n.channel = channel;
@@ -257,7 +291,7 @@ void buildNotes (const Take& take, bool useRefined, int64_t roundTrip, std::vect
             const auto pitch = static_cast<uint8_t> (std::min<int> (e.data1, 127));
 
             if (open[ch][pitch] != noIndex) // unpaired note-offs are dropped
-                endNote (open[ch][pitch], timeOf (ce, false), ce.sample, ce.timing.flags, i);
+                endNote (open[ch][pitch], timeOf (ce, false), ce.sample, ce.timing.flags, i, ce.synthetic);
 
             continue;
         }
@@ -809,12 +843,13 @@ AudioSpan TakeRenderer::computeAudioSpan (const Take& take, const RenderOptions&
 void TakeRenderer::refineNoteOnsets (Take& take, std::span<const float> audio, int64_t audioStartSample)
 {
     const auto sr = takeSampleRate (take);
-    const auto frameSamples = std::max<int64_t> (1, msToSamples (refineFrameMs, sr));
+    const auto quietRun = std::max<int64_t> (2, msToSamples (refineQuietMs, sr));
     const auto window = msToSamples (onsetRefineWindowMs, sr);
     const auto audioEnd = audioStartSample + static_cast<int64_t> (audio.size());
+    const auto quietFactor = std::pow (10.0, -refineQuietDb / 20.0);
     const auto at = [&] (int64_t s) noexcept
     {
-        return s >= audioStartSample && s < audioEnd ? static_cast<double> (audio[static_cast<std::size_t> (s - audioStartSample)]) : 0.0;
+        return std::abs (static_cast<double> (audio[static_cast<std::size_t> (s - audioStartSample)]));
     };
 
     for (auto& ce : take.events)
@@ -826,61 +861,62 @@ void TakeRenderer::refineNoteOnsets (Take& take, std::span<const float> audio, i
             || (ce.timing.flags & (EventTimingFlags::resync | EventTimingFlags::correction | EventTimingFlags::noteChange)) != 0)
             continue;
 
-        // Search region [estimate - window, emit], with the reference level from the frames before emit
-        const auto from = std::min (ce.estimatedSample, ce.sample) - window;
+        // The onset must lie in [estimate - window, emit]; the quiet run before it may start earlier
+        const auto earliest = std::min (ce.estimatedSample, ce.sample) - window;
+        const auto from = earliest - quietRun;
         const auto to = ce.sample;
 
-        if (from < audioStartSample || to > audioEnd || to - from < 2 * frameSamples)
+        if (from < audioStartSample || to > audioEnd || to - earliest < 2)
             continue;
 
-        const auto numFrames = static_cast<std::size_t> ((to - from) / frameSamples);
-        std::vector<double> energy (numFrames, 0.0);
+        auto peak = 0.0;
 
-        for (std::size_t f = 0; f < numFrames; ++f)
+        for (auto s = std::max (from, to - quietRun); s < to; ++s)
+            peak = std::max (peak, at (s));
+
+        if (! (peak > 0.0) || ! std::isfinite (peak))
+            continue;
+
+        // Newest run of quietRun samples below the threshold, scanning back from the emit sample: the onset
+        // is the loud sample right after it
+        const auto threshold = peak * quietFactor;
+        int64_t run = 0;
+        int64_t onset = -1;
+
+        for (auto s = to - 1; s >= from; --s)
         {
-            double sum = 0.0;
-            const auto s0 = from + static_cast<int64_t> (f) * frameSamples;
+            if (at (s) >= threshold)
+            {
+                run = 0;
+                continue;
+            }
 
-            for (int64_t s = s0; s < s0 + frameSamples; ++s)
-                sum += at (s) * at (s);
-
-            energy[f] = sum / static_cast<double> (frameSamples);
+            if (++run >= quietRun)
+            {
+                onset = s + run; // first sample after the run
+                break;
+            }
         }
 
-        const auto refFrames = std::min<std::size_t> (numFrames, static_cast<std::size_t> (std::max<int64_t> (1, msToSamples (refineReferenceMs, sr) / frameSamples)));
-        const auto reference = *std::max_element (energy.end() - static_cast<std::ptrdiff_t> (refFrames), energy.end());
+        if (onset < 0 || onset >= to)
+            continue; // no pause before the emit sample: no clear onset
 
-        if (! (reference > 0.0))
-            continue;
+        // Back to where the signal left the noise floor of the run (a tone that starts at a zero crossing
+        // passes the threshold a few samples after its start), at most half the run
+        double floorPower = 0.0;
+        const auto floorFrom = onset - quietRun;
+        const auto floorTo = onset - quietRun / 2;
 
-        const auto quiet = reference * std::pow (10.0, -refineQuietDb / 10.0);
+        for (auto s = floorFrom; s < floorTo; ++s)
+            floorPower += at (s) * at (s);
 
-        // The newest quiet frame before emit; the onset lies in the frame after it
-        auto lastQuiet = numFrames;
+        const auto floorAmplitude = 3.0 * std::sqrt (floorPower / static_cast<double> (std::max<int64_t> (1, floorTo - floorFrom))) + 1.0e-7;
+        const auto limit = onset - quietRun / 2;
 
-        for (auto f = numFrames; f-- > 0;)
-            if (energy[f] < quiet)
-            {
-                lastQuiet = f;
-                break;
-            }
+        while (onset > limit && at (onset - 1) > floorAmplitude)
+            --onset;
 
-        if (lastQuiet == numFrames || lastQuiet + 1 >= numFrames)
-            continue; // no quiet part, or the level is still rising at emit: no clear onset
-
-        // Sample resolution: the first sample after the quiet frame that reaches the quiet level's amplitude
-        const auto amplitude = std::sqrt (2.0 * quiet);
-        const auto searchFrom = from + static_cast<int64_t> (lastQuiet) * frameSamples;
-        auto onset = searchFrom + frameSamples;
-
-        for (auto s = searchFrom; s < to; ++s)
-            if (std::abs (at (s)) >= amplitude)
-            {
-                onset = s;
-                break;
-            }
-
-        if (onset >= ce.estimatedSample - window && onset <= ce.sample)
+        if (onset >= earliest && onset <= ce.sample)
             ce.refinedSample = onset;
     }
 }

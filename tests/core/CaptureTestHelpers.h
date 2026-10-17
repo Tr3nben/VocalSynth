@@ -8,11 +8,15 @@
 #include "vocalsynth/TakeSegmenter.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <span>
+#include <sstream>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace vocalsynth::test
@@ -263,6 +267,221 @@ inline bool notesPaired (const Take& take)
                 return false;
 
     return true;
+}
+
+//==============================================================================
+/** An event at an absolute sample, delivered by runTap() to the chunk that contains it. */
+struct ScheduledEvent
+{
+    int64_t sample = 0;
+    VsEvent event;
+    VsEventTiming timing;
+};
+
+/** Everything a host and the plugin would hand the tap, independent of the block structure. Control
+    points (requests, flushes, switches) apply at the block that starts at their sample: put them on
+    multiples of every compared block size (430080 = lcm (7, 64, 480, 512, 4096)). */
+struct TapScenario
+{
+    double sampleRate = 48000.0;
+    int maxBlock = 4096;
+    int64_t length = 0;
+    PlayheadSim playhead { 48000.0 };
+    std::vector<ScheduledEvent> events;                  ///< sorted by sample
+    std::vector<int64_t> newTakeAt, grabAt, clearAt, flushAt;
+    int grabBars = 8;
+    double grabSeconds = 30.0;
+    std::vector<std::pair<int64_t, int64_t>> bypassed;   ///< [from, to)
+    std::vector<std::pair<int64_t, int64_t>> audioOff;   ///< [from, to)
+    std::vector<std::pair<int64_t, int64_t>> captureOff; ///< [from, to)
+    std::vector<std::pair<int64_t, CaptureSettingsInfo>> settingsFrom; ///< sorted; default before the first
+
+    static bool contains (const std::vector<int64_t>& points, int64_t s)
+    {
+        return std::find (points.begin(), points.end(), s) != points.end();
+    }
+
+    static bool inside (const std::vector<std::pair<int64_t, int64_t>>& ranges, int64_t s)
+    {
+        return std::any_of (ranges.begin(), ranges.end(), [s] (const auto& r) { return s >= r.first && s < r.second; });
+    }
+
+    CaptureSettingsInfo settingsAt (int64_t s) const
+    {
+        CaptureSettingsInfo result {};
+
+        for (const auto& [from, info] : settingsFrom)
+            if (from <= s)
+                result = info;
+
+        return result;
+    }
+};
+
+/** Deterministic test voice: a sum of two sines plus a slow ramp (never silent, distinct per sample). */
+inline float scenarioSignal (int64_t s)
+{
+    const auto x = static_cast<double> (s);
+    return static_cast<float> (0.5 * std::sin (x * 0.0123) + 0.25 * std::sin (x * 0.000777) + 1.0e-7 * static_cast<double> (s % 1000));
+}
+
+/** Drives tap like the processor does (beginBlock, flushNotes, processChunk / processBypassed) with
+    blocks of blockSize samples; calls consume() after every consumeEvery samples and once at the end. */
+template <typename Consumer>
+void runTap (CaptureTap& tap, const TapScenario& sc, int blockSize, Consumer&& consume, int64_t consumeEvery = 8192)
+{
+    tap.prepare (sc.sampleRate, sc.maxBlock);
+
+    std::vector<VsEvent> events;
+    std::vector<VsEventTiming> timings;
+    std::vector<float> mono (static_cast<std::size_t> (blockSize));
+    events.reserve (1024);
+    timings.reserve (1024);
+    std::size_t next = 0;
+    int64_t sinceConsume = 0;
+
+    for (int64_t start = 0; start < sc.length; start += blockSize)
+    {
+        const auto n = static_cast<int> (std::min<int64_t> (blockSize, sc.length - start));
+
+        if (TapScenario::contains (sc.newTakeAt, start))
+            tap.requestNewTake();
+        if (TapScenario::contains (sc.grabAt, start))
+            tap.requestGrab (sc.grabBars, sc.grabSeconds);
+        if (TapScenario::contains (sc.clearAt, start))
+            tap.requestClear();
+
+        CaptureBlockSettings bs;
+        bs.captureEnabled = ! TapScenario::inside (sc.captureOff, start);
+        bs.captureAudio = ! TapScenario::inside (sc.audioOff, start);
+        bs.bypassed = TapScenario::inside (sc.bypassed, start);
+        bs.settings = sc.settingsAt (start);
+
+        tap.beginBlock (sc.playhead.transportAt (start), bs);
+
+        events.clear();
+        timings.clear();
+
+        while (next < sc.events.size() && sc.events[next].sample < start + n)
+        {
+            auto e = sc.events[next].event;
+            e.sampleOffset = static_cast<int> (sc.events[next].sample - start);
+            events.push_back (e);
+            timings.push_back (sc.events[next].timing);
+            ++next;
+        }
+
+        if (bs.bypassed)
+        {
+            tap.flushNotes();
+            tap.processBypassed (n);
+        }
+        else
+        {
+            if (TapScenario::contains (sc.flushAt, start))
+                tap.flushNotes();
+
+            for (int i = 0; i < n; ++i)
+                mono[static_cast<std::size_t> (i)] = scenarioSignal (start + i);
+
+            tap.processChunk (mono.data(), n, events, timings);
+        }
+
+        sinceConsume += n;
+
+        if (sinceConsume >= consumeEvery)
+        {
+            consume();
+            sinceConsume = 0;
+        }
+    }
+
+    consume();
+}
+
+/** Constant / changing tempo, loop wrap with a time-signature change, stop/start, bypass, audio off,
+    captureOff/On, requests and a flush: every change on a multiple of 430080 samples. */
+inline TapScenario makeInvarianceScenario (double sr)
+{
+    constexpr int64_t P = 430080;
+    TapScenario sc;
+    sc.sampleRate = sr;
+    sc.maxBlock = 4096;
+    sc.length = 9 * P + 1234;
+    sc.playhead = PlayheadSim (sr);
+    sc.playhead.add ({ 0, false, 0.0, 120.0, 4, 4 });
+    sc.playhead.change (P, true, 120.0);                       // transport start
+    sc.playhead.change (2 * P, true, 97.5);                    // tempo change
+    sc.playhead.add ({ 3 * P, true, 8.0, 97.5, 3, 4 });        // loop wrap + 3/4
+    sc.playhead.change (6 * P, false, 97.5, 3, 4);             // stop
+    sc.newTakeAt = { 2 * P };
+    sc.grabAt = { 3 * P };
+    sc.grabBars = 2;
+    sc.bypassed = { { 4 * P, 5 * P } };
+    sc.audioOff = { { 5 * P, 6 * P } };
+    sc.flushAt = { 6 * P };
+    sc.captureOff = { { 7 * P, 8 * P } };
+    sc.clearAt = { 8 * P };
+    CaptureSettingsInfo trueBend;
+    trueBend.bendMode = BendMode::trueBend;
+    sc.settingsFrom = { { 6 * P, trueBend } };
+
+    for (int64_t s = 123, k = 0; s < sc.length; s += 5000, ++k)
+    {
+        const auto note = static_cast<uint8_t> (60 + k % 12);
+        sc.events.push_back ({ s, VsEvent::makeNoteOn (0, 1, note, static_cast<uint8_t> (60 + k % 50)),
+                               { static_cast<int32_t> ((k * 37) % 2000), EventTimingKind::measured, 0 } });
+        sc.events.push_back ({ s + 3077, VsEvent::makeNoteOff (0, 1, note),
+                               { static_cast<int32_t> ((k * 53) % 3000), EventTimingKind::model, 0 } });
+    }
+
+    for (int64_t s = 50; s < sc.length; s += 777)
+        sc.events.push_back ({ s, VsEvent::makePitchBend (0, 1, static_cast<int16_t> ((s % 16000) - 8000)), {} });
+
+    for (int64_t s = 999; s < sc.length; s += 9001)
+        sc.events.push_back ({ s, VsEvent::makeControlChange (0, 1, 1, static_cast<uint8_t> (s % 128)), {} });
+
+    std::stable_sort (sc.events.begin(), sc.events.end(),
+                      [] (const ScheduledEvent& a, const ScheduledEvent& b) { return a.sample < b.sample; });
+    return sc;
+}
+
+/** Empty string if a and b are the same take, else a description of the first difference. */
+inline std::string takeDifference (const Take& a, const Take& b)
+{
+    std::ostringstream out;
+    const auto field = [&out] (const char* name, auto x, auto y)
+    {
+        if (! (x == y) && out.tellp() == 0)
+            out << name << ": " << +x << " vs " << +y;
+    };
+
+    field ("number", a.number, b.number);
+    field ("mode", static_cast<int> (a.mode), static_cast<int> (b.mode));
+    field ("kind", static_cast<int> (a.kind), static_cast<int> (b.kind));
+    field ("closed", a.closed, b.closed);
+    field ("startSample", a.startSample, b.startSample);
+    field ("endSample", a.endSample, b.endSample);
+    field ("captureEndSample", a.captureEndSample, b.captureEndSample);
+    field ("sampleRate", a.sampleRate, b.sampleRate);
+    field ("maxBlockSize", a.maxBlockSize, b.maxBlockSize);
+    field ("settings", a.settings == b.settings, true);
+    field ("freeBpm", a.freeBpm, b.freeBpm);
+    field ("noteCount", a.noteCount, b.noteCount);
+    field ("incomplete", a.incomplete, b.incomplete);
+    field ("audio", static_cast<int> (a.audio), static_cast<int> (b.audio));
+    field ("events.size", a.events.size(), b.events.size());
+    field ("timeline", a.timeline.getSegments() == b.timeline.getSegments(), true);
+
+    if (out.tellp() == 0)
+        for (std::size_t i = 0; i < a.events.size(); ++i)
+            if (! (a.events[i] == b.events[i]))
+            {
+                out << "event " << i << " at " << a.events[i].sample << " vs " << b.events[i].sample;
+                break;
+            }
+
+    return out.str();
 }
 
 } // namespace vocalsynth::test

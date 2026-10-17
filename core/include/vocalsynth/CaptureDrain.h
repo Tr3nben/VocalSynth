@@ -21,9 +21,11 @@ namespace vocalsynth
     drain(): clock = tap.getClock() (acquire, BEFORE popping); then every record in the ring, in stream
     order: audio record -> its frame from the audio ring -> history.addAudio (a frame that is not there,
     which the protocol rules out, is left to the history's zero fill); any other record ->
-    history.addRecord, then segmenter.process. Finally segmenter.advanceTo (clock). Records the producer
-    pushed after the clock was loaded may be handled as well (advanceTo never moves backwards); at most
-    about one ring capacity per call. Returns the number of records handled. Capture worker thread (or the test's thread) only; not real-time (the history and the
+    history.addRecord, then segmenter.process. Finally segmenter.advanceTo (clock), but only if the ring
+    was emptied (a call that stops at its bound with records still queued leaves the clock to the next
+    call, so advanceTo never runs ahead of an unhandled record). Records the producer pushed after the
+    clock was loaded may be handled as well (advanceTo never moves backwards); at most about one ring
+    capacity per call. Returns the number of records handled. Capture worker thread (or the test's thread) only; not real-time (the history and the
     segmenter allocate); the scratch buffers are members (no allocation per call). */
 class CaptureDrain
 {
@@ -33,7 +35,7 @@ public:
     std::size_t drain (CaptureTap& tap, CaptureHistory& history, TakeSegmenter& segmenter,
                        std::vector<Take>& closedTakes);
 
-    /** Clock loaded by the last drain() (every record before it was handled). */
+    /** Clock loaded by the last drain() that emptied the ring (every record before it was handled). */
     int64_t getLastClock() const noexcept { return lastClock; }
 
 private:

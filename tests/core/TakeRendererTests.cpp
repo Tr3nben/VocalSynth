@@ -104,17 +104,6 @@ RenderOptions raw()
     return o;
 }
 
-std::vector<TickEvent> notesOf (const RenderedTake& r)
-{
-    std::vector<TickEvent> out;
-
-    for (const auto& e : r.events)
-        if (e.type == TickEventType::noteOn || e.type == TickEventType::noteOff)
-            out.push_back (e);
-
-    return out;
-}
-
 struct SimpleNote
 {
     int64_t start = 0;
@@ -210,7 +199,7 @@ TEST_CASE ("TakeRenderer: exact ticks at 60 / 97.5 / 120 / 174 BPM and PPQ 96 / 
                 for (int i = 0; i < 4; ++i)
                 {
                     const auto expectedStart = std::llround ((beats[i] - 4.0) * ppq);
-                    const auto expectedEnd = std::llround (((sampleAt (sampleRate, bpm, beats[i + 1]) - static_cast<int64_t> (sampleRate * 0.01)) / sampleRate * bpm / 60.0 - 4.0) * ppq);
+                    const auto expectedEnd = std::llround ((static_cast<double> (sampleAt (sampleRate, bpm, beats[i + 1]) - static_cast<int64_t> (sampleRate * 0.01)) / sampleRate * bpm / 60.0 - 4.0) * ppq);
                     CHECK (std::abs (notes[static_cast<std::size_t> (i)].start - expectedStart) <= 0); // sample rounding never moves a tick here
                     CHECK (notes[static_cast<std::size_t> (i)].end == expectedEnd);
                     CHECK (notes[static_cast<std::size_t> (i)].pitch == 60 + i);
@@ -239,7 +228,7 @@ TEST_CASE ("TakeRenderer: origin = start of the bar of the first (compensated) n
     CHECK (r.originBeats == 24.0);
     const auto notes = pairedNotes (r);
     REQUIRE (notes.size() == 2);
-    CHECK (notes[0] == SimpleNote { 480, 960, 62 });
+    CHECK (notes[0] == SimpleNote { 1440, 1920, 62 }); // beats 25.5 .. 26 of a bar starting at beat 24
     CHECK (notes[1] == SimpleNote { 4800, 5760, 64 });
     CHECK (r.endTick == 7680); // end of bar 8
 
@@ -442,10 +431,10 @@ TEST_CASE ("TakeRenderer: unpaired note-offs dropped, open notes closed, synthet
     checkInvariants (r);
     const auto notes = pairedNotes (r);
     REQUIRE (notes.size() == 2);
-    CHECK (notes[0] == SimpleNote { 0, 480, 60 });
-    CHECK (notes[1] == SimpleNote { 960, 3840, 62 });
+    CHECK (notes[0] == SimpleNote { 0, 960, 60 });      // 24000 samples = 1 beat at 120 BPM
+    CHECK (notes[1] == SimpleNote { 1920, 7680, 62 });  // closed at endSample (beat 8)
     CHECK (r.noteCount == 2);
-    CHECK (r.endTick == 3840);
+    CHECK (r.endTick == 7680);                          // that note-off lies on the bar line
 }
 
 TEST_CASE ("TakeRenderer: the origin uses the refined first note-on for Raw and Clean", "[takerenderer]")
@@ -463,7 +452,7 @@ TEST_CASE ("TakeRenderer: the origin uses the refined first note-on for Raw and 
     CHECK (r.originBar == 2);
     CHECK (c.audio == r.audio);
     CHECK (pairedNotes (c).at (0).start == 0);   // refined, clamped to tick 0
-    CHECK (pairedNotes (r).at (0).start == 6);   // Raw: the estimate (300 samples = 6 ticks)
+    CHECK (pairedNotes (r).at (0).start == 12);  // Raw: the estimate (300 samples = 12 ticks)
     CHECK (pairedNotes (c).at (1) == pairedNotes (r).at (1));
 }
 
@@ -584,10 +573,12 @@ TEST_CASE ("TakeRenderer: quantize keeps order, lengths >= 1 tick and the same-p
     REQUIRE (merged.size() == 1);
     CHECK (merged[0] == SimpleNote { 0, 200, 60 });
 
-    // Without quantize, overlapping same-pitch notes: the earlier one ends at the later start
+    // Without quantize, overlapping same-pitch notes (sent one after the other; the second note-on has a
+    // larger detection delay, so its estimate lies before the first note's end): the earlier one ends at
+    // the later start
     auto overlap = syncedTake (sr48, 120.0);
-    addNote (overlap, 60, at (0), at (300));
-    addNote (overlap, 60, at (200), at (400));
+    addNote (overlap, 60, at (0), at (300), 100, 100);
+    addNote (overlap, 60, at (200), at (400), 100, 4000);
     sortEvents (overlap);
     const auto o = pairedNotes (TakeRenderer::render (overlap, raw()));
     REQUIRE (o.size() == 2);
@@ -913,7 +904,7 @@ TEST_CASE ("TakeRenderer: deterministic, and a 10-minute True-bend take renders 
 
         addEvent (take, s + length, 900, VsEvent::makeNoteOff (0, 1, pitch));
         addEvent (take, s + length, 900, VsEvent::makePitchBend (0, 1, 0));
-        s += length + 2400 + next() * 5;
+        s += length + 480 + next();
     }
 
     sortEvents (take);
@@ -938,4 +929,37 @@ TEST_CASE ("TakeRenderer: deterministic, and a 10-minute True-bend take renders 
     const auto bestMs = std::chrono::duration<double, std::milli> (best).count();
     INFO ("10-minute render: " << bestMs << " ms, " << take.events.size() << " events");
     CHECK (bestMs < 50.0);
+}
+
+TEST_CASE ("TakeRenderer: a note held across an overflow gap stays one note (resync)", "[takerenderer]")
+{
+    auto take = syncedTake (sr48, 120.0, 4, 4, 0, 0.0, 192000);
+    addNote (take, 55, 10000, 20000);
+    addEvent (take, 30000, 500, VsEvent::makeNoteOn (0, 1, 60, 100));
+    // gap at 60000: the segmenter ends the note (synthetic), the tap re-states it (resync, kind none)
+    addEvent (take, 60000, 0, VsEvent::makeNoteOff (0, 1, 60), 0, EventTimingKind::none, true);
+    addEvent (take, 60000, 0, VsEvent::makeNoteOn (0, 1, 60, 100), EventTimingFlags::resync, EventTimingKind::none);
+    // a resync note-on of a note whose note-on was lost in the gap starts it there
+    addEvent (take, 60000, 0, VsEvent::makeNoteOn (0, 1, 55, 100), EventTimingFlags::resync, EventTimingKind::none);
+    addEvent (take, 65000, 500, VsEvent::makeNoteOff (0, 1, 55));
+    addEvent (take, 70000, 500, VsEvent::makeNoteOff (0, 1, 60));
+    // a note that really ended in the gap: synthetic note-off, no resync -> ends at the gap
+    addEvent (take, 80000, 500, VsEvent::makeNoteOn (0, 1, 62, 100));
+    addEvent (take, 96000, 0, VsEvent::makeNoteOff (0, 1, 62), 0, EventTimingKind::none, true);
+    addEvent (take, 120000, 500, VsEvent::makeNoteOn (0, 1, 62, 100));
+    addEvent (take, 130000, 500, VsEvent::makeNoteOff (0, 1, 62));
+    sortEvents (take);
+
+    for (const auto& options : { raw(), RenderOptions {} })
+    {
+        const auto r = TakeRenderer::render (take, options);
+        checkInvariants (r);
+        const auto notes = pairedNotes (r);
+        REQUIRE (notes.size() == 5);
+        CHECK (notes[0] == SimpleNote { 400, 800, 55 });
+        CHECK (notes[1] == SimpleNote { 1200, 2800, 60 }); // one note across the gap at 60000
+        CHECK (notes[2] == SimpleNote { 2400, 2600, 55 });
+        CHECK (notes[3] == SimpleNote { 3200, 3840, 62 });
+        CHECK (notes[4] == SimpleNote { 4800, 5200, 62 });
+    }
 }

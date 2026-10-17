@@ -253,18 +253,21 @@ TEST_CASE ("TakeTimeline: bar grid from the host bar start, from ppq 0, and in o
         TakeTimeline tl;
         tl.reset (sr);
         tl.addTransport (0, playingAt (0.0, 120.0));
-        // At ppq 8 (bar 3) the song switches to 3/4; the host reports it a little after the bar line
-        auto t = playingAt (8.0 + 480.0 / 24000.0, 120.0, 3, 4);
-        t.ppqPositionOfLastBarStart = 8.0;
+        // At ppq 4 (bar 2, sample 96000) the song switches to 3/4; the host reports it a little after the
+        // bar line (a re-sync, not a jump: the position matches the prediction)
+        auto t = playingAt (4.0 + 480.0 / 24000.0, 120.0, 3, 4);
+        t.ppqPositionOfLastBarStart = 4.0;
         tl.addTransport (96000 + 480, t);
         const auto map = tl.timeSignatureMap (0.0, 100.0);
         REQUIRE (map.size() == 2);
         CHECK (map[0].numerator == 4);
         CHECK (map[1].numerator == 3);
-        CHECK (map[1].beats == Approx (8.0));
+        CHECK (map[1].beats == Approx (4.0));
         // Bars of the new signature (the bar number itself is approximate after a change, design 6)
+        CHECK (tl.barAt (96000.0 + 480.0).startBeats == Approx (4.0));
         CHECK (tl.barAt (96000.0 + 480.0 + 3.0 * 24000.0).number == tl.barAt (96000.0 + 480.0).number + 1);
-        CHECK (tl.barAt (96000.0 + 480.0 + 3.0 * 24000.0).startBeats == Approx (11.0));
+        CHECK (tl.barAt (96000.0 + 480.0 + 3.0 * 24000.0).startBeats == Approx (7.0));
+        CHECK (tl.barAt (96000.0 + 480.0 + 3.0 * 24000.0).lengthBeats == 3.0);
     }
 }
 
