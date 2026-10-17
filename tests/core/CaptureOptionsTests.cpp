@@ -75,3 +75,18 @@ TEST_CASE ("RenderOptions defaults = decisions, sanitise clamps", "[captureoptio
     CHECK (s.cleanMinNoteMs == 0.0);
     CHECK (s.roundTripSamples == 0);
 }
+
+TEST_CASE ("Capture round trip from CaptureOffsetSettings and its upper bound", "[captureoptions]")
+{
+    CHECK (computeRoundTripSamples (CaptureOffsetSettings {}, 2048, 48000.0) == 4096);
+    CHECK (computeRoundTripSamples (CaptureOffsetSettings { CaptureOffsetMode::manual, 85.3, 50.0 }, 2048, 48000.0)
+           == 4094);
+    CHECK (computeRoundTripSamples (CaptureOffsetSettings { CaptureOffsetMode::off, 85.3, 50.0 }, 2048, 48000.0)
+           == 0);
+
+    // max (2 x 2048 + 100 ms, 300 ms) at 48 kHz = max (8896, 14400)
+    CHECK (maxRoundTripSamples (2048, 48000.0) == 14400);
+    // 2 x 8192 + 4410 = 20794 > 300 ms at 44.1 kHz (13230)
+    CHECK (maxRoundTripSamples (8192, 44100.0) == 20794);
+    CHECK (maxRoundTripSamples (2048, 0.0) == 0);
+}

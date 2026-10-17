@@ -39,6 +39,7 @@ add_library(VocalSynthCore STATIC
     include/vocalsynth/TakeTimeline.h
     include/vocalsynth/Take.h
     include/vocalsynth/TakeSegmenter.h
+    include/vocalsynth/CaptureDrain.h
     include/vocalsynth/TakeRenderer.h
     include/vocalsynth/SmfWriter.h
     include/vocalsynth/WavWriter.h
@@ -48,6 +49,7 @@ add_library(VocalSynthCore STATIC
     src/CaptureHistory.cpp
     src/TakeTimeline.cpp
     src/TakeSegmenter.cpp
+    src/CaptureDrain.cpp
     src/TakeRenderer.cpp
     src/SmfWriter.cpp
     src/WavWriter.cpp)

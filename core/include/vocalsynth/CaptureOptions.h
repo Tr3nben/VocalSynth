@@ -82,6 +82,25 @@ inline constexpr int maxTicksPerQuarterNote = 9600;
 int64_t computeRoundTripSamples (CaptureOffsetMode mode, double offsetMs, double fineOffsetMs, int maxBlockSize,
                                  double sampleRate) noexcept;
 
+/** The three capture-offset parameters as plain values (captureOffsetMode, captureOffsetMs,
+    captureFineOffsetMs). The round trip depends on each take's own maxBlockSize and sample rate, so
+    callers keep these settings and compute the samples per take (TakeRenderer::roundTripFor). */
+struct CaptureOffsetSettings
+{
+    CaptureOffsetMode mode = CaptureOffsetMode::automatic;
+    double offsetMs = 0.0;     ///< Manual
+    double fineOffsetMs = 0.0; ///< added in Auto
+
+    constexpr bool operator== (const CaptureOffsetSettings&) const noexcept = default;
+};
+
+int64_t computeRoundTripSamples (const CaptureOffsetSettings& offset, int maxBlockSize, double sampleRate) noexcept;
+
+/** Largest round trip any parameter value can give for a take with this max block and rate:
+    max (2 * maxBlockSize + maxCaptureFineOffsetMs, maxCaptureOffsetMs) in samples. The TakeSegmenter keeps
+    synced takes open this much (plus detection delays) after their end (docs/M3-DESIGN.md 5.2). */
+int64_t maxRoundTripSamples (int maxBlockSize, double sampleRate) noexcept;
+
 /** Grid step in ticks: quarter = ppq, eighth = ppq / 2, eighth triplet = ppq / 3, sixteenth = ppq / 4,
     sixteenth triplet = ppq / 6, thirty-second = ppq / 8 (integer division; ppq 960 divides all); off = 0. */
 int64_t quantizeGridTicks (QuantizeGrid grid, int ticksPerQuarterNote) noexcept;

@@ -10,7 +10,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <span>
+#include <vector>
 
 namespace vocalsynth
 {
@@ -50,16 +52,54 @@ juce::String makeWavFileName (const Take& take, const RenderedTake& rendered);
     juce::File() on failure. */
 juce::File writeMidi (const Take& take, const RenderOptions& options, SmfFormat format, const juce::File& folder);
 
-/** Streams numFrames mono samples into a WAV file (temp + move). readSamples (frameIndex, destination)
-    fills destination with the samples starting at frameIndex (worker: from the CaptureHistory). */
+/** Streams numFrames mono samples into a WAV file (temp + move) in one call, with WavFileWriter. readSamples
+    (frameIndex, destination) fills destination with the samples starting at frameIndex. For tests and
+    small files; the worker uses WavFileWriter directly (a slice per step). */
 juce::File writeWav (const juce::File& target, double sampleRate, WavSampleFormat format, uint64_t numFrames,
                      const std::function<void (uint64_t, std::span<float>)>& readSamples);
+
+/** Incremental WAV file (docs/M3-DESIGN.md 11, 12): the worker writes a take's WAV cache in slices of at
+    most CaptureWorker::wavFramesPerStep frames per step, so draining keeps its 10 ms rhythm and stop()
+    returns promptly. open() writes WavWriter::makeHeader (format, rate, numFrames) into a temporary file
+    next to target; write() encodes (WavWriter::encode, reusable byte buffer) and appends; finish() checks
+    that exactly numFrames were written, appends the pad byte, closes and moves the file into place like
+    ExportFiles::writeAtomically (numbered sibling if the target is locked) and returns it (juce::File() on
+    failure); abort() (and the destructor of an unfinished writer) closes and deletes the temporary file.
+    One thread at a time. */
+class WavFileWriter
+{
+public:
+    WavFileWriter() = default;
+    ~WavFileWriter();
+
+    WavFileWriter (const WavFileWriter&) = delete;
+    WavFileWriter& operator= (const WavFileWriter&) = delete;
+
+    bool open (const juce::File& target, double sampleRate, WavSampleFormat format, uint64_t numFrames);
+    bool write (std::span<const float> samples);
+    juce::File finish();
+    void abort();
+
+    bool isOpen() const noexcept { return stream != nullptr; }
+    uint64_t getFramesWritten() const noexcept { return framesWritten; }
+    uint64_t getNumFrames() const noexcept { return numFramesTotal; }
+
+private:
+    juce::File targetFile;
+    std::unique_ptr<juce::TemporaryFile> temp;
+    std::unique_ptr<juce::FileOutputStream> stream;
+    std::vector<uint8_t> bytes;
+    WavSampleFormat sampleFormat = WavSampleFormat::pcm24;
+    uint64_t numFramesTotal = 0;
+    uint64_t framesWritten = 0;
+};
 
 /** Moves a cached WAV into takesFolder (created if missing) under the same name (numbered sibling if it
     exists). Returns the persisted file, or juce::File() on failure. */
 juce::File persistWav (const juce::File& cachedWav, const juce::File& takesFolder);
 
-/** Touches <instanceFolder>/heartbeat (creates the folder if needed). */
+/** Touches <instanceFolder>/heartbeat if the folder exists (the worker creates the folder with its first
+    file; an instance that never wrote anything leaves nothing behind). */
 void touchHeartbeat (const juce::File& instanceFolder);
 
 /** Deletes every folder in root other than keepInstanceId whose heartbeat (or, without one, the folder

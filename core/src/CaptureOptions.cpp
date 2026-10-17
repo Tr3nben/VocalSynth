@@ -49,6 +49,23 @@ int64_t computeRoundTripSamples (CaptureOffsetMode mode, double offsetMs, double
     return std::max (int64_t { 0 }, samples);
 }
 
+int64_t computeRoundTripSamples (const CaptureOffsetSettings& offset, int maxBlockSize, double sampleRate) noexcept
+{
+    return computeRoundTripSamples (offset.mode, offset.offsetMs, offset.fineOffsetMs, maxBlockSize, sampleRate);
+}
+
+int64_t maxRoundTripSamples (int maxBlockSize, double sampleRate) noexcept
+{
+    if (! (sampleRate > 0.0))
+        return 0;
+
+    const auto automatic = computeRoundTripSamples (CaptureOffsetMode::automatic, 0.0, maxCaptureFineOffsetMs,
+                                                    maxBlockSize, sampleRate);
+    const auto manual = computeRoundTripSamples (CaptureOffsetMode::manual, maxCaptureOffsetMs, 0.0, maxBlockSize,
+                                                 sampleRate);
+    return std::max (automatic, manual);
+}
+
 int64_t quantizeGridTicks (QuantizeGrid grid, int ticksPerQuarterNote) noexcept
 {
     const auto ppq = static_cast<int64_t> (std::max (1, ticksPerQuarterNote));

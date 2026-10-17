@@ -38,13 +38,17 @@ inline const juce::ParameterID bendRange { "bendRange", 1 };
 inline const juce::ParameterID velocitySensitivity { "velocitySensitivity", 1 };
 inline const juce::ParameterID legato { "legato", 1 };
 
-// M3 capture (docs/M3-SPEC.md 9, docs/M3-DESIGN.md 13). Version 1 like the M2 parameters (appended at the
-// end of the layout; hosts identify them by ID). captureFineOffsetMs is the fine offset of decision 3.
-inline const juce::ParameterID captureEnabled { "captureEnabled", 1 };
-inline const juce::ParameterID captureAudio { "captureAudio", 1 };
-inline const juce::ParameterID captureOffsetMode { "captureOffsetMode", 1 };
-inline const juce::ParameterID captureOffsetMs { "captureOffsetMs", 1 };
-inline const juce::ParameterID captureFineOffsetMs { "captureFineOffsetMs", 1 };
+// M3 capture (docs/M3-SPEC.md 9, docs/M3-DESIGN.md 13). Version hint 2: added after released versions whose
+// parameters all have hint 1. JUCE sorts AUv2 parameters by version hint, then by ID hash (Logic /
+// GarageBand address AU parameters by index), so a higher hint keeps the indices of the existing
+// parameters. VST3 and CLAP identify parameters by the ID hash only. Every parameter added in a later
+// release gets the next hint (3, ...). captureFineOffsetMs is the fine offset of decision 3.
+inline constexpr int captureParameterVersionHint = 2;
+inline const juce::ParameterID captureEnabled { "captureEnabled", captureParameterVersionHint };
+inline const juce::ParameterID captureAudio { "captureAudio", captureParameterVersionHint };
+inline const juce::ParameterID captureOffsetMode { "captureOffsetMode", captureParameterVersionHint };
+inline const juce::ParameterID captureOffsetMs { "captureOffsetMs", captureParameterVersionHint };
+inline const juce::ParameterID captureFineOffsetMs { "captureFineOffsetMs", captureParameterVersionHint };
 
 /** Choice index == static_cast<int> (vocalsynth::TestPattern). Only append new entries at the end. */
 inline const juce::StringArray testPatternChoices { "Off", "Notes", "Pitch Bend", "CC Sweep", "All" };

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vocalsynth/CaptureDrain.h"
 #include "vocalsynth/CaptureHistory.h"
 #include "vocalsynth/CaptureOptions.h"
 #include "vocalsynth/CaptureRecord.h"
@@ -13,6 +14,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -52,15 +54,52 @@ struct TakeWavState
     juce::File file;
 };
 
-/** The capture worker thread (docs/M3-DESIGN.md 5): drains the CaptureTap rings every drainIntervalMs into
-    a CaptureHistory, runs the TakeSegmenter, keeps the take list (max maxTakes, newest first), renders the
-    WAV cache of closed takes into the instance folder and touches its heartbeat file.
+/** Options of the worker that come from CaptureState (non-parameter state). Plain value. */
+struct CaptureWorkerOptions
+{
+    double takeGapSeconds = TakeSegmenter::defaultTakeGapSeconds;
+    double audioHistoryMinutes = CaptureHistory::defaultAudioMinutes;
+    double freePreRollMs = RenderOptions {}.freePreRollMs; ///< decides the WAV span of free takes
+    WavSampleFormat wavFormat = WavSampleFormat::pcm24;
 
-    Lifetime (binding): created with the processor; the thread starts in the first prepareToPlay (start())
-    and runs until stop() in the processor's destructor (NOT in releaseResources: the history survives FL's
-    engine restarts). prepareToPlay brackets CaptureTap::prepare() with suspend() / resume(): suspend()
-    drains what is in the rings, parks the thread and returns when it is parked. stop() joins (pluginval
-    opens and closes many instances: no thread before the first prepareToPlay, a quick, clean join).
+    bool operator== (const CaptureWorkerOptions&) const = default;
+};
+
+/** Where the worker reads what it needs from the processor without locks (all optional: tests leave them
+    empty and get the defaults). */
+struct CaptureWorkerSources
+{
+    /** Raw APVTS atomics of captureOffsetMode / captureOffsetMs / captureFineOffsetMs: the cached WAV of a
+        take follows the round trip (TakeRenderer::roundTripFor), read at every step. */
+    const std::atomic<float>* offsetMode = nullptr;
+    const std::atomic<float>* offsetMs = nullptr;
+    const std::atomic<float>* fineOffsetMs = nullptr;
+    /** RecentBlockSize::get() of the processor (lock-free), stored in Take::observedBlockSize. */
+    std::function<int()> observedBlockSize;
+
+    CaptureOffsetSettings readOffset() const noexcept;
+};
+
+/** The capture worker thread (docs/M3-DESIGN.md 5): drains the CaptureTap rings every drainIntervalMs into
+    a CaptureHistory (CaptureDrain), runs the TakeSegmenter, keeps the take list (newest first, at most
+    maxTakes and maxTotalTakeEvents events in all: the oldest takes go first), refines note onsets on the
+    dry audio, renders the WAV cache of closed takes into the instance folder and touches its heartbeat.
+
+    Lifetime (binding): created with the processor (declared after the CaptureTap member, so it is
+    destroyed first); the thread starts in the first prepareToPlay (start()) and runs until stop() in the
+    processor's destructor (NOT in releaseResources: the history survives FL's engine restarts).
+    prepareToPlay brackets CaptureTap::prepare() with suspend() / resume(): suspend() drains what is in the
+    rings, parks the thread and returns when it is parked. stop() = signal, notify, wait for the thread
+    without a timeout kill (juce::Thread::stopThread kills on timeout); it returns within one step because
+    every step is bounded (drain + at most wavFramesPerStep WAV frames + bookkeeping, a few ms), an
+    unfinished WAV job is aborted (temp file deleted). pluginval opens and closes many instances: no thread
+    and no files before the first prepareToPlay; the instance folder is created only when the first file is
+    written (WAV cache), the heartbeat is touched only while the folder exists.
+
+    Each step: drain (CaptureDrain), segmenter.closeIdle() when the tap clock did not move for
+    takeGapSeconds of wall time (the host stopped calling processBlock), closed takes -> wallClockStartMs,
+    observedBlockSize, audio availability, refineNoteOnsets, overview -> publish; a clear marker empties the
+    take list (cached WAVs of non-persisted takes deleted); WAV job slice; open-take snapshot; heartbeat.
 
     Threads: the worker thread owns the history and the segmenter. The take list, the open-take snapshot and
     the WAV states are guarded by a mutex that the audio thread never touches; the message thread reads them
@@ -72,9 +111,12 @@ public:
     static constexpr int heartbeatIntervalSeconds = 60;
     static constexpr int openTakeSnapshotIntervalMs = 500;
     static constexpr std::size_t maxTakes = 32;
+    /** Memory bound of the take list: ~48 MiB of CapturedEvent (each take owns its events). */
+    static constexpr std::size_t maxTotalTakeEvents = std::size_t { 1 } << 20;
+    static constexpr int wavFramesPerStep = 1 << 16;
 
-    /** instanceFolder: CaptureExporter::getInstanceFolder (id) (created by start()). */
-    CaptureWorker (CaptureTap& tap, juce::File instanceFolder);
+    /** instanceFolder: CaptureExporter::getInstanceFolder (id) (created lazily, see class comment). */
+    CaptureWorker (CaptureTap& tap, juce::File instanceFolder, CaptureWorkerSources sources = {});
     ~CaptureWorker();
 
     CaptureWorker (const CaptureWorker&) = delete;
@@ -86,15 +128,16 @@ public:
     void start();      ///< starts the thread if it is not running (allocates the history on the thread)
     void suspend();    ///< drains and parks; no-op if not running
     void resume();     ///< un-parks
-    void stop();       ///< joins; idempotent
+    void stop();       ///< joins (see class comment); idempotent
     bool isRunning() const noexcept;
 
-    /** Take gap and audio look-back (applied on the worker thread at its next step). */
-    void setOptions (double takeGapSeconds, double audioHistoryMinutes);
+    /** Tests: call before start(). start() then prepares the history on the calling thread and starts no
+        thread; runStepForTests() runs the steps (suspend / resume drain / do nothing). */
+    void setManualSteppingForTests (bool manual) noexcept;
 
-    /** Options that decide the cached WAV (round trip + format): takes whose cache was rendered with other
-        values are re-rendered in the background while their audio is still in the history. */
-    void setWavOptions (const RenderOptions& render, WavSampleFormat format);
+    /** Any thread (setStateInformation may run on a background thread, pluginval): applied at the next
+        step. */
+    void setOptions (const CaptureWorkerOptions& options);
 
     //==============================================================================
     // Message thread
@@ -118,7 +161,7 @@ public:
     const juce::File& getInstanceFolder() const noexcept { return instanceFolder; }
 
     //==============================================================================
-    // Tests: one worker step on the calling thread (only while the thread is not running).
+    // Tests: one worker step on the calling thread (manual stepping, or while the thread is not running).
 
     void runStepForTests();
 
@@ -129,11 +172,17 @@ private:
 
     CaptureTap& tap;
     const juce::File instanceFolder;
+    const CaptureWorkerSources sources;
     std::unique_ptr<Thread> thread;
+    bool manualStepping = false;
 
     CaptureHistory history;
     TakeSegmenter segmenter;
+    CaptureDrain drainer;
     bool historyPrepared = false;
+
+    mutable std::mutex optionsMutex;
+    CaptureWorkerOptions pendingOptions;
 
     mutable std::mutex listMutex;
     std::vector<std::shared_ptr<const Take>> takes;

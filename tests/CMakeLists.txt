@@ -33,6 +33,7 @@ add_executable(VocalSynthCoreTests
     core/CaptureHistoryTests.cpp
     core/TakeTimelineTests.cpp
     core/TakeSegmenterTests.cpp
+    core/CaptureDrainTests.cpp
     core/TakeRendererTests.cpp
     core/SmfWriterTests.cpp
     core/WavWriterTests.cpp

@@ -51,18 +51,28 @@ struct TimeSignaturePoint
 /** Sample -> musical time for the capture (docs/M3-DESIGN.md 6). Built from transport records in clock
     order; pure, allocation only in addTransport()/slice() (worker / message thread).
 
+    Playing = isPlaying AND hasPpq (a host that reports "playing" without a position has no grid to sync
+    to: it counts as stopped, i.e. free mode). Without bpm: fallbackBpm.
+
     Unwrapped beats U: beats advance by bpm * elapsed / (60 * sampleRate) from the previous segment while
-    playing, and stay constant while stopped. A transport record while playing whose host ppq differs from
-    the prediction by less than jumpThresholdBeats re-syncs U to the host (U += difference: tempo changes
-    the host made inside a block); a larger difference (loop wrap, position jump) or a transport start keeps
-    U continuous and only re-anchors the bar grid. A take's ticks are (U (s) - U (origin)) * PPQ, so a melody
-    sung across two passes of a loop stays one continuous take.
+    playing, and stay constant while stopped. A transport record while playing (previous segment playing
+    too) whose host ppq differs from the prediction by less than jumpThresholdBeats re-syncs U to the host
+    (U += difference: tempo changes the host made inside a block, rate-limited re-sync records of the tap),
+    but U never goes below the U of the previous segment start (monotonic). A larger difference (loop wrap,
+    position jump) or a transport start keeps U continuous and only re-anchors the bar grid. A take's ticks
+    are (U (s) - U (origin)) * PPQ, so a melody sung across two passes of a loop stays one continuous take.
+
+    Before the first segment, beatsAt() / sampleAtBeats() extrapolate backwards with the first segment's bpm
+    if it is playing (a synced take's slice starts with its playing segment, so its bar origin may lie a
+    little before the transport start and still has a well-defined sample for the WAV).
 
     Bar grid: from the host bar start (ppqPositionOfLastBarStart; its bar number = round (barStart / barLength)
     + 1, i.e. the current time signature counted from ppq 0, an approximation when the song changes the time
-    signature) or, without it, bars of the current time signature from ppq 0. Without host ppq: bars from
-    U = 0. barAt (s) gives the bar containing s; positions just before a bar line within
-    barSnapToleranceBeats count as the next bar (a note sung a hair early on beat 1 starts the bar). */
+    signature) or, without it, bars of the current time signature from ppq 0. Bar length = numerator * 4 /
+    denominator quarter notes (the real denominator; the SMF writer rounds non-powers of two only in the
+    meta event). barAt (s) gives the bar containing s; positions just before a bar line within
+    barSnapToleranceBeats count as the next bar (a note sung a hair early on beat 1 starts the bar; its tick
+    then clamps to 0, i.e. it moves later by at most the tolerance: 15.6 ms at 120 BPM). */
 class TakeTimeline
 {
 public:
@@ -82,7 +92,8 @@ public:
     /** Drops segments that end before sample (keeps the one containing it). */
     void evictBefore (int64_t sample);
 
-    /** Copy of the segments needed for [fromSample, toSample] (the one containing fromSample and later). */
+    /** Copy of the segments for [fromSample, toSample]: the one containing fromSample (it then starts at
+        fromSample: earlier samples extrapolate, see class comment) and every later one up to toSample. */
     TakeTimeline slice (int64_t fromSample, int64_t toSample) const;
 
     bool empty() const noexcept { return segments.empty(); }

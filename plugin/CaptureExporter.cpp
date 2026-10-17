@@ -57,6 +57,40 @@ juce::File writeWav (const juce::File&, double, WavSampleFormat, uint64_t,
     return {};
 }
 
+WavFileWriter::~WavFileWriter()
+{
+    abort();
+}
+
+bool WavFileWriter::open (const juce::File&, double, WavSampleFormat, uint64_t)
+{
+    // TODO(C): header via WavWriter::makeHeader into a juce::TemporaryFile next to target
+    (void) sampleFormat;
+    (void) framesWritten;
+    return false;
+}
+
+bool WavFileWriter::write (std::span<const float>)
+{
+    return false;
+}
+
+juce::File WavFileWriter::finish()
+{
+    abort();
+    return {};
+}
+
+void WavFileWriter::abort()
+{
+    stream.reset();
+    temp.reset();
+    bytes.clear();
+    targetFile = juce::File();
+    numFramesTotal = 0;
+    framesWritten = 0;
+}
+
 juce::File persistWav (const juce::File&, const juce::File&)
 {
     return {};

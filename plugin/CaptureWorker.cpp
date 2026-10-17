@@ -10,13 +10,31 @@ TransportInfo makeTransportInfo (juce::AudioPlayHead*) noexcept
     return {};
 }
 
+CaptureOffsetSettings CaptureWorkerSources::readOffset() const noexcept
+{
+    CaptureOffsetSettings o;
+
+    if (offsetMode != nullptr)
+        o.mode = static_cast<CaptureOffsetMode> (
+            juce::jlimit (0, numCaptureOffsetModes - 1, juce::roundToInt (offsetMode->load (std::memory_order_relaxed))));
+
+    if (offsetMs != nullptr)
+        o.offsetMs = static_cast<double> (offsetMs->load (std::memory_order_relaxed));
+
+    if (fineOffsetMs != nullptr)
+        o.fineOffsetMs = static_cast<double> (fineOffsetMs->load (std::memory_order_relaxed));
+
+    return o;
+}
+
 class CaptureWorker::Thread
 {
 };
 
-CaptureWorker::CaptureWorker (CaptureTap& t, juce::File folder)
+CaptureWorker::CaptureWorker (CaptureTap& t, juce::File folder, CaptureWorkerSources s)
     : tap (t),
-      instanceFolder (std::move (folder))
+      instanceFolder (std::move (folder)),
+      sources (std::move (s))
 {
 }
 
@@ -47,12 +65,15 @@ bool CaptureWorker::isRunning() const noexcept
     return thread != nullptr;
 }
 
-void CaptureWorker::setOptions (double, double)
+void CaptureWorker::setManualSteppingForTests (bool manual) noexcept
 {
+    manualStepping = manual;
 }
 
-void CaptureWorker::setWavOptions (const RenderOptions&, WavSampleFormat)
+void CaptureWorker::setOptions (const CaptureWorkerOptions& options)
 {
+    const std::scoped_lock lock (optionsMutex);
+    pendingOptions = options;
 }
 
 std::vector<std::shared_ptr<const Take>> CaptureWorker::getTakes() const
@@ -91,6 +112,8 @@ void CaptureWorker::runStepForTests()
 void CaptureWorker::step()
 {
     (void) historyPrepared;
+    (void) manualStepping;
+    (void) drainer;
 }
 
 } // namespace vocalsynth

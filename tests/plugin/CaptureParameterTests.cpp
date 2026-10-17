@@ -29,7 +29,7 @@ TEST_CASE ("M3 capture parameters exist with the design IDs, ranges and defaults
     VocalSynthProcessor p (GENERATE (Variant::fx, Variant::instrument));
 
     for (const auto* id : { &captureEnabled, &captureAudio, &captureOffsetMode, &captureOffsetMs, &captureFineOffsetMs })
-        CHECK (id->getVersionHint() == 1);
+        CHECK (id->getVersionHint() == 2); // after the released M1 / M2 parameters (hint 1)
 
     auto* enabled = dynamic_cast<juce::AudioParameterBool*> (&getParameter (p, captureEnabled));
     REQUIRE (enabled != nullptr);

@@ -2,6 +2,7 @@
 
 #include "vocalsynth/BendGenerator.h"
 #include "vocalsynth/Decimator.h"
+#include "vocalsynth/EventTiming.h"
 #include "vocalsynth/Framer.h"
 #include "vocalsynth/InputConditioner.h"
 #include "vocalsynth/NoteSegmenter.h"
@@ -253,6 +254,48 @@ public:
     void processToSink (const float* mono, int numSamples, const VoiceSettings& settings, VsEventSink out) noexcept;
     void flushToSink (int sampleOffset, VsEventSink out) noexcept;
 
+    /** M3 capture side output (docs/M3-DESIGN.md 7.1): the same events as process (mono, n, settings, out)
+        (identical with and without a timing buffer); for every event that out accepted, one VsEventTiming
+        is pushed to timing, in the same order. A timing buffer with fewer entries than events (the M3
+        scaffold until agent B lands: none at all) means kind none for the missing ones (CaptureTap). */
+    template <std::size_t N>
+    void process (const float* mono, int numSamples, const VoiceSettings& settings, VsEventBuffer<N>& out,
+                  VsEventTimingBuffer<N>& timing) noexcept
+    {
+        processToSink (mono, numSamples, settings, VsEventSink { out }, VsEventTimingSink { timing });
+    }
+
+    /** flush() with timings (kind none, delay 0), see process() above. */
+    template <std::size_t N>
+    void flush (int sampleOffset, VsEventBuffer<N>& out, VsEventTimingBuffer<N>& timing) noexcept
+    {
+        flushToSink (sampleOffset, VsEventSink { out }, VsEventTimingSink { timing });
+    }
+
+    /** Non-template versions with timings (docs/M3-DESIGN.md 7). The overloads without a timing argument
+        forward here with a disconnected sink. With a connected sink the segmenter's events of each call
+        go through a member scratch buffer and are forwarded to out in the same order; each accepted
+        event gets the timing NoteSegmenter::getLastEventTiming() gives for its type (a bend right
+        before a note-on: the note-on's; right after a note-off: the note-off's; other bends: update).
+        Settings flushes and flushToSink(): kind none, delay 0. Never changes the events. */
+    void processToSink (const float* mono, int numSamples, const VoiceSettings& settings, VsEventSink out,
+                        VsEventTimingSink timing) noexcept;
+    void flushToSink (int sampleOffset, VsEventSink out, VsEventTimingSink timing) noexcept;
+
+    /** Level envelope for the onset / release estimates of the timing side output: one-pole power
+        smoother (time constant in ms) on the conditioned input at the host rate. Its upward crossings
+        of gateThresholdDb - NoteSegmenter::gateHysteresisDb and downward crossings of that level minus
+        levelReleaseHysteresisDb (a Schmitt trigger: the ripple of a low tone's power around one level
+        does not count as many crossings) are passed to the NoteSegmenter
+        (setLevelOnsetSample / setLevelReleaseSample; the release corrected for the envelope's decay:
+        max (newest rise of the envelope, crossing - tau * ln (envelope at that rise / level))).
+        Per sample and only on absolute samples, so block-size invariant. */
+    static constexpr double onsetEnvelopeTimeConstantMs = 1.0;
+    static constexpr double levelReleaseHysteresisDb = 6.0;
+    /** A level onset counts for a note start up to the confirmed-path model delay + this many hops
+        before the note-on (NoteSegmenter::DetectionDelayModel::onsetSearchSamples). */
+    static constexpr int onsetSearchExtraHops = 4;
+
     /** Lock-free copy of the newest analysis values. Published at the end of every process() call that
         analysed at least one frame (or flushed), and by reset(); a 1-sample host block therefore does
         not publish 48000 times a second. Any thread. */
@@ -292,6 +335,24 @@ public:
 
 private:
     void applySettings (const VoiceSettings& sanitised) noexcept;
+    /** Runs one segmenter call: straight into out without a timing sink, else through the scratch buffer
+        (forwardWithTimings). */
+    template <typename Call>
+    void runSegmenter (VsEventSink out, VsEventTimingSink timing, Call&& call) noexcept
+    {
+        if (! timing.isConnected())
+        {
+            call (out);
+            return;
+        }
+
+        segmenterScratch.clear();
+        call (VsEventSink { segmenterScratch });
+        forwardWithTimings (out, timing);
+    }
+    void forwardWithTimings (VsEventSink out, VsEventTimingSink timing) noexcept;
+    void updateLevelEnvelope (float conditionedSample, int64_t absoluteSample) noexcept;
+    static int64_t fastOnsetDelayFor (const void* pipeline, double f0Hz) noexcept;
     PitchDetector& currentDetector() noexcept;
     void publishSnapshot() noexcept;
 
@@ -316,6 +377,17 @@ private:
 
     FrameObserver frameObserver = nullptr;
     void* frameObserverContext = nullptr;
+
+    // M3 timing side output
+    VsEventBuffer<NoteSegmenter::maxEventsPerFrame> segmenterScratch;
+    VoiceRange timingRange = VoiceRange::tenor; ///< range of the delay model (applySettings)
+    double levelCoefficient = 1.0;
+    double levelEnvelope = 0.0;
+    double levelOnPower = 0.0;
+    double levelOffPower = 0.0;
+    bool levelAbove = false;
+    double levelLastRise = 0.0;
+    int64_t levelLastRiseSample = 0;
 
     VoiceSnapshotPublisher snapshot;
 };

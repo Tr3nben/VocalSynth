@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vocalsynth/BendGenerator.h"
+#include "vocalsynth/EventTiming.h"
 #include "vocalsynth/PitchDetector.h"
 #include "vocalsynth/PitchPostProcessor.h"
 #include "vocalsynth/ScaleQuantizer.h"
@@ -100,6 +101,24 @@ struct StickinessParams
     - note end / flush:      note-off, bend.noteEnded (centre if needed)
     At most 3 events per frame. Note-on velocity of a change = velocityFor (rmsDb of that frame, ...).
 
+    Detection-delay side output (M3 capture, docs/M3-DESIGN.md 7): every processFrame / processOnsetFrame
+    / flush call also leaves the timing of the events it emitted in getLastEventTiming() (estimated true
+    time = emit sample - delaySamples). It never changes the events. Estimates:
+    - note start from silence: the newest upward level crossing (setLevelOnsetSample) if it lies within
+      DetectionDelayModel::onsetSearchSamples before the emit sample and after the previous note's
+      estimated end (kind measured); else the latency model (provisional start: fastOnsetDelay at the
+      note's pitch, full-window start: confirmedOnsetDelaySamples; kind model);
+    - note change (T_min path, legato or retrigger): the first frame of the change timer minus
+      frameDelaySamples, after the old note's estimated start (kind measured, flag noteChange); the old
+      note's note-off gets the same estimate;
+    - provisional correction (the full window corrects a provisional note): the note-off of the
+      provisional note and the corrected note-on get the provisional note-on's delay (flag correction);
+      a false start's note-off gets that delay as well;
+    - release: the newest downward level crossing (setLevelReleaseSample) after the note's estimated
+      start, else the first not-voiced frame of the release run minus frameDelaySamples (kind measured);
+    - bend updates: emit - frameDelaySamples (kind measured);
+    - flush, octave-shift changes and notes ended by the octave shift: kind none (they happen when sent).
+
     Private members may change freely (owner B); the public interface is frozen for M2.
     Real-time safe, no allocation. Audio thread only. */
 class NoteSegmenter
@@ -126,6 +145,41 @@ public:
     /** Correction margin of the first strong frame after the settle time (see class comment). */
     static constexpr double provisionalSettleMarginSemitones = 0.02;
     static constexpr int maxEventsPerOnsetFrame = 2;       ///< bend + note-on
+
+    /** Timing of the events emitted by the most recent processFrame / processOnsetFrame / flush call
+        (M3, see class comment): noteOn = a note-on of this call and a bend sent right before it (note
+        start bend); noteOff = a note-off of this call and a bend centre sent right after it; update = any
+        other bend. Delays relative to that call's absoluteSample. Kind none for what the call did not emit. */
+    struct FrameEventTiming
+    {
+        VsEventTiming noteOn;
+        VsEventTiming noteOff;
+        VsEventTiming update;
+    };
+
+    /** Latency model for the detection-delay estimates, in host samples (VoicePipeline::applySettings). */
+    struct DetectionDelayModel
+    {
+        /** Frame time -> audio time: the input sample that completed the hop minus this is where the
+            analysed pitch was (window centre + decimator FIR + median delay). */
+        double frameDelaySamples = 0.0;
+        int64_t confirmedOnsetDelaySamples = 0; ///< model of a full-window start (VoicePipeline::computeConfirmedLatencyMs)
+        /** Model of a provisional start for a tone at f0Hz (VoicePipeline::computeFastOnsetLatencyMs);
+            nullptr: confirmedOnsetDelaySamples. Called on the audio thread: must be real-time safe. */
+        int64_t (*fastOnsetDelay) (const void* context, double f0Hz) noexcept = nullptr;
+        const void* fastOnsetDelayContext = nullptr;
+        int64_t onsetSearchSamples = 0;         ///< a level onset up to this far before the emit sample counts
+    };
+
+    /** M3: sets the model (never emits; takes effect at the next estimate). */
+    void setDetectionDelayModel (const DetectionDelayModel& model) noexcept;
+
+    /** M3: newest upward / downward crossing of the pipeline's level envelope (absolute host samples on
+        the processFrame clock; the release value already corrected for the envelope's decay). Never emits. */
+    void setLevelOnsetSample (int64_t absoluteSample) noexcept;
+    void setLevelReleaseSample (int64_t absoluteSample) noexcept;
+
+    const FrameEventTiming& getLastEventTiming() const noexcept { return lastTiming; }
 
     // Thresholds of other modules that are defined relative to these (kept in sync at compile time)
     static_assert (YinPitchDetector::fallbackMaxConfidence >= confidenceOff
@@ -205,12 +259,20 @@ private:
     bool processProvisionalFrame (const PitchFrame& frame, bool strong, bool weak, double p, int64_t absoluteSample,
                                   int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
     void startNote (int q, int outputNote, uint8_t velocity, float levelDb, double p, int64_t absoluteSample,
-                    int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
+                    int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing) noexcept;
     /** Updates the level follower with this frame; true if the frame's pitch may drive the bend. */
     bool isPitchReliable (const PitchFrame& frame, int64_t absoluteSample) noexcept;
     void changeNote (int q, int outputNote, const PitchFrame& frame, double p, int64_t absoluteSample,
-                     int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
-    void endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept;
+                     int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing) noexcept;
+    void endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out,
+                  const VsEventTiming& timing) noexcept;
+
+    // Detection-delay estimates (see class comment)
+    static VsEventTiming timingFor (int64_t emitSample, int64_t estimate, EventTimingKind kind, uint8_t flags) noexcept;
+    VsEventTiming onsetTiming (int64_t absoluteSample, bool provisionalPath, double p) const noexcept;
+    VsEventTiming changeTiming (int64_t absoluteSample) const noexcept;
+    VsEventTiming releaseTiming (int64_t absoluteSample) const noexcept;
+    int64_t frameDelay() const noexcept;
 
     double sampleRate = 48000.0;
     ScaleQuantizer quantizer;
@@ -251,6 +313,19 @@ private:
     int fastFrames = 0;            ///< consecutive agreeing fast-strong frames while idle
     double fastLastPitch = 0.0;
     float fastMaxRmsDb = PitchFrame::silenceDb;
+
+    // Detection-delay side output (never affects the events)
+    DetectionDelayModel delayModel {};
+    FrameEventTiming lastTiming {};
+    bool hasLevelOnset = false;
+    int64_t levelOnsetSample = 0;
+    bool hasLevelRelease = false;
+    int64_t levelReleaseSample = 0;
+    VsEventTiming noteOnTiming {};       ///< timing of the active note's note-on
+    int64_t noteEstimatedStart = 0;      ///< its estimated true start
+    bool hasPreviousNoteEnd = false;
+    int64_t previousNoteEnd = 0;         ///< estimated true end of the last note that ended
+    int64_t releaseRunStart = 0;         ///< first not-weak frame of the current release run
 };
 
 } // namespace vocalsynth

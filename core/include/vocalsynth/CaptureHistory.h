@@ -24,12 +24,15 @@ namespace vocalsynth
     at 256 MiB (5.8 min).
 
     Eviction: oldest first. Event records and audio are evicted independently (getOldestEventSample(),
-    getAudioRange()). Timeline segments older than the oldest retained event or audio sample are dropped
-    (the segment containing that sample stays).
+    getAudioRange()). Timeline segments older than the oldest retained event or audio sample (whichever is
+    older) are dropped (the segment containing that sample stays). Open takes keep their own timeline
+    (TakeSegmenter), so eviction never breaks a long take; it only limits how far back a grab reaches.
 
     Audio is addressed by capture-clock sample. addAudio() must be contiguous with the previous frame; a
-    forward jump (dropped frames) zero-fills the hole and counts it as missing; audio off (setAudioOff())
-    ends the current run: getAudioRange() covers only the newest continuous run of captured audio. */
+    forward jump (dropped frames) zero-fills the hole and counts it as missing; audio off (marker audioOff
+    or captureOff, or setAudioOff()) ends the current run at the marker sample (the zero padding of the
+    tap's last partial frame after it is not stored audio): getAudioRange() covers only the newest
+    continuous run of captured audio. Bypassed blocks arrive as silence frames and do not end the run. */
 class CaptureHistory
 {
 public:
@@ -52,8 +55,10 @@ public:
 
     /** Stores one record in clock order: reset (sets rate / max block; clears the history if
         clearsHistory), transport (-> timeline), event / marker / settings / gap (-> ring, oldest evicted),
-        marker audioOff (-> setAudioOff). Audio records are ignored here: the worker pops the frame from the
-        audio ring and calls addAudio(). */
+        marker audioOff (-> setAudioOff), marker clear (drops every record, timeline segment and audio sample
+        before the marker; the transport and settings state in force at the marker are kept, so the next
+        take still knows tempo, bar grid and bend range). Audio records are ignored here: the worker pops
+        the frame from the audio ring and calls addAudio(). */
     void addRecord (const CaptureRecord& record);
 
     /** Appends one audio frame starting at startSample (see class comment). */
@@ -95,11 +100,28 @@ public:
     uint64_t getMissingAudioSamples() const noexcept { return missingAudioSamples; } ///< zero-filled holes
 
 private:
+    using Chunks = std::vector<std::unique_ptr<float[]>>;
+
+    const CaptureRecord& ringAt (std::size_t index) const noexcept
+    {
+        return ring[(ringStart + index) & (eventCapacity - 1)];
+    }
+
+    void pushRing (const CaptureRecord& record);
+    std::size_t lowerBoundIndex (int64_t sample) const noexcept; ///< first ring index with sample >= sample
+    std::size_t upperBoundIndex (int64_t sample) const noexcept; ///< first ring index with sample > sample
+    void applyClear (int64_t markerSample);
+    void configureAudio();
+    void evictTimeline();
+    void pruneHoles() noexcept;
+    static void writeAudio (Chunks& target, int64_t startSample, std::span<const float> samples);
+    static void readChunks (const Chunks& source, int64_t startSample, std::span<float> destination) noexcept;
+
     double sampleRate = 48000.0;
     int maxBlockSize = 0;
     double audioMinutes = defaultAudioMinutes;
 
-    // Event ring
+    // Event ring (eventCapacity, a power of two)
     std::vector<CaptureRecord> ring;
     std::size_t ringStart = 0;
     std::size_t ringCount = 0;
@@ -107,9 +129,12 @@ private:
 
     TakeTimeline timeline;
 
-    // Audio chunks (ring of chunks, allocated lazily)
-    std::vector<std::unique_ptr<float[]>> chunks;
+    // Audio chunks: sample s lives in chunk (s / audioChunkSamples) % chunks.size(); allocated lazily
+    Chunks chunks;
     AudioRange audioRange {};
+    bool audioRunActive = false;               ///< false after audio off: the next frame starts a new run
+    int64_t audioFloor = 0;                    ///< nothing before the last clear marker is audio
+    std::vector<AudioRange> holes;             ///< zero-filled holes inside audioRange (dropped frames)
     uint64_t missingAudioSamples = 0;
     int64_t endSample = 0;
 };

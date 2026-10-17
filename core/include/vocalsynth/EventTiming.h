@@ -27,6 +27,10 @@ namespace EventTimingFlags
 inline constexpr uint8_t correction = 1u << 0;
 /** The note-on is a legato or retrigger note change (no silence before it). */
 inline constexpr uint8_t noteChange = 1u << 1;
+/** Set by the CaptureTap only (never by the pipeline): a note-on that re-states a note still open in the
+    MIDI output right after a gap record (ring overflow), so the worker's note state is exact again
+    (docs/M3-DESIGN.md 4.4). Not something that was sent: the renderer treats it like a synthetic note-on. */
+inline constexpr uint8_t resync = 1u << 2;
 } // namespace EventTimingFlags
 
 /** Capture side output of the VoicePipeline for one emitted VsEvent (docs/M3-DESIGN.md 7). Plain data.
