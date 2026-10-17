@@ -256,8 +256,8 @@ public:
 
     /** M3 capture side output (docs/M3-DESIGN.md 7.1): the same events as process (mono, n, settings, out)
         (identical with and without a timing buffer); for every event that out accepted, one VsEventTiming
-        is pushed to timing, in the same order. A timing buffer with fewer entries than events (the M3
-        scaffold until agent B lands: none at all) means kind none for the missing ones (CaptureTap). */
+        is pushed to timing, in the same order. A timing buffer with fewer entries than events (e.g. the
+        test pattern, which has none) means kind none for the missing ones (CaptureTap). */
     template <std::size_t N>
     void process (const float* mono, int numSamples, const VoiceSettings& settings, VsEventBuffer<N>& out,
                   VsEventTimingBuffer<N>& timing) noexcept

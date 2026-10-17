@@ -56,7 +56,7 @@ void checkLayout (juce::Component& editor)
 }
 } // namespace
 
-TEST_CASE ("Editor builds for both variants and shows both pages", "[editor]")
+TEST_CASE ("Editor builds for both variants and shows all three pages", "[editor]")
 {
     const auto variant = GENERATE (Variant::fx, Variant::instrument);
     CAPTURE (variant == Variant::fx ? "fx" : "instrument");
@@ -93,10 +93,11 @@ TEST_CASE ("Editor builds for both variants and shows both pages", "[editor]")
     REQUIRE (vsEditor != nullptr);
     CHECK (vsEditor->getPage() == VocalSynthEditor::Page::voice); // the main panel comes first
 
-    for (const auto page : { VocalSynthEditor::Page::voice, VocalSynthEditor::Page::testAndRouting })
+    for (const auto page : { VocalSynthEditor::Page::voice, VocalSynthEditor::Page::testAndRouting,
+                             VocalSynthEditor::Page::capture })
     {
         const auto isVoice = page == VocalSynthEditor::Page::voice;
-        CAPTURE (isVoice);
+        CAPTURE ((int) page);
         vsEditor->showPage (page);
         CHECK (vsEditor->getPage() == page);
         checkLayout (*editor);
@@ -110,13 +111,49 @@ TEST_CASE ("Editor builds for both variants and shows both pages", "[editor]")
             dir.isNotEmpty())
         {
             const auto name = juce::String (variant == Variant::fx ? "editor-fx" : "editor-instrument")
-                              + (isVoice ? "-voice.png" : "-test.png");
+                              + (isVoice ? "-voice.png" : page == VocalSynthEditor::Page::capture ? "-capture.png" : "-test.png");
             const auto file = juce::File (dir).getChildFile (name);
             file.deleteFile();
             juce::FileOutputStream out (file);
             juce::PNGImageFormat().writeImageToStream (image, out);
         }
     }
+
+    editor.reset();
+    processor.releaseResources();
+}
+
+TEST_CASE ("Editor: the Capture page shows the capture panel only", "[editor][capture]")
+{
+    const auto variant = GENERATE (Variant::fx, Variant::instrument);
+    VocalSynthProcessor processor (variant);
+    processor.prepareToPlay (48000.0, 512);
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+    auto* vsEditor = dynamic_cast<VocalSynthEditor*> (editor.get());
+    REQUIRE (vsEditor != nullptr);
+
+    auto& panel = vsEditor->getCapturePanel();
+    CHECK_FALSE (panel.isVisible());
+    vsEditor->showPage (VocalSynthEditor::Page::capture);
+    CHECK (panel.isVisible());
+    CHECK (editor->getLocalBounds().contains (panel.getBounds()));
+    CHECK (panel.getHeight() >= 330);
+    CHECK (panel.getStatusText().isNotEmpty());
+
+    // The Voice and Test & Routing controls are hidden on the Capture page
+    for (auto* c : editor->getChildren())
+        if (c != &panel && c->isVisible() && dynamic_cast<juce::TextButton*> (c) == nullptr
+            && dynamic_cast<juce::TooltipWindow*> (c) == nullptr)
+            FAIL_CHECK ("visible on the Capture page: " << c->getComponentID() << " " << c->getBounds().toString());
+
+    vsEditor->showPage (VocalSynthEditor::Page::voice);
+    CHECK_FALSE (panel.isVisible());
+
+    // Version text (header): "Version 0.3.0 - M3 capture" (en dash)
+    CHECK (vsEditor->getVersionText().startsWith ("Version 0.3.0 " + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x93"))
+                                                  + " M3 capture"));
+    CHECK (juce::String (VOCALSYNTH_VERSION_STRING) == "0.3.0");
 
     editor.reset();
     processor.releaseResources();

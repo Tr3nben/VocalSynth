@@ -1,9 +1,13 @@
 #pragma once
 
+#include "CaptureSettings.h"
+#include "CaptureWorker.h"
 #include "MidiOutputStage.h"
 #include "Parameters.h"
 #include "VirtualMidiPort.h"
 #include "vocalsynth/BlockSizeHistogram.h"
+#include "vocalsynth/CaptureTap.h"
+#include "vocalsynth/EventTiming.h"
 #include "vocalsynth/MonitorSynth.h"
 #include "vocalsynth/TestPatternGenerator.h"
 #include "vocalsynth/VoicePipeline.h"
@@ -15,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace vocalsynth
@@ -104,7 +109,7 @@ class VocalSynthProcessor final : public juce::AudioProcessor
 {
 public:
     explicit VocalSynthProcessor (Variant variant);
-    ~VocalSynthProcessor() override = default;
+    ~VocalSynthProcessor() override;
 
     //==============================================================================
     void prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock) override;
@@ -198,6 +203,46 @@ public:
     DspLoadMeter::Reading getDspLoad() const noexcept { return dspLoad.getReading(); }
     void resetDspLoad() noexcept { dspLoad.requestReset(); }
 
+    //==============================================================================
+    // M3 capture (docs/M3-DESIGN.md 2, 13, 15)
+
+    /** The capture worker: take list, WAV cache, status (message thread; see CaptureWorker). */
+    CaptureWorker& getCaptureWorker() noexcept { return captureWorker; }
+    const CaptureWorker& getCaptureWorker() const noexcept { return captureWorker; }
+
+    /** UI requests (New take / Grab / Clear) go to the tap: requestNewTake(), requestGrab(), requestClear()
+        are lock-free (any thread); the next processBlock turns them into markers. */
+    CaptureTap& getCaptureTap() noexcept { return captureTap; }
+
+    /** Non-parameter capture settings (export options, grab lengths, free-mode gap, look-back, takes
+        folder). Any thread (own mutex; the audio thread never reads them). setCaptureState() also hands
+        the worker its options. */
+    CaptureState getCaptureState() const;
+    void setCaptureState (const CaptureState& state);
+
+    /** The three capture-offset parameters (raw atomics). Any thread. */
+    CaptureOffsetSettings getCaptureOffsetSettings() const noexcept;
+
+    /** Export options for a take as the user set them: CaptureState::render with the take's round trip
+        (TakeRenderer::roundTripFor with the current offset parameters). Any thread. */
+    RenderOptions getRenderOptionsFor (const Take& take) const;
+
+    /** Folder for dragged / saved WAVs (CaptureState::takesFolder, else <Documents>/VocalSynth/Takes). */
+    juce::File getTakesFolder() const;
+
+    /** Auto capture offset of the current preparation (2 x the prepared max block, without the fine
+        offset) in ms; 0 before the first prepareToPlay. */
+    double getAutoCaptureOffsetMs() const noexcept;
+
+    /** Maximum block size of the last prepareToPlay(), 0 before the first one. */
+    int getPreparedMaxBlockSize() const noexcept { return preparedMaxBlockSize.load (std::memory_order_relaxed); }
+
+    /** Whether the captureEnabled / captureAudio parameters are on. Any thread. */
+    bool isCaptureEnabled() const noexcept;
+    bool isCaptureAudioEnabled() const noexcept;
+
+    const juce::String& getInstanceId() const noexcept { return instanceId; }
+
     static constexpr std::size_t eventBufferCapacity = 1024;
 
     /** processBlock runs the generator, output stage and monitor synth in chunks of at most this many
@@ -219,6 +264,12 @@ private:
 
     /** Voice mode: rescales the pitch bends in events for MonitorSynth (see monitorBendFor()). */
     void prepareMonitorEvents (int bendRangeSemitones) noexcept;
+
+    /** What the capture tap records about this block's switches and settings (raw atomics, no allocation). */
+    CaptureBlockSettings makeCaptureBlockSettings (params::Source source, const VoiceSettings& voiceSettings,
+                                                   const TestPatternSettings& patternSettings, bool bypassed) const noexcept;
+
+    static CaptureWorkerOptions toWorkerOptions (const CaptureState& state) noexcept;
 
     const Variant variant;
     juce::AudioProcessorValueTreeState apvts;
@@ -245,9 +296,17 @@ private:
     std::atomic<float>* velocitySensitivityParam = nullptr;
     std::atomic<float>* legatoParam = nullptr;
 
+    // M3 parameters (raw atomics, read on any thread)
+    std::atomic<float>* captureEnabledParam = nullptr;
+    std::atomic<float>* captureAudioParam = nullptr;
+    std::atomic<float>* captureOffsetModeParam = nullptr;
+    std::atomic<float>* captureOffsetMsParam = nullptr;
+    std::atomic<float>* captureFineOffsetMsParam = nullptr;
+
     // Audio-thread state (prepared in prepareToPlay, no allocation in processBlock)
     TestPatternGenerator generator;
     VsEventBuffer<eventBufferCapacity> events;
+    VsEventTimingBuffer<eventBufferCapacity> eventTimings; ///< M3: timing of events[i] (Voice mode), cleared with events
     VsEventBuffer<eventBufferCapacity> monitorEvents; ///< Voice mode: events with bends rescaled for the monitor
     VoicePipeline voicePipeline;
     std::vector<float> monoBuffer;                    ///< maxChunkSamples, allocated in the constructor
@@ -270,6 +329,15 @@ private:
     std::atomic<float> inputPeak { 0.0f };
     static_assert (std::atomic<float>::is_always_lock_free);
     static_assert (std::atomic<double>::is_always_lock_free);
+
+    // M3 capture. Declared last, the worker after the tap: the worker (which reads the tap's rings) is
+    // destroyed first (docs/M3-DESIGN.md 15). Its sources point at members declared above.
+    std::atomic<int> preparedMaxBlockSize { 0 };
+    const juce::String instanceId;
+    mutable std::mutex captureStateMutex; ///< never touched by the audio thread
+    CaptureState captureState;
+    CaptureTap captureTap;
+    CaptureWorker captureWorker;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VocalSynthProcessor)
 };

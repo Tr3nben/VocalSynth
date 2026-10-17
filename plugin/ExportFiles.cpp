@@ -3,8 +3,8 @@
 namespace vocalsynth::ExportFiles
 {
 
-// Same logic as the helpers in TestClipExporter.cpp (M1); TODO(C): make TestClipExporter use these and
-// delete its private copies (docs/M3-DESIGN.md 12).
+// Factored out of the M1 TestClipExporter (docs/M3-DESIGN.md 12); the M1 test clips and the M3 capture
+// exports share them.
 
 juce::File getTempRoot()
 {

@@ -1,5 +1,6 @@
 #include "TestClipExporter.h"
 
+#include "ExportFiles.h"
 #include "Parameters.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -62,38 +63,11 @@ juce::MidiMessage toMidiMessage (const VsEvent& e)
 
     return juce::MidiMessage::noteOff (channel, e.data1 & 0x7f);
 }
-
-/** Writes via a temporary file next to target and moves it into place. FL may still hold the file of
-    an earlier drag open; then a numbered sibling is used instead. writeContent (const File&) must
-    create, write and close the file and return true on success. */
-template <typename WriteFn>
-juce::File writeAtomically (const juce::File& target, WriteFn&& writeContent)
-{
-    if (target == juce::File())
-        return {};
-
-    juce::TemporaryFile temp (target);
-
-    if (! writeContent (temp.getFile()) || ! temp.getFile().existsAsFile())
-        return {};
-
-    if (temp.overwriteTargetFileWithTemporary())
-        return target;
-
-    const auto sibling = target.getNonexistentSibling (true);
-
-    if (temp.getFile().moveFileTo (sibling))
-        return sibling;
-
-    return {};
-}
 } // namespace
 
 juce::File getExportDirectory()
 {
-    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("VocalSynth");
-    dir.createDirectory();
-    return dir;
+    return ExportFiles::getTempRoot();
 }
 
 juce::MidiMessageSequence renderTestPattern (const TestPatternSettings& settings)
@@ -173,7 +147,7 @@ juce::File exportMidi (const TestPatternSettings& settings)
 
     const auto fileName = "VocalSynth-Test-" + patternName (settings.pattern).removeCharacters (" ") + ".mid";
 
-    return writeAtomically (getExportDirectory().getChildFile (fileName),
+    return ExportFiles::writeAtomically (getExportDirectory().getChildFile (fileName),
                             [&] (const juce::File& file)
                             {
                                 juce::FileOutputStream out (file);
@@ -197,7 +171,7 @@ juce::File exportWav()
     for (int i = 0; i < numSamples; ++i)
         data[i] = wavGain * (float) std::sin (phaseIncrement * (double) i);
 
-    return writeAtomically (getExportDirectory().getChildFile ("VocalSynth-Test-440Hz.wav"),
+    return ExportFiles::writeAtomically (getExportDirectory().getChildFile ("VocalSynth-Test-440Hz.wav"),
                             [&] (const juce::File& file)
                             {
                                 auto fileStream = std::make_unique<juce::FileOutputStream> (file);

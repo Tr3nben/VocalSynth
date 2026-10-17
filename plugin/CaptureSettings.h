@@ -27,7 +27,8 @@ struct CaptureState
     double audioHistoryMinutes = CaptureHistory::defaultAudioMinutes;
     juce::String takesFolder;           ///< empty = CaptureExporter::getDefaultTakesFolder()
 
-    bool operator== (const CaptureState&) const = default;
+    /** Field by field (doubles compared exactly: the values come from the same clamping). */
+    bool operator== (const CaptureState& other) const noexcept;
 
     static inline const juce::Identifier treeType { "CAPTURE" };
     static constexpr int currentVersion = 1;

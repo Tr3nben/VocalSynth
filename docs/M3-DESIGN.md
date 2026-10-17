@@ -1,7 +1,8 @@
 # M3 design: capture and drag & drop (v0.3.0)
 
-Status: design + compilable scaffold (2026-10-16, branch `m3-capture`), reviewed the same day (corrections
-listed in 1.2 and applied throughout this document and the headers). Binding input:
+Status: implemented in 0.3.0 (branch `m3-capture`, integration 2026-10-17; changes made during the
+implementation are listed in 19). Written as design + compilable scaffold on 2026-10-16 and reviewed the same
+day (corrections listed in 1.2 and applied throughout this document and the headers). Binding input:
 [docs/M3-SPEC.md](M3-SPEC.md) incl. "Decisions (confirmed by the user on 2026-10-16)". Rules:
 `.claude/skills/juce-audio-plugin-dev/SKILL.md`, [docs/M1-DESIGN.md](M1-DESIGN.md),
 [docs/M2-DESIGN.md](M2-DESIGN.md) (sections 10 and 11 describe the v0.2.1 pipeline this builds on).
@@ -346,7 +347,7 @@ timeline's definition (`isPlaying && hasPpq`). Summary:
 | marker `newTake` | ends the take at the marker; the next take starts there (synced if playing, else free), kind manual. Synced: the old take collects its tail in parallel with the new one (both hold the events of `[marker, marker + tail)`; the renderer's clamp gives each its part, so a note held across the split is closed / re-opened at the marker in compensated time). Free: synthetic note-off / note-on at the marker |
 | `reset` | closes the open take and ends every tail at the newest sample (nothing more arrives on the old clock); clearing reset also forgets notes and state |
 | marker `clear` | discards the open take, closing takes and pending grabs; the next take starts by the rules at the marker |
-| `captureOff` / `captureOn` | closes the take at the marker (no tail: nothing is recorded after it; the tap's capture-only note-offs end the notes there) / like a transport start or free wait |
+| `captureOff` / `captureOn` | closes the take at the marker (no tail: nothing is recorded after it; the tap's capture-only note-offs end the notes there: events after the marker sample are removed, note-offs at the marker sample stay, and the open-note list is rebuilt) / like a transport start or free wait |
 | `gap` | open and closing takes `incomplete = true`; every sounding note ends at the gap, the tap's resync note-ons re-open the real ones |
 | note-off of a note that is not sounding | ignored for the note state (kept in the take; the renderer drops unpaired note-offs) |
 | take reaches `maxTakeEvents` (2^18) | closed and continued in a new take (manual-split rules) |
@@ -372,7 +373,8 @@ builds pending grabs without waiting for another record; results never depend on
 the start of the bar `grabBars - 1` bars before the bar containing the marker up to the marker (the current
 bar as far as it was played); bars 1, 2, 4, 8, 16, 32, default 8. Free: the last `grabSeconds` (10, 20, 30,
 60, 120; default 30). Events of `[start, marker + tail)` (free grabs: tail = `detectionTailSeconds`), built
-once the history holds them; the start is clamped to the oldest stored record; sounding notes opened at the
+once the history holds them; the grab's timeline covers only the samples before its capture end (a transport
+record exactly at the capture end is not included, so the result does not depend on how often the worker drains); the start is clamped to the oldest stored record; sounding notes opened at the
 start and closed at the capture end (synthetic); no note-on -> nothing listed. The export origin (9) is then
 computed as for any other take.
 
@@ -410,7 +412,9 @@ heartbeat: every 60 s touch <instance>/heartbeat if the folder exists (created w
 `CaptureDrain::drain()` (core, owner A; the same loop the core end-to-end tests use): clock = `tap.getClock()`
 (acquire, before popping); pop records (at most about one ring capacity per call); audio record -> its frame
 from the audio ring -> `history.addAudio`; other records -> `history.addRecord` then `segmenter.process`;
-finally `segmenter.advanceTo (clock)`. The audio frame of an audio record is always in the audio ring when
+finally, only if the record ring was emptied, `segmenter.advanceTo (clock)` and `getLastClock()` = clock (a
+call that stopped at its size limit with records still queued leaves both, so a free take never closes before
+a queued note-on is read). The audio frame of an audio record is always in the audio ring when
 the record is read (pushed before the record; the consumer's acquire of the audio head makes it visible). A
 forward jump of audio record samples (dropped frames) is zero-filled by the history.
 
@@ -853,3 +857,32 @@ calls as in 4; the mono downmix also in Test Pattern mode while capture audio is
 - RAM at 96/192 kHz (5.1): capped at 256 MiB per instance; the take list is capped at 2^20 events.
 - A host that stops calling `processBlock` freezes the clock: free takes then close by wall clock
   (`closeIdle`), synced takes and grabs wait for the clock.
+
+## 19. Implementation notes (integration of 0.3.0, 2026-10-17)
+
+Changes against the text above that came up while implementing; the sections above already describe the
+result.
+
+- **TakeSegmenter, `captureOff`** (5.2): note-offs at the marker sample stay in the take (before the fix
+  every event at or after the end sample was removed, so a note held at Capture off lost its note-off). The
+  open-note list is rebuilt after the removal. Found by the block-size invariance test.
+- **CaptureDrain** (5.3): `advanceTo (clock)` and `getLastClock()` only after a call that emptied the record
+  ring. Before, a call that hit its size limit still advanced the segmenter and could close a free take
+  before a queued note-on was read.
+- **Grabs** (5.2): the grab's timeline covers only the samples before its capture end, so a transport record
+  exactly there is never included (the result depended on the drain timing).
+- **Plugin interfaces** (owner C refined them): `CaptureWorker::persistWav (number, folder)` replaces
+  `markWavPersisted` (the move and the worker's deletes share one lock); `CaptureWorker` gained
+  `isStarted()`, `getTake()` and `getOptions()`; `CaptureStatus` gained `started`, `takeBytes` and
+  `numTakes`; `CaptureState::operator==` is written out (the defaulted `==` of the core option structs
+  triggers `-Wfloat-equal` in the plugin), with `sameRenderOptions` / `sameOffset` helpers; the open-take
+  snapshot does not copy the take's events. `FileDragSource` has its own file (`plugin/FileDragSource.*`);
+  `TestClipExporter` uses `ExportFiles`. The worker refines note onsets in one small audio window per note
+  (no whole-take audio buffer).
+- **Validators**: clap-validator reports one warning per CLAP, `state-invalid-random` ("loaded random bytes
+  successfully"), from JUCE's CLAP wrapper accepting arbitrary state bytes; not caused by M3.
+- **End-to-end test** (`tests/plugin/ProcessorTests.cpp`, tag `[e2e]`): FX, Voice / Tenor, A3 C4 E4 A3 on
+  beats 2-4 of bar 3 and beat 1 of bar 4 at 120 BPM, playhead from bar 3, voice 2 x 2048 samples late (Auto),
+  host blocks 2048 / 480 / 64: one take `_Take01_Bar003_Clean.mid`, notes in order within 1/64 note of the
+  beats (measured: C4 and E4 exact, A3 +4 ticks = 2 ms), WAV sample 0 = bar 3 beat 1, `.mid` byte-identical
+  and WAV identical for all three block sizes.
