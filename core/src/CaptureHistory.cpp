@@ -23,6 +23,7 @@ void CaptureHistory::prepare (double audioHistoryMinutes)
 
     audioMinutes = std::clamp (audioHistoryMinutes, minAudioMinutes, maxAudioMinutes);
     clear();
+    releaseRetainedAudio();
     configureAudio();
 }
 
@@ -58,6 +59,20 @@ void CaptureHistory::addRecord (const CaptureRecord& record)
 
             if (reset.clearsHistory)
             {
+                // The clock restarts: keep the ended epoch's audio aside for the takes the reset closes
+                releaseRetainedAudio();
+
+                if (audioRange.from < audioRange.to)
+                {
+                    retained.valid = true;
+                    retained.epoch = clockEpoch;
+                    retained.chunks = std::move (chunks);
+                    retained.range = audioRange;
+                    retained.holes = holes;
+                    chunks = Chunks {};
+                }
+
+                ++clockEpoch;
                 sampleRate = reset.sampleRate > 0.0 ? reset.sampleRate : 48000.0;
                 clear();
                 configureAudio();
@@ -139,6 +154,9 @@ void CaptureHistory::evictTimeline()
 
     if (audioRange.from < audioRange.to)
         limit = std::min (limit, audioRange.from);
+
+    // Bounded by the look-back whatever the oldest record is (see class comment)
+    limit = std::max (limit, endSample - static_cast<int64_t> (std::llround (timelineLookbackSeconds * sampleRate)));
 
     const auto it = std::upper_bound (segments.begin(), segments.end(), limit,
                                       [] (int64_t s, const TimelineSegment& seg) { return s < seg.startSample; });
@@ -289,22 +307,59 @@ CaptureHistory::AudioRange CaptureHistory::getAudioRange() const noexcept
 
 std::size_t CaptureHistory::readAudio (int64_t fromSample, std::span<float> destination) const noexcept
 {
+    return readStore (chunks, audioRange, holes, fromSample, destination);
+}
+
+std::size_t CaptureHistory::readStore (const Chunks& source, const AudioRange& range, const std::vector<AudioRange>& gaps,
+                                       int64_t fromSample, std::span<float> destination) noexcept
+{
     std::fill (destination.begin(), destination.end(), 0.0f);
 
-    const auto lo = std::max (fromSample, audioRange.from);
-    const auto hi = std::min (fromSample + static_cast<int64_t> (destination.size()), audioRange.to);
+    const auto lo = std::max (fromSample, range.from);
+    const auto hi = std::min (fromSample + static_cast<int64_t> (destination.size()), range.to);
 
-    if (lo >= hi || chunks.empty())
+    if (lo >= hi || source.empty())
         return 0;
 
-    readChunks (chunks, lo, destination.subspan (static_cast<std::size_t> (lo - fromSample), static_cast<std::size_t> (hi - lo)));
+    readChunks (source, lo, destination.subspan (static_cast<std::size_t> (lo - fromSample), static_cast<std::size_t> (hi - lo)));
 
     auto stored = hi - lo;
 
-    for (const auto& h : holes)
+    for (const auto& h : gaps)
         stored -= std::max<int64_t> (0, std::min (hi, h.to) - std::max (lo, h.from));
 
     return static_cast<std::size_t> (stored);
+}
+
+CaptureHistory::AudioRange CaptureHistory::getAudioRange (uint32_t epoch) const noexcept
+{
+    if (epoch == clockEpoch)
+        return audioRange;
+
+    if (retained.valid && retained.epoch == epoch)
+        return retained.range;
+
+    return {};
+}
+
+std::size_t CaptureHistory::readAudio (uint32_t epoch, int64_t fromSample, std::span<float> destination) const noexcept
+{
+    if (epoch == clockEpoch)
+        return readAudio (fromSample, destination);
+
+    if (retained.valid && retained.epoch == epoch)
+        return readStore (retained.chunks, retained.range, retained.holes, fromSample, destination);
+
+    std::fill (destination.begin(), destination.end(), 0.0f);
+    return 0;
+}
+
+void CaptureHistory::releaseRetainedAudio() noexcept
+{
+    retained.valid = false;
+    retained.chunks = Chunks {};
+    retained.range = {};
+    retained.holes.clear();
 }
 
 //==============================================================================
@@ -391,8 +446,9 @@ std::size_t CaptureHistory::getAudioCapacitySamples() const noexcept
 
 std::size_t CaptureHistory::getAllocatedAudioBytes() const noexcept
 {
-    const auto allocated = static_cast<std::size_t> (
-        std::count_if (chunks.begin(), chunks.end(), [] (const auto& c) { return c != nullptr; }));
+    const auto isAllocated = [] (const auto& c) { return c != nullptr; };
+    const auto allocated = static_cast<std::size_t> (std::count_if (chunks.begin(), chunks.end(), isAllocated))
+                           + static_cast<std::size_t> (std::count_if (retained.chunks.begin(), retained.chunks.end(), isAllocated));
     return allocated * static_cast<std::size_t> (audioChunkSamples) * sizeof (float);
 }
 

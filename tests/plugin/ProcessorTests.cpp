@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <vector>
@@ -2204,6 +2206,24 @@ TEST_CASE ("Capture in Test Pattern mode records the pattern MIDI as sent", "[pl
     // Notes sent in the capture tail after Stop (and so after the take's end in host time) are not exported
     CHECK (rendered.noteCount <= capturedOns);
     CHECK (rendered.noteCount >= capturedOns - 3);
+
+    // The pattern is generated at the block's playhead (no input latency): every note-on sent while the
+    // transport played sits exactly where FL played it, not a round trip (2 x 512) earlier
+    REQUIRE (options.roundTripSamples == 1024);
+    std::vector<int64_t> expected;
+
+    for (const auto& e : take.events)
+        if (e.event.type == vocalsynth::VsEventType::noteOn && e.event.data2 > 0 && ! e.synthetic && e.sample < take.endSample)
+            expected.push_back (std::llround ((double) (e.sample - take.startSample) / (double) samplesPerBeat * 960.0));
+
+    std::vector<int64_t> exported;
+
+    for (const auto& e : rendered.events)
+        if (e.type == vocalsynth::TickEventType::noteOn)
+            exported.push_back (e.tick);
+
+    std::sort (expected.begin(), expected.end());
+    CHECK (exported == expected);
 }
 
 TEST_CASE ("Capture off records nothing; capture on again starts recording", "[plugin][capture]")
@@ -2343,6 +2363,85 @@ TEST_CASE ("Capture: 10 minutes of capture keep the overflow counters at 0", "[p
     CHECK (takes.front()->audio == vocalsynth::TakeAudio::full);
     CHECK (status.audioHistoryBytes <= vocalsynth::CaptureHistory::maxAudioBytes);
     CHECK (status.audioHistoryBytes >= (std::size_t) (590.0 * rate) * sizeof (float));
+}
+
+TEST_CASE ("Processor CPU sanity check with capture on: worst 128-sample block at 48 kHz", "[plugin][capture][cpu]")
+{
+    // Spec (docs/M3-SPEC.md, Tests): with the capture tap running (Voice, Wide, True bends, audio on,
+    // transport playing) the worst block stays < 20 % of a 128-sample block at 48 kHz (Release). Per block
+    // the minimum over 3 runs (a preemption hits one run, not all); Debug builds only report.
+    constexpr double sr = 48000.0;
+    constexpr int blockSize = 128;
+    constexpr int numBlocks = (int) (4.0 * sr) / blockSize;
+    std::vector<double> best ((std::size_t) numBlocks, 1.0e9);
+    juce::Random noise (11);
+
+    for (int run = 0; run < 3; ++run)
+    {
+        VocalSynthProcessor p (Variant::fx);
+        p.getCaptureWorker().setManualSteppingForTests (true);
+        setPlainValue (p, params::source, (float) static_cast<int> (params::Source::voice));
+        setPlainValue (p, params::voiceRange, (float) static_cast<int> (vocalsynth::VoiceRange::wide));
+        setPlainValue (p, params::bendMode, (float) static_cast<int> (vocalsynth::BendMode::trueBend));
+        REQUIRE (p.isCaptureEnabled());
+        REQUIRE (p.isCaptureAudioEnabled());
+
+        vocalsynth::test::FakePlayHead head;
+        head.sampleRate = sr;
+        head.playStartSample = 0;
+        p.setPlayHead (&head);
+        p.setRateAndBufferSizeDetails (sr, blockSize);
+        p.prepareToPlay (sr, blockSize);
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            const auto pos = (int64_t) b * blockSize;
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                // 65 Hz saw (longest window, every frame voiced) + a little noise, as the pipeline check
+                const auto phase = std::fmod ((double) (pos + i) * 65.0 / sr, 1.0);
+                const auto x = (float) (0.3 * (2.0 * phase - 1.0)) + 0.01f * (noise.nextFloat() * 2.0f - 1.0f);
+                buffer.setSample (0, i, x);
+                buffer.setSample (1, i, x);
+            }
+
+            head.blockStart = pos;
+            midi.clear();
+            const auto t0 = std::chrono::steady_clock::now();
+            p.processBlock (buffer, midi);
+            const auto t1 = std::chrono::steady_clock::now();
+            best[(std::size_t) b] = juce::jmin (best[(std::size_t) b], std::chrono::duration<double> (t1 - t0).count());
+
+            if (b % 4 == 3) // the worker drains every ~10 ms (outside the measured block)
+                p.getCaptureWorker().runStepForTests();
+        }
+
+        p.setPlayHead (nullptr);
+        CHECK (p.getCaptureWorker().getStatus().overflow.records == 0);
+        CHECK (p.getCaptureWorker().getStatus().overflow.audioSamples == 0);
+    }
+
+    const auto blockSeconds = blockSize / sr;
+    double worst = 0.0, mean = 0.0;
+
+    for (const auto t : best)
+    {
+        worst = juce::jmax (worst, t / blockSeconds);
+        mean += t / blockSeconds;
+    }
+
+    mean /= (double) numBlocks;
+    std::printf ("[processor][cpu] Voice Wide True bends + capture, 48 kHz, 128-sample blocks: worst %.2f %%, mean %.2f %% of the block\n",
+                 100.0 * worst, 100.0 * mean);
+
+#ifdef NDEBUG
+    CHECK (worst < 0.20);
+    CHECK (mean < 0.10);
+#endif
 }
 
 TEST_CASE ("Capture worker: many instances start and stop quickly and leave no files (pluginval-like)",

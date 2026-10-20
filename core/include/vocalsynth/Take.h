@@ -86,7 +86,11 @@ struct Take
                                     ///< history may evict the start of a long take); free: may be empty
     double freeBpm = TakeTimeline::fallbackBpm; ///< free mode: host bpm at the take start, else 120
 
-    int noteCount = 0;              ///< note-ons (incl. synthetic ones at the take start)
+    int noteCount = 0;              ///< note-ons (incl. synthetic ones at the take start); kept up to date
+                                    ///< while the take is open (the status line shows it)
+    uint32_t clockEpoch = 0;        ///< CaptureHistory::getClockEpoch() when the take opened: the capture
+                                    ///< clock restarts at a clearing reset (new sample rate), so sample
+                                    ///< positions of takes of an earlier epoch never address newer audio
     bool incomplete = false;        ///< a gap record (ring overflow) fell into the take
     TakeAudio audio = TakeAudio::unknown;
 

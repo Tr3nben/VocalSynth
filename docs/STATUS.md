@@ -39,12 +39,18 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3 in `m
   Clean/Raw, Quantisierung, `.wav` der trockenen Stimme (gezogene WAVs in `Dokumente\VocalSynth\Takes`),
   Reiter „Capture“ mit Take-Liste und Drag-Quellen, Aufräumen der Temp-Ordner. Takes werden nicht im Projekt
   gespeichert, nur die Einstellungen. Fünf neue Parameter (Version-Hint 2).
-- Integration 2026-10-17 (lokal, Linux, clang Release): alle Gates grün – ctest (xvfb) alle Tests, pluginval
+- Integration 2026-10-17 (lokal, Linux, clang Release, 0 Warnungen): alle Gates grün – ctest (xvfb) 447/447, pluginval
   Strictness 10 beide VST3, Steinberg-Validator 47/47 beide VST3, clap-validator 32 bestanden / 0 Fehler beide
   CLAP. Eine clap-validator-Warnung `state-invalid-random` (JUCE-CLAP-Wrapper nimmt zufällige State-Bytes an),
   nicht durch M3 verursacht. End-to-end-Test (A3 C4 E4 A3 ab Takt 3, ASIO 2048 simuliert, Host-Blöcke
-  2048/480/64): Noten in Reihenfolge, höchstens 2 ms neben dem Schlag, `.mid` byteweise gleich.
-- **Nächste Schritte:** Review (Echtzeit + Korrektheit) mit Gegenprüfung → Fixes → Commit/Push → CI → ZIP-Link
+  2048/480/64): Noten in Reihenfolge, höchstens 4 Ticks (ca. 2 ms) neben dem Schlag, `.mid` byteweise gleich, WAV ab Takt 3.
+- Review-Fixes 2026-10-17 (RT-1 bis RT-5, F1 bis F7, F9; Liste in [M3-DESIGN.md](M3-DESIGN.md) 19.1): eigener
+  Datei-Thread (das Leeren der Ringe wartet nie mehr auf die Festplatte), begrenzte Tempo-Historie, sicheres
+  suspend/resume, Takt-Ursprung nur aus exportierten Noten, Übergangsnoten-Ketten, Quantisierung pro Takt
+  (7/8), Takes über einen Samplerate-Wechsel, Test-Pattern ohne Umweg-Ausgleich, Grab endet am Klick,
+  Notenzahl live. Gates danach: ctest (xvfb) 461/461, pluginval 10 beide VST3, Steinberg 47/47 beide,
+  clap-validator 32/0 beide (1 bekannte Warnung), 0 Warnungen.
+- **Nächste Schritte:** Commit/Push → CI → ZIP-Link
   an den Nutzer → Nutzertest in FL Studio 2026 nach [docs/M3-TESTING.md](M3-TESTING.md). Dabei besonders
   prüfen: ob FLs vorbereitete maximale Blockgröße dem ASIO-Puffer entspricht (der Capture-Reiter zeigt Auto
   neben dem größten tatsächlich gesendeten Block und warnt ab Faktor 2), Import der Bends (Bereich), WAV und

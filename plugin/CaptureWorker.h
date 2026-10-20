@@ -109,27 +109,42 @@ struct CaptureWorkerSources
     dry audio, renders the WAV cache of closed takes into the instance folder and touches its heartbeat.
 
     Lifetime (binding): created with the processor (declared after the CaptureTap member, so it is
-    destroyed first); the thread starts in the first prepareToPlay (start()) and runs until stop() in the
+    destroyed first); the threads start in the first prepareToPlay (start()) and run until stop() in the
     processor's destructor (NOT in releaseResources: the history survives FL's engine restarts).
-    prepareToPlay brackets CaptureTap::prepare() with suspend() / resume(): suspend() drains what is in the
-    rings, parks the thread and returns when it is parked. stop() = signal, notify, join (std::thread: no
-    timeout kill); it returns within one step because every step is bounded (drain + at most
-    wavFramesPerStep WAV frames + bookkeeping, a few ms), an unfinished WAV job is aborted (temp file
-    deleted). pluginval opens and closes many instances: no thread and no files before the first
-    prepareToPlay; the instance folder is created only when the first file is written (WAV cache), the
-    heartbeat is touched only while the folder exists.
+    prepareToPlay brackets CaptureTap::prepare() with suspend() / resume(): suspend() makes the worker run
+    one drain step after the request (a generation counter: a suspend() right after resume() still waits
+    for its own drain, so nothing the audio thread pushed in between is lost when prepare() resets the
+    rings), parks the thread and returns when that drain is done. stop() = signal, notify, join the worker
+    (std::thread: no timeout kill; it returns within one step because every step is bounded and never
+    waits on the disk), then the unfinished WAV job is aborted (temp file deleted) and the file thread
+    finishes its queue and is joined. pluginval opens and closes many instances: no thread and no files
+    before the first prepareToPlay; the instance folder is created only when the first file is written
+    (WAV cache), the heartbeat is touched only while the folder exists.
 
-    Each step: options, drain (CaptureDrain), segmenter.closeIdle() when the tap clock did not move for
-    takeGapSeconds of wall time (the host stopped calling processBlock), closed takes -> wallClockStartMs,
-    observedBlockSize, refineNoteOnsets, audio availability, overview -> publish; a clear marker empties the
-    take list (cached WAVs of non-persisted takes deleted); WAV re-render check (offset parameters, pre-roll,
-    format); WAV job slice; open-take snapshot; status; heartbeat.
+    Two threads (the drain never waits on the disk): the ring capacity is ~2.7 s, so a WAV slice write, a
+    rename that Defender holds, a cached-WAV delete or a cross-volume copy in persistWav() (fileMutex) must
+    never delay the drain. The worker thread drains, segments, refines, renders and reads the audio of the
+    WAV slices from the history (RAM); every file operation (open / write / finish / abort of the WAV
+    cache, deletes, heartbeat, stale-folder cleanup) runs as a task on the file thread, in order. A WAV job
+    has at most one task in flight; the worker moves it on (next slice, finish, publish the result) only
+    when that task is done, so a slow disk only slows the WAV, never the drain.
+
+    Each step: take gap option, drain (CaptureDrain), the audio look-back option (after the drain, so a
+    failing allocation never stops draining; marked as applied either way), segmenter.closeIdle() when the
+    tap clock did not move for takeGapSeconds of wall time (the host stopped calling processBlock), closed
+    takes -> wallClockStartMs, observedBlockSize, refineNoteOnsets, Raw note count (a take whose export
+    has no note, e.g. only a synthetic note-on the clamp drops, is not listed), audio availability,
+    overview -> publish; a clear marker empties the take list (cached WAVs of non-persisted takes
+    deleted); WAV re-render check (offset parameters, pre-roll, format); WAV job progress; release of the
+    previous clock epoch's audio once no take of it needs it (CaptureHistory epochs: a take always reads
+    the audio of its own epoch); open-take snapshot; status; heartbeat.
 
     Threads: the worker thread owns the history and the segmenter. The take list, the open-take snapshot,
     the WAV states and the status are guarded by listMutex, which the audio thread never touches; the
     message thread reads them through getTakes() / getWavState() / getStatus() (copies of
-    shared_ptr<const Take>, cheap). Cached WAV files are moved (persistWav) or deleted / replaced (worker)
-    only under fileMutex (never taken while listMutex is held). */
+    shared_ptr<const Take>, cheap). Cached WAV files are moved (persistWav, message thread) or written /
+    deleted / replaced (file thread) only under fileMutex (never taken while listMutex is held; the worker
+    thread never takes it). */
 class CaptureWorker
 {
 public:
@@ -200,6 +215,10 @@ public:
 
     void runStepForTests();
 
+    /** Tests: holds the file lock that persistWav() holds while it moves or copies a WAV (a slow copy to
+        another drive); the worker must keep draining meanwhile. */
+    [[nodiscard]] std::unique_lock<std::mutex> holdFileLockForTests() { return std::unique_lock<std::mutex> (fileMutex); }
+
 private:
     struct Entry
     {
@@ -210,32 +229,59 @@ private:
         bool wavQueued = false;
     };
 
+    /** A WAV cache job. The worker owns it; the file thread runs one task on it at a time (busy): the
+        worker touches writer, buffer, failed and result only while busy is false. */
     struct WavJob
     {
+        enum class Stage
+        {
+            opening,
+            writing,
+            finishing
+        };
+
         int takeNumber = 0;
         std::shared_ptr<const Take> take;
         AudioSpan span;
         WavSampleFormat format = WavSampleFormat::pcm24;
         CaptureExporter::WavFileWriter writer;
+        std::vector<float> buffer;    ///< the slice being written
+        int64_t framesRead = 0;       ///< frames handed to the file thread
+        Stage stage = Stage::opening;
         bool truncated = false;
+        bool failed = false;          ///< set by a file task
+        juce::File result;            ///< set by the finish task
+        std::atomic<bool> busy { false };
     };
 
     void threadLoop();
-    void prepareHistory();
+    void prepareHistory() noexcept;
     void step();
     void safeStep() noexcept;
+
+    // File thread
+    void startFileThread();
+    void stopFileThread();
+    void fileThreadLoop();
+    /** Runs task on the file thread (in order), or right here if that thread is not running (manual
+        stepping, before start, after stop). Exceptions of a task are caught. */
+    void postFileTask (std::function<void()> task);
+    void postJobTask (const std::shared_ptr<WavJob>& job, std::function<void (WavJob&)> jobTask);
 
     RenderOptions wavRenderOptions (const Take& take) const;
     void processClosedTake (Take&& take, int64_t clock);
     void refineOnsets (Take& take) const;
-    TakeAudio audioAvailability (const AudioSpan& span) const noexcept;
+    TakeAudio audioAvailability (const AudioSpan& span, uint32_t clockEpoch) const noexcept;
     void computeOverview (Take& take, const AudioSpan& span) const;
     void publish (std::shared_ptr<const Take> take, const AudioSpan& span);
     void clearTakeList();
     void checkWavRenders();
     void runWavJob();
-    void finishWavJob();
+    bool startNextWavJob();
+    void completeWavJob();
+    void failWavJob();
     void abortWavJob();
+    void releaseRetainedAudioIfUnused();
     void deleteCachedWav (const TakeWavState& state);
     void updateOpenTakeSnapshot (bool force);
     void updateStatus (int64_t clock);
@@ -251,7 +297,8 @@ private:
     std::condition_variable controlCv;
     bool stopRequested = false;
     bool suspendRequested = false;
-    bool parked = false;
+    uint64_t suspendGeneration = 0; ///< incremented by every suspend()
+    uint64_t drainedGeneration = 0; ///< the worker drained after that suspend() and is parked
     std::atomic<bool> threadRunning { false };
     bool manualStepping = false;
     std::atomic<bool> started { false };
@@ -261,6 +308,8 @@ private:
     TakeSegmenter segmenter;
     CaptureDrain drainer;
     bool historyPrepared = false;
+    bool staleCleanupPosted = false;
+    double lastPrepareAttemptMs = 0.0;
     std::vector<Take> closedScratch;
     CaptureWorkerOptions appliedOptions;
     CaptureOffsetSettings appliedOffset;
@@ -275,8 +324,7 @@ private:
     std::size_t snapshotEvents = 0;
     int64_t snapshotEnd = 0;
     std::deque<int> wavQueue;
-    std::unique_ptr<WavJob> wavJob;
-    std::vector<float> wavBuffer;
+    std::shared_ptr<WavJob> wavJob;
 
     mutable std::mutex optionsMutex;
     CaptureWorkerOptions pendingOptions;
@@ -288,6 +336,13 @@ private:
     std::atomic<uint32_t> takeListVersion { 0 };
 
     std::mutex fileMutex;
+
+    // File thread (see class comment)
+    std::thread fileThread;
+    std::mutex fileQueueMutex;
+    std::condition_variable fileQueueCv;
+    std::deque<std::function<void()>> fileTasks;
+    bool fileThreadStop = false;
 };
 
 } // namespace vocalsynth

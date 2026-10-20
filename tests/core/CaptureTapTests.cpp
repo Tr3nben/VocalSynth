@@ -922,8 +922,9 @@ TEST_CASE ("CaptureTap: block-size invariance of the record and audio streams", 
 }
 
 //==============================================================================
-TEST_CASE ("CaptureTap: cost per 128-sample block", "[capturetap][.benchmark]")
+TEST_CASE ("CaptureTap: cost per 128-sample block", "[capturetap][cpu]")
 {
+    // Spec: < 1 % of a 128-sample block at 48 kHz, in CI (the measured cost is ~150 ns of 26.7 us)
     Harness h (48000.0, 128);
     h.bs.captureAudio = true;
     std::vector<float> mono (128, 0.1f);

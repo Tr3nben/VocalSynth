@@ -350,9 +350,11 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     lastSource = source;
 
     // Capture (docs/M3-DESIGN.md 4): reset / transport / settings / markers at the block start
-    captureTap.beginBlock (makeTransportInfo (getPlayHead()),
-                           makeCaptureBlockSettings (source, voiceSettings, settings, false));
-    const bool captureAudio = isCaptureEnabled() && isCaptureAudioEnabled();
+    // One load of captureEnabled / captureAudio per block: the tap's audio state and the mono pointer
+    // below must agree (the host or the UI may change the parameters at any time)
+    const auto captureBlock = makeCaptureBlockSettings (source, voiceSettings, settings, false);
+    captureTap.beginBlock (makeTransportInfo (getPlayHead()), captureBlock);
+    const bool captureAudio = captureBlock.captureEnabled && captureBlock.captureAudio;
 
     if (flushPending.exchange (false, std::memory_order_relaxed) || sourceChanged)
     {

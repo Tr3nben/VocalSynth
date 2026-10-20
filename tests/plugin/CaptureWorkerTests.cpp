@@ -493,3 +493,192 @@ TEST_CASE ("CaptureWorker deletes stale instance folders at start", "[plugin][ca
     CHECK_FALSE (stale.folder.exists());
     CHECK (fresh.folder.isDirectory());
 }
+
+//==============================================================================
+// M3 review fixes (RT-1, RT-3, F1, F4, F7)
+
+TEST_CASE ("CaptureWorker keeps draining while the file lock is held (slow WAV copy)", "[plugin][captureworker][wav][realtime]")
+{
+    TestFolder dir;
+    CaptureTap tap;
+    tap.prepare (rate, 512);
+    CaptureWorker worker (tap, dir.folder);
+    CaptureWorkerOptions options;
+    options.takeGapSeconds = TakeSegmenter::minTakeGapSeconds;
+    worker.setOptions (options);
+    worker.start();
+
+    TapFeeder feeder (tap);
+    feeder.audio = sine;
+
+    {
+        // persistWav() on the message thread copies a big WAV to a USB drive meanwhile: the take below
+        // closes, its WAV job writes its slices and then waits for the lock to finish. Nothing may stop
+        // the drain: 8 s of audio arrive within ~0.7 s of wall time (the rings hold ~2.7 s).
+        const auto lock = worker.holdFileLockForTests();
+        const auto events = freeNote();
+
+        while (feeder.position < (int64_t) (8.0 * rate))
+        {
+            feeder.runTo (feeder.position + (int64_t) (0.5 * rate), 512, events);
+            std::this_thread::sleep_for (std::chrono::milliseconds (40));
+        }
+
+        CHECK (tap.getOverflowCounts().records == 0);
+        CHECK (tap.getOverflowCounts().audioSamples == 0);
+        REQUIRE (worker.getTakes().size() == 1);
+        CHECK (worker.getWavState (1).kind == TakeWavState::Kind::preparing); // finishing waits for the lock
+    }
+
+    for (int i = 0; i < 400 && worker.getWavState (1).kind == TakeWavState::Kind::preparing; ++i)
+        std::this_thread::sleep_for (std::chrono::milliseconds (5));
+
+    const auto state = worker.getWavState (1);
+    CHECK (state.kind == TakeWavState::Kind::ready);
+    CHECK (state.file.existsAsFile());
+    worker.stop();
+}
+
+TEST_CASE ("CaptureWorker: suspend() right after resume() still drains what was pushed in between", "[plugin][captureworker][lifecycle]")
+{
+    TestFolder dir;
+    CaptureTap tap;
+    tap.prepare (rate, 512);
+    CaptureWorker worker (tap, dir.folder);
+    worker.start();
+    TapFeeder feeder (tap);
+    int64_t next = 1000;
+
+    // prepareToPlay -> a few blocks -> prepareToPlay in a tight loop (pluginval, a busy host)
+    for (int round = 0; round < 200; ++round)
+    {
+        worker.suspend();
+        tap.prepare (rate, 512); // same rate: the clock and the tap's note state continue
+        worker.resume();
+
+        feeder.runTo (feeder.position + 2048, 512, { noteOnAt (next, 60), noteOffAt (next + 500, 60) });
+        next = feeder.position + 1000;
+
+        worker.suspend(); // must not return before the worker drained the rings once more
+        INFO ("round " << round);
+        REQUIRE (tap.getRecordRing().size() == 0);
+        worker.resume();
+    }
+
+    worker.stop();
+}
+
+TEST_CASE ("CaptureWorker: the open take's note count is live", "[plugin][captureworker]")
+{
+    TestFolder dir;
+    CaptureTap tap;
+    tap.prepare (rate, 512);
+    CaptureWorker worker (tap, dir.folder);
+    worker.setManualSteppingForTests (true);
+    worker.start();
+
+    TapFeeder feeder (tap);
+    feeder.worker = &worker;
+    feeder.settings.captureAudio = false;
+    feeder.runTo (24000, 512, { noteOnAt (1000, 60), noteOffAt (6000, 60), noteOnAt (12000, 62) });
+    worker.runStepForTests();
+
+    const auto open = worker.getOpenTake();
+    REQUIRE (open != nullptr);
+    CHECK (open->noteCount == 2);
+    CHECK (worker.getStatus().recordingTakeNumber == open->number);
+}
+
+TEST_CASE ("CaptureWorker: a take whose export has no note is not listed", "[plugin][captureworker]")
+{
+    TestFolder dir;
+    CaptureTap tap;
+    tap.prepare (rate, 512); // Auto round trip: 2 x 512
+    CaptureWorker worker (tap, dir.folder);
+    worker.setManualSteppingForTests (true);
+    worker.start();
+
+    // A note hummed before Play ends 10 ms after Play (compensated: before it). The synced take opens with
+    // that note (synthetic note-on) and gets nothing else: its export would be empty.
+    TapFeeder feeder (tap);
+    feeder.worker = &worker;
+    feeder.settings.captureAudio = false;
+    const int64_t playStart = 48000, playStop = 48000 + 4 * 24000;
+    feeder.transport = [=] (int64_t s) { return vocalsynth::test::playingTransport (s, rate, 120.0, playStart, 0.0, playStop); };
+    feeder.runTo (playStop + (int64_t) rate, 512, { noteOnAt (1000, 60), noteOffAt (playStart + 480, 60) });
+    worker.runStepForTests();
+
+    const auto takes = worker.getTakes();
+    REQUIRE (takes.size() == 1);
+    CHECK (takes.front()->mode == TakeMode::free); // the hummed note before Play
+    CHECK (takes.front()->noteCount == 1);
+}
+
+TEST_CASE ("CaptureWorker: a sample-rate change keeps the open take's audio and never re-renders old takes",
+           "[plugin][captureworker][wav]")
+{
+    TestFolder dir;
+    CaptureTap tap;
+    tap.prepare (rate, 512);
+    std::atomic<float> mode { 0.0f }, offsetMs { 0.0f }, fineMs { 0.0f };
+    CaptureWorkerSources sources;
+    sources.offsetMode = &mode;
+    sources.offsetMs = &offsetMs;
+    sources.fineOffsetMs = &fineMs;
+    CaptureWorker worker (tap, dir.folder, sources);
+    worker.setManualSteppingForTests (true);
+    worker.start();
+
+    // A synced take is still open (transport playing) when the user changes FL's sample rate
+    TapFeeder feeder (tap);
+    feeder.worker = &worker;
+    feeder.audio = sine;
+    const int64_t playStart = 48000;
+    feeder.transport = [=] (int64_t s) { return vocalsynth::test::playingTransport (s, rate, 120.0, playStart, 0.0); };
+    feeder.runTo (playStart + 3 * 24000, 512, { noteOnAt (playStart + 3000, 60), noteOffAt (playStart + 30000, 60) });
+    REQUIRE (worker.getTakes().empty());
+
+    worker.suspend();
+    tap.prepare (44100.0, 512); // clearing reset: the clock restarts at 0
+    worker.resume();
+
+    TapFeeder after (tap); // the new clock, transport stopped, other audio
+    after.worker = &worker;
+    after.audio = [] (int64_t) { return 0.5f; };
+    after.runTo ((int64_t) (0.5 * 44100.0), 512);
+    worker.runStepForTests();
+
+    // The take the reset closed still has its audio (of its own clock epoch) and gets its WAV
+    const auto takes = worker.getTakes();
+    REQUIRE (takes.size() == 1);
+    const auto& take = *takes.front();
+    CHECK (take.mode == TakeMode::synced);
+    CHECK (take.audio != TakeAudio::none);
+    CHECK_FALSE (take.overview.empty());
+    stepUntilWavDone (worker, take.number);
+    const auto first = worker.getWavState (take.number);
+    REQUIRE (first.kind == TakeWavState::Kind::ready);
+
+    double wavRate = 0.0;
+    int bits = 0;
+    const auto audio = vocalsynth::test::readWav (first.file, wavRate, bits);
+    CHECK (wavRate == Catch::Approx (rate));
+    RenderOptions o;
+    o.roundTripSamples = TakeRenderer::roundTripFor (take, sources.readOffset());
+    const auto span = TakeRenderer::computeAudioSpan (take, o);
+    REQUIRE (audio.getNumSamples() == span.numSamples);
+
+    for (int i = 0; i < 2000; i += 41)
+        CHECK (audio.getSample (0, i) == Catch::Approx (sine (span.startSample + i)).margin (1.0e-6));
+
+    // An offset change later must not re-render it from the new clock (the old epoch's audio is gone)
+    after.runTo (after.position + (int64_t) (0.5 * 44100.0), 512);
+    worker.runStepForTests();
+    mode = 1.0f;
+    offsetMs = 100.0f;
+    worker.runStepForTests();
+    const auto second = worker.getWavState (take.number);
+    CHECK (second.kind == TakeWavState::Kind::ready);
+    CHECK (second.file == first.file);
+    CHECK (second.file.existsAsFile());
+}

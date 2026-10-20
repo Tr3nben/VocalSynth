@@ -162,7 +162,16 @@ TEST_CASE ("TakeSegmenter: a transport start ends a free take; sounding notes co
     CHECK (open.events[0].synthetic);
     CHECK (open.events[0].sample == 48000);
     CHECK (open.events[0].event == VsEvent::makeNoteOn (0, 1, 60, 100));
-    CHECK (open.noteCount == 0); // counted when the take closes
+    CHECK (open.noteCount == 1); // kept up to date while the take is open (the status line shows it)
+
+    // Every note-on that arrives while the take is open counts at once
+    f.noteOff (60000, 60);
+    f.noteOn (70000, 62);
+    REQUIRE (f.segmenter.getOpenTake() != nullptr);
+    CHECK (f.segmenter.getOpenTake()->noteCount == 2);
+    f.noteOff (80000, 62);
+    f.noteOn (90000, 64);
+    CHECK (f.segmenter.getOpenTake()->noteCount == 3);
 }
 
 TEST_CASE ("TakeSegmenter: a loop wrap keeps one take", "[takesegmenter]")

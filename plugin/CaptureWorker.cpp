@@ -104,7 +104,7 @@ void CaptureWorker::start()
 
     if (manualStepping)
     {
-        prepareHistory();
+        prepareHistory(); // file tasks run on the calling thread
         return;
     }
 
@@ -112,9 +112,10 @@ void CaptureWorker::start()
         const std::scoped_lock lock (controlMutex);
         stopRequested = false;
         suspendRequested = false;
-        parked = false;
+        drainedGeneration = suspendGeneration;
     }
 
+    startFileThread();
     threadRunning.store (true, std::memory_order_release);
     thread = std::thread ([this] { threadLoop(); });
 }
@@ -130,10 +131,14 @@ void CaptureWorker::suspend()
         return;
     }
 
+    // Wait for a drain that started after this request: a suspend() right after resume() must not return
+    // before the worker drained what the audio thread pushed in between (prepare() resets the rings)
     std::unique_lock lock (controlMutex);
     suspendRequested = true;
+    const auto generation = ++suspendGeneration;
     controlCv.notify_all();
-    controlCv.wait (lock, [this] { return parked || ! threadRunning.load (std::memory_order_acquire); });
+    controlCv.wait (lock, [this, generation]
+                    { return drainedGeneration >= generation || ! threadRunning.load (std::memory_order_acquire); });
 }
 
 void CaptureWorker::resume()
@@ -161,8 +166,10 @@ void CaptureWorker::stop()
 
     threadRunning.store (false, std::memory_order_release);
 
-    // The thread is gone (or never existed): its state is ours now
+    // The worker thread is gone (or never existed): its state is ours now. The abort is queued behind the
+    // job's running task; the file thread finishes its queue before it is joined.
     abortWavJob();
+    stopFileThread();
 }
 
 bool CaptureWorker::isRunning() const noexcept
@@ -195,6 +202,101 @@ void CaptureWorker::runStepForTests()
 }
 
 //==============================================================================
+void CaptureWorker::startFileThread()
+{
+    {
+        const std::scoped_lock lock (fileQueueMutex);
+        fileThreadStop = false;
+    }
+
+    fileThread = std::thread ([this] { fileThreadLoop(); });
+}
+
+void CaptureWorker::stopFileThread()
+{
+    if (! fileThread.joinable())
+        return;
+
+    {
+        const std::scoped_lock lock (fileQueueMutex);
+        fileThreadStop = true;
+        fileQueueCv.notify_all();
+    }
+
+    fileThread.join();
+}
+
+void CaptureWorker::fileThreadLoop()
+{
+    std::unique_lock lock (fileQueueMutex);
+
+    for (;;)
+    {
+        fileQueueCv.wait (lock, [this] { return fileThreadStop || ! fileTasks.empty(); });
+
+        if (fileTasks.empty())
+            return; // stop requested and every queued task is done
+
+        auto task = std::move (fileTasks.front());
+        fileTasks.pop_front();
+        lock.unlock();
+
+        try
+        {
+            task();
+        }
+        catch (...)
+        {
+            // Out of memory or a file system error: the task is lost (a WAV job task reports it itself)
+        }
+
+        task = nullptr; // releases what the task held, outside the lock
+        lock.lock();
+    }
+}
+
+void CaptureWorker::postFileTask (std::function<void()> task)
+{
+    if (task == nullptr)
+        return;
+
+    if (fileThread.joinable())
+    {
+        const std::scoped_lock lock (fileQueueMutex);
+        fileTasks.push_back (std::move (task));
+        fileQueueCv.notify_all();
+        return;
+    }
+
+    try
+    {
+        task();
+    }
+    catch (...)
+    {
+    }
+}
+
+void CaptureWorker::postJobTask (const std::shared_ptr<WavJob>& job, std::function<void (WavJob&)> jobTask)
+{
+    job->busy.store (true, std::memory_order_release);
+
+    postFileTask ([job, task = std::move (jobTask)]
+    {
+        try
+        {
+            task (*job);
+        }
+        catch (...)
+        {
+            job->failed = true;
+        }
+
+        job->busy.store (false, std::memory_order_release);
+    });
+}
+
+//==============================================================================
 void CaptureWorker::threadLoop()
 {
     prepareHistory();
@@ -205,16 +307,22 @@ void CaptureWorker::threadLoop()
     {
         if (suspendRequested)
         {
-            // Drain what the audio thread left in the rings (it is stopped now), then park until resumed:
-            // the processor reallocates the rings in CaptureTap::prepare() meanwhile
-            lock.unlock();
-            safeStep();
-            lock.lock();
+            if (drainedGeneration != suspendGeneration)
+            {
+                // Drain what the audio thread left in the rings (it is stopped now), then park until
+                // resumed: the processor reallocates the rings in CaptureTap::prepare() meanwhile
+                const auto generation = suspendGeneration;
+                lock.unlock();
+                safeStep();
+                lock.lock();
 
-            parked = true;
-            controlCv.notify_all();
-            controlCv.wait (lock, [this] { return stopRequested || ! suspendRequested; });
-            parked = false;
+                drainedGeneration = generation;
+                controlCv.notify_all();
+                continue; // another suspend() may have come meanwhile: drain again for it
+            }
+
+            controlCv.wait (lock, [this]
+                            { return stopRequested || ! suspendRequested || drainedGeneration != suspendGeneration; });
             continue;
         }
 
@@ -230,8 +338,10 @@ void CaptureWorker::threadLoop()
     controlCv.notify_all();
 }
 
-void CaptureWorker::prepareHistory()
+void CaptureWorker::prepareHistory() noexcept
 {
+    lastPrepareAttemptMs = nowMs();
+
     try
     {
         const auto options = getOptions();
@@ -241,16 +351,28 @@ void CaptureWorker::prepareHistory()
         appliedOffset = sources.readOffset();
         historyPrepared = true;
     }
-    catch (const std::exception&)
+    catch (...)
     {
-        historyPrepared = false; // out of memory: retried at the next step, the rings are discarded meanwhile
+        historyPrepared = false; // out of memory: retried later, the rings are discarded meanwhile
     }
 
-    // Folders of instances that did not shut down (crash, killed host) and stopped beating a day ago
-    if (instanceFolder != juce::File())
-        CaptureExporter::deleteStaleInstanceFolders (instanceFolder.getParentDirectory(), instanceFolder.getFileName());
+    lastHeartbeatMs = lastPrepareAttemptMs;
 
-    lastHeartbeatMs = nowMs();
+    if (staleCleanupPosted || instanceFolder == juce::File())
+        return;
+
+    // Folders of instances that did not shut down (crash, killed host) and stopped beating a day ago:
+    // once, on the file thread
+    staleCleanupPosted = true;
+
+    try
+    {
+        postFileTask ([root = instanceFolder.getParentDirectory(), keep = instanceFolder.getFileName()]
+                      { CaptureExporter::deleteStaleInstanceFolders (root, keep); });
+    }
+    catch (...)
+    {
+    }
 }
 
 void CaptureWorker::safeStep() noexcept
@@ -259,7 +381,7 @@ void CaptureWorker::safeStep() noexcept
     {
         step();
     }
-    catch (const std::exception&)
+    catch (...)
     {
         // Out of memory or a file system error: skip this step, the next one tries again
     }
@@ -270,11 +392,12 @@ void CaptureWorker::step()
 {
     if (! historyPrepared)
     {
-        prepareHistory();
+        // Out of memory at the start: retry once a second, keep the rings flowing meanwhile
+        if (nowMs() - lastPrepareAttemptMs >= 1000.0)
+            prepareHistory();
 
         if (! historyPrepared)
         {
-            // Keep the rings flowing (nothing can be stored)
             CaptureRecord r;
             float f = 0.0f;
 
@@ -284,16 +407,36 @@ void CaptureWorker::step()
         }
     }
 
-    // Options (non-parameter state) and the offset parameters
+    // Options (non-parameter state). The take gap cannot fail; the audio look-back allocates and is
+    // applied after the drain, so a failing allocation never keeps the rings from being drained.
     const auto options = getOptions();
-
     const std::not_equal_to<double> differs;
 
     if (differs (options.takeGapSeconds, appliedOptions.takeGapSeconds))
+    {
         segmenter.setTakeGapSeconds (options.takeGapSeconds);
+        appliedOptions.takeGapSeconds = options.takeGapSeconds;
+    }
+
+    // Drain the rings into the history and the segmenter
+    closedScratch.clear();
+    drainer.drain (tap, history, segmenter, closedScratch);
+    const auto clock = drainer.getLastClock();
+    const auto now = nowMs();
 
     if (differs (options.audioHistoryMinutes, appliedOptions.audioHistoryMinutes))
-        history.setAudioHistoryMinutes (options.audioHistoryMinutes);
+    {
+        appliedOptions.audioHistoryMinutes = options.audioHistoryMinutes; // applied (or given up) once
+
+        try
+        {
+            history.setAudioHistoryMinutes (options.audioHistoryMinutes);
+        }
+        catch (...)
+        {
+            // Out of memory: the look-back stays as it was until the option changes again
+        }
+    }
 
     if (differs (options.freePreRollMs, appliedOptions.freePreRollMs) || options.wavFormat != appliedOptions.wavFormat)
         rendersDirty = true;
@@ -305,12 +448,6 @@ void CaptureWorker::step()
         appliedOffset = offset;
         rendersDirty = true;
     }
-
-    // Drain the rings into the history and the segmenter
-    closedScratch.clear();
-    drainer.drain (tap, history, segmenter, closedScratch);
-    const auto clock = drainer.getLastClock();
-    const auto now = nowMs();
 
     // The host stopped calling processBlock: a free take would never see its gap elapse on the audio clock
     if (clock != lastClock)
@@ -343,13 +480,14 @@ void CaptureWorker::step()
     }
 
     runWavJob();
+    releaseRetainedAudioIfUnused();
     updateOpenTakeSnapshot (manualStepping || now - lastSnapshotMs >= openTakeSnapshotIntervalMs);
     updateStatus (clock);
 
     if (now - lastHeartbeatMs >= heartbeatIntervalSeconds * 1000.0)
     {
         lastHeartbeatMs = now;
-        CaptureExporter::touchHeartbeat (instanceFolder);
+        postFileTask ([folder = instanceFolder] { CaptureExporter::touchHeartbeat (folder); });
     }
 }
 
@@ -371,8 +509,17 @@ void CaptureWorker::processClosedTake (Take&& take, int64_t clock)
     // Refinement first: the origin (and so the WAV span) uses the refined first note-on
     refineOnsets (take);
 
+    // The list shows the notes the export has (Raw): a synthetic note-on that the host-time clamp drops
+    // (a note that ended just before Play or a split) is not one, and a take without any is not listed
+    auto rawOptions = wavRenderOptions (take);
+    rawOptions.version = ExportVersion::raw;
+    take.noteCount = TakeRenderer::render (take, rawOptions).noteCount;
+
+    if (take.noteCount == 0)
+        return;
+
     const auto span = TakeRenderer::computeAudioSpan (take, wavRenderOptions (take));
-    take.audio = audioAvailability (span);
+    take.audio = audioAvailability (span, take.clockEpoch);
 
     if (take.audio != TakeAudio::none)
         computeOverview (take, span);
@@ -382,7 +529,7 @@ void CaptureWorker::processClosedTake (Take&& take, int64_t clock)
 
 void CaptureWorker::refineOnsets (Take& take) const
 {
-    const auto range = history.getAudioRange();
+    const auto range = history.getAudioRange (take.clockEpoch);
 
     if (range.to <= range.from)
         return;
@@ -413,7 +560,7 @@ void CaptureWorker::refineOnsets (Take& take) const
             continue;
 
         audio.resize (static_cast<std::size_t> (to - from));
-        history.readAudio (from, std::span<float> { audio });
+        history.readAudio (take.clockEpoch, from, std::span<float> { audio });
 
         single.events[0] = event;
         TakeRenderer::refineNoteOnsets (single, std::span<const float> { audio }, from);
@@ -421,9 +568,9 @@ void CaptureWorker::refineOnsets (Take& take) const
     }
 }
 
-TakeAudio CaptureWorker::audioAvailability (const AudioSpan& span) const noexcept
+TakeAudio CaptureWorker::audioAvailability (const AudioSpan& span, uint32_t clockEpoch) const noexcept
 {
-    const auto range = history.getAudioRange();
+    const auto range = history.getAudioRange (clockEpoch);
     const auto end = span.startSample + span.numSamples;
 
     if (span.numSamples <= 0 || range.to <= range.from || range.to <= span.startSample || range.from >= end)
@@ -445,7 +592,7 @@ void CaptureWorker::computeOverview (Take& take, const AudioSpan& span) const
         const auto first = span.startSample + static_cast<int64_t> (p) * perPoint;
         const auto n = static_cast<std::size_t> (std::min<int64_t> (static_cast<int64_t> (block.size()),
                                                                     span.startSample + span.numSamples - first));
-        history.readAudio (first, std::span<float> { block.data(), n });
+        history.readAudio (take.clockEpoch, first, std::span<float> { block.data(), n });
 
         for (std::size_t i = 0; i < n && p < points; i += perPoint, ++p)
         {
@@ -526,15 +673,18 @@ void CaptureWorker::deleteCachedWav (const TakeWavState& state)
     if (state.kind != TakeWavState::Kind::ready)
         return;
 
-    const std::scoped_lock lock (fileMutex);
-    state.file.deleteFile();
+    postFileTask ([this, file = state.file]
+    {
+        const std::scoped_lock lock (fileMutex);
+        file.deleteFile();
+    });
 }
 
 void CaptureWorker::checkWavRenders()
 {
     // The offset parameters, the free pre-roll or the WAV format changed: re-render cached WAVs whose span
-    // or format differs, while the history still holds their audio
-    const auto range = history.getAudioRange();
+    // or format differs, while the history still holds their audio (of the take's own clock epoch: after a
+    // sample-rate change the clock restarts, old spans never address new audio)
     std::vector<int> toQueue;
     std::vector<TakeWavState> outdated;
     bool restartJob = false;
@@ -552,8 +702,10 @@ void CaptureWorker::checkWavRenders()
             if (span == e.wavSpan && e.wavFormat == appliedOptions.wavFormat)
                 continue;
 
+            const auto range = history.getAudioRange (e.take->clockEpoch);
+
             if (range.to <= range.from || range.from > span.startSample)
-                continue; // evicted: keep the WAV as it is
+                continue; // evicted (or an earlier epoch that is gone): keep the WAV as it is
 
             e.wavSpan = span;
             e.wavFormat = appliedOptions.wavFormat;
@@ -595,120 +747,140 @@ void CaptureWorker::checkWavRenders()
 
 void CaptureWorker::runWavJob()
 {
-    if (wavJob == nullptr)
+    // At most one slice per step, and only when the job's last file task is done: draining keeps its
+    // rhythm and never waits on the disk (the file thread does the I/O)
+    for (int actions = 0; actions < 4; ++actions)
     {
-        while (! wavQueue.empty() && wavJob == nullptr)
+        if (wavJob == nullptr && ! startNextWavJob())
+            return;
+
+        auto& job = *wavJob;
+
+        if (job.busy.load (std::memory_order_acquire))
+            return;
+
+        if (job.failed)
         {
-            const auto number = wavQueue.front();
-            wavQueue.pop_front();
-
-            std::shared_ptr<const Take> take;
-            AudioSpan span;
-            WavSampleFormat format = WavSampleFormat::pcm24;
-
-            {
-                const std::scoped_lock lock (listMutex);
-
-                for (auto& e : entries)
-                    if (e.take->number == number)
-                    {
-                        e.wavQueued = false;
-                        take = e.take;
-                        span = e.wavSpan;
-                        format = e.wavFormat;
-                    }
-            }
-
-            if (take == nullptr || span.numSamples <= 0)
-                continue;
-
-            auto job = std::make_unique<WavJob>();
-            job->takeNumber = number;
-            job->take = take;
-            job->span = span;
-            job->format = format;
-
-            const auto rendered = TakeRenderer::render (*take, wavRenderOptions (*take));
-            const auto target = instanceFolder.getChildFile (CaptureExporter::makeWavFileName (*take, rendered));
-
-            // The instance folder is created with its first file (pluginval instances leave nothing behind)
-            if (! instanceFolder.createDirectory()
-                || ! job->writer.open (target, take->sampleRate, format, static_cast<uint64_t> (span.numSamples)))
-            {
-                const std::scoped_lock lock (listMutex);
-
-                for (auto& e : entries)
-                    if (e.take->number == number && e.wav.kind == TakeWavState::Kind::preparing)
-                        e.wav.kind = TakeWavState::Kind::unavailable;
-
-                bumpVersion();
-                continue;
-            }
-
-            if (lastHeartbeatMs <= 0.0 || ! instanceFolder.getChildFile (CaptureExporter::heartbeatFileName).exists())
-                CaptureExporter::touchHeartbeat (instanceFolder);
-
-            wavJob = std::move (job);
+            failWavJob();
+            continue;
         }
 
-        if (wavJob == nullptr)
-            return;
-    }
+        if (job.stage == WavJob::Stage::finishing)
+        {
+            completeWavJob();
+            continue;
+        }
 
-    // One slice per step: draining keeps its rhythm and stop() returns promptly
-    auto& job = *wavJob;
-    const auto written = static_cast<int64_t> (job.writer.getFramesWritten());
-    const auto remaining = job.span.numSamples - written;
-    const auto n = static_cast<std::size_t> (std::min<int64_t> (wavFramesPerStep, remaining));
+        if (job.stage == WavJob::Stage::opening)
+            job.stage = WavJob::Stage::writing; // the open task succeeded
 
-    if (n > 0)
-    {
-        const auto from = job.span.startSample + written;
-        const auto range = history.getAudioRange();
+        const auto remaining = job.span.numSamples - job.framesRead;
+        const auto n = static_cast<std::size_t> (std::clamp<int64_t> (remaining, 0, wavFramesPerStep));
+
+        if (n == 0)
+        {
+            job.stage = WavJob::Stage::finishing;
+            postJobTask (wavJob, [this] (WavJob& j)
+            {
+                const std::scoped_lock fileLock (fileMutex);
+                j.result = j.writer.finish();
+
+                if (j.result == juce::File())
+                    j.failed = true;
+            });
+            continue; // done at once without a file thread (manual stepping)
+        }
+
+        const auto from = job.span.startSample + job.framesRead;
+        const auto range = history.getAudioRange (job.take->clockEpoch);
 
         if (range.from > from || range.to < from + static_cast<int64_t> (n))
             job.truncated = true; // evicted meanwhile (or never captured): silence there
 
-        wavBuffer.resize (n);
-        history.readAudio (from, std::span<float> { wavBuffer });
+        job.buffer.resize (n);
+        history.readAudio (job.take->clockEpoch, from, std::span<float> { job.buffer });
+        job.framesRead += static_cast<int64_t> (n);
 
-        if (! job.writer.write (std::span<const float> { wavBuffer }))
+        postJobTask (wavJob, [] (WavJob& j)
         {
-            abortWavJob();
-            return;
-        }
+            if (! j.writer.write (std::span<const float> { j.buffer }))
+                j.failed = true;
+        });
+        return;
     }
-
-    if (job.writer.getFramesWritten() >= job.writer.getNumFrames())
-        finishWavJob();
 }
 
-void CaptureWorker::finishWavJob()
+bool CaptureWorker::startNextWavJob()
 {
-    auto job = std::move (wavJob);
+    while (! wavQueue.empty())
+    {
+        const auto number = wavQueue.front();
+        wavQueue.pop_front();
+
+        std::shared_ptr<const Take> take;
+        AudioSpan span;
+        WavSampleFormat format = WavSampleFormat::pcm24;
+
+        {
+            const std::scoped_lock lock (listMutex);
+
+            for (auto& e : entries)
+                if (e.take->number == number)
+                {
+                    e.wavQueued = false;
+                    take = e.take;
+                    span = e.wavSpan;
+                    format = e.wavFormat;
+                }
+        }
+
+        if (take == nullptr || span.numSamples <= 0)
+            continue;
+
+        auto job = std::make_shared<WavJob>();
+        job->takeNumber = number;
+        job->take = take;
+        job->span = span;
+        job->format = format;
+
+        const auto rendered = TakeRenderer::render (*take, wavRenderOptions (*take));
+        const auto target = instanceFolder.getChildFile (CaptureExporter::makeWavFileName (*take, rendered));
+        wavJob = job;
+
+        // The instance folder is created with its first file (pluginval instances leave nothing behind)
+        postJobTask (job, [folder = instanceFolder, target, rate = take->sampleRate, format,
+                           frames = static_cast<uint64_t> (span.numSamples)] (WavJob& j)
+        {
+            if (! folder.createDirectory() || ! j.writer.open (target, rate, format, frames))
+            {
+                j.failed = true;
+                return;
+            }
+
+            if (! folder.getChildFile (CaptureExporter::heartbeatFileName).exists())
+                CaptureExporter::touchHeartbeat (folder);
+        });
+
+        return true;
+    }
+
+    return false;
+}
+
+void CaptureWorker::completeWavJob()
+{
+    const auto job = std::move (wavJob);
     TakeWavState previous;
-    juce::File file;
 
     {
-        const std::scoped_lock fileLock (fileMutex);
-        file = job->writer.finish();
-
         const std::scoped_lock lock (listMutex);
 
         for (auto& e : entries)
             if (e.take->number == job->takeNumber)
             {
                 previous = e.wav;
-
-                if (file == juce::File())
-                {
-                    e.wav = {};
-                }
-                else
-                {
-                    e.wav.kind = TakeWavState::Kind::ready;
-                    e.wav.file = file;
-                }
+                e.wav.kind = TakeWavState::Kind::ready;
+                e.wav.file = job->result;
 
                 if (job->truncated && e.take->audio == TakeAudio::full)
                 {
@@ -717,12 +889,18 @@ void CaptureWorker::finishWavJob()
                     e.take = std::move (copy);
                 }
             }
-
-        // A re-render replaced an older cached file under another name (numbered sibling)
-        if (previous.kind == TakeWavState::Kind::ready && previous.file != file)
-            previous.file.deleteFile();
     }
 
+    // A re-render replaced an older cached file under another name (numbered sibling)
+    if (previous.kind == TakeWavState::Kind::ready && previous.file != job->result)
+        deleteCachedWav (previous);
+
+    bumpVersion();
+}
+
+void CaptureWorker::failWavJob()
+{
+    abortWavJob(); // the take's WAV becomes unavailable
     bumpVersion();
 }
 
@@ -731,9 +909,21 @@ void CaptureWorker::abortWavJob()
     if (wavJob == nullptr)
         return;
 
-    const auto number = wavJob->takeNumber;
-    wavJob->writer.abort();
-    wavJob.reset();
+    const auto job = std::move (wavJob);
+    const auto number = job->takeNumber;
+
+    // Queued behind the job's running task (the file thread keeps the order); deletes the temporary file
+    // and, if it already finished, the result nobody will list
+    postFileTask ([this, job]
+    {
+        job->writer.abort();
+
+        if (job->result != juce::File())
+        {
+            const std::scoped_lock lock (fileMutex);
+            job->result.deleteFile();
+        }
+    });
 
     if (number != 0)
     {
@@ -743,6 +933,27 @@ void CaptureWorker::abortWavJob()
             if (e.take->number == number && e.wav.kind == TakeWavState::Kind::preparing)
                 e.wav.kind = TakeWavState::Kind::unavailable;
     }
+}
+
+void CaptureWorker::releaseRetainedAudioIfUnused()
+{
+    if (! history.hasRetainedAudio())
+        return;
+
+    const auto epoch = history.getRetainedEpoch();
+
+    if (wavJob != nullptr && wavJob->take->clockEpoch == epoch)
+        return;
+
+    {
+        const std::scoped_lock lock (listMutex);
+
+        for (const auto& e : entries)
+            if (e.take->clockEpoch == epoch && e.wavQueued)
+                return;
+    }
+
+    history.releaseRetainedAudio();
 }
 
 void CaptureWorker::updateOpenTakeSnapshot (bool due)

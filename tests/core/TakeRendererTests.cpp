@@ -963,3 +963,193 @@ TEST_CASE ("TakeRenderer: a note held across an overflow gap stays one note (res
         CHECK (notes[4] == SimpleNote { 4800, 5200, 62 });
     }
 }
+
+//==============================================================================
+// M3 review fixes (F1, F2, F3, F5, F6)
+
+TEST_CASE ("TakeRenderer: tick 0 and the bar never follow a note the clamp drops", "[takerenderer]")
+{
+    // 120 BPM, transport from sample 0 (bar 1), Auto round trip 4096. A note hummed until 30 ms before
+    // Play: the segmenter opens it at the take start (synthetic note-on), its note-off is emitted after
+    // Play but its compensated time lies before the start, so the clamp drops it. The first real note is
+    // sung on bar 9 beat 1 (beat 32).
+    const int64_t rt = 4096;
+    auto take = syncedTake (sr48, 120.0, 4, 4, 0, 0.0, sampleAt (sr48, 120.0, 40.0));
+    addEvent (take, 0, 0, VsEvent::makeNoteOn (0, 1, 57, 100), 0, EventTimingKind::none, true);
+    addEvent (take, rt - 1440, 1100, VsEvent::makeNoteOff (0, 1, 57));
+    addNote (take, 60, sampleAt (sr48, 120.0, 32.0) + rt, sampleAt (sr48, 120.0, 33.0) + rt);
+    sortEvents (take);
+
+    for (const auto version : { ExportVersion::raw, ExportVersion::clean })
+    {
+        RenderOptions options;
+        options.version = version;
+        options.roundTripSamples = rt;
+        const auto r = TakeRenderer::render (take, options);
+        checkInvariants (r);
+        CHECK (r.originBar == 9);
+        CHECK (r.originBeats == 32.0);
+        CHECK (pairedNotes (r) == std::vector<SimpleNote> { { 0, 960, 60 } });
+        CHECK (r.audio.startSample == sampleAt (sr48, 120.0, 32.0) + rt); // the WAV starts at that bar too
+        CHECK (TakeRenderer::computeAudioSpan (take, options) == r.audio);
+    }
+
+    // Only the dropped note: nothing to export (the worker does not list such a take)
+    auto onlyDropped = syncedTake (sr48, 120.0, 4, 4, 0, 0.0, sampleAt (sr48, 120.0, 40.0));
+    addEvent (onlyDropped, 0, 0, VsEvent::makeNoteOn (0, 1, 57, 100), 0, EventTimingKind::none, true);
+    addEvent (onlyDropped, rt - 1440, 1100, VsEvent::makeNoteOff (0, 1, 57));
+    auto options = raw();
+    options.roundTripSamples = rt;
+    const auto empty = TakeRenderer::render (onlyDropped, options);
+    CHECK (empty.noteCount == 0);
+    CHECK (empty.originBar == 1);
+}
+
+TEST_CASE ("TakeRenderer: Clean merges two transition notes in a row", "[takerenderer]")
+{
+    // A legato scoop C4 (400 ms), C#4 (50 ms), D4 (50 ms), E4 (400 ms): both transition notes go to E4
+    const auto ms = [] (double v) { return static_cast<int64_t> (std::llround (v * 48.0)); };
+    auto take = freeTake (sr48, 120.0);
+    const int64_t t0 = 100000;
+    addNote (take, 60, t0, t0 + ms (400));
+    addNote (take, 61, t0 + ms (400), t0 + ms (450));
+    addNote (take, 62, t0 + ms (450), t0 + ms (500));
+    addNote (take, 64, t0 + ms (500), t0 + ms (900));
+    sortEvents (take);
+
+    CHECK (pairedNotes (TakeRenderer::render (take, raw())).size() == 4);
+
+    const auto r = TakeRenderer::render (take, RenderOptions {});
+    checkInvariants (r);
+    CHECK (pairedNotes (r) == std::vector<SimpleNote> { { 0, 768, 60 }, { 768, 1728, 64 } });
+
+    // Three in a row (C4, C#4, D4, D#4, E4, 40 ms each) merge as well
+    auto three = freeTake (sr48, 120.0);
+    addNote (three, 60, t0, t0 + ms (400));
+    addNote (three, 61, t0 + ms (400), t0 + ms (440));
+    addNote (three, 62, t0 + ms (440), t0 + ms (480));
+    addNote (three, 63, t0 + ms (480), t0 + ms (520));
+    addNote (three, 64, t0 + ms (520), t0 + ms (900));
+    sortEvents (three);
+    CHECK (pairedNotes (TakeRenderer::render (three, RenderOptions {})) == std::vector<SimpleNote> { { 0, 768, 60 }, { 768, 1728, 64 } });
+
+    // A sung note between two transitions is no transition (120 ms or longer): it stays
+    auto held = freeTake (sr48, 120.0);
+    addNote (held, 60, t0, t0 + ms (400));
+    addNote (held, 61, t0 + ms (400), t0 + ms (450));
+    addNote (held, 62, t0 + ms (450), t0 + ms (650));
+    addNote (held, 64, t0 + ms (650), t0 + ms (1000));
+    sortEvents (held);
+    const auto h = pairedNotes (TakeRenderer::render (held, RenderOptions {}));
+    REQUIRE (h.size() == 3);
+    CHECK (h[1] == SimpleNote { 768, 1248, 62 }); // took C#4's time
+}
+
+TEST_CASE ("TakeRenderer: quantize lays the grid out per bar (1/4 in 7/8 keeps every downbeat)", "[takerenderer]")
+{
+    // 7/8 at 120 BPM: a bar is 3.5 quarters = 3360 ticks; 1 tick = 25 samples
+    const auto tickToSample = [] (int64_t tick) { return tick * 25; };
+    auto take = syncedTake (sr48, 120.0, 7, 8);
+    const std::vector<std::pair<int64_t, int64_t>> cases {
+        { 0, 0 },         // downbeats stay where they are
+        { 3360, 3360 },
+        { 6720, 6720 },
+        { 10080, 10080 },
+        { 3260, 3360 },   // just before the bar line of bar 2: to the bar line
+        { 4360, 4320 },   // grid lines of bar 2: 3360, 4320, 5280, 6240 (+ bar line 6720)
+        { 6000, 6240 },
+        { 6600, 6720 },   // the short last step before the bar line
+    };
+
+    uint8_t pitch = 40;
+
+    for (const auto& [tick, expected] : cases)
+    {
+        addNote (take, pitch, tickToSample (tick), tickToSample (tick + 50));
+        pitch = static_cast<uint8_t> (pitch + 2);
+    }
+
+    sortEvents (take);
+    auto options = raw();
+    options.quantize = QuantizeGrid::quarter;
+    const auto r = TakeRenderer::render (take, options);
+    checkInvariants (r);
+    REQUIRE (r.originBar == 1);
+
+    std::vector<std::pair<int, int64_t>> got;
+
+    for (const auto& n : pairedNotes (r))
+        got.emplace_back (n.pitch, n.start);
+
+    std::sort (got.begin(), got.end());
+    REQUIRE (got.size() == cases.size());
+
+    for (std::size_t i = 0; i < cases.size(); ++i)
+    {
+        INFO ("note at tick " << cases[i].first);
+        CHECK (got[i].second == cases[i].second);
+    }
+
+    // In 4/4 the per-bar grid is the plain grid from tick 0 (the grid tests above), and quantized ends in
+    // 7/8 also land on per-bar lines
+    auto ends = syncedTake (sr48, 120.0, 7, 8);
+    addNote (ends, 60, tickToSample (100), tickToSample (6700)); // ends just before the bar line of bar 3
+    sortEvents (ends);
+    options.quantizeEnds = true;
+    CHECK (pairedNotes (TakeRenderer::render (ends, options)) == std::vector<SimpleNote> { { 0, 6720, 60 } });
+}
+
+TEST_CASE ("TakeRenderer: synced test-pattern takes have no round trip for their events", "[takerenderer]")
+{
+    // The pattern is generated at the block's playhead: its events sit where FL played them. The input
+    // audio still arrives a round trip late, so the WAV span keeps it.
+    auto take = syncedTake (sr48, 120.0);
+    take.settings.testPattern = true;
+    const CaptureOffsetSettings automatic;
+    const auto rt = TakeRenderer::roundTripFor (take, automatic);
+    REQUIRE (rt == 4096);
+
+    addEvent (take, 1000, 0, VsEvent::makeNoteOn (0, 1, 60, 100), 0, EventTimingKind::none); // just after Play
+    addEvent (take, 4000, 0, VsEvent::makeNoteOff (0, 1, 60), 0, EventTimingKind::none);
+    addEvent (take, sampleAt (sr48, 120.0, 1.0), 0, VsEvent::makeNoteOn (0, 1, 62, 100), 0, EventTimingKind::none);
+    addEvent (take, sampleAt (sr48, 120.0, 2.0), 0, VsEvent::makeNoteOff (0, 1, 62), 0, EventTimingKind::none);
+    sortEvents (take);
+
+    auto options = raw();
+    options.roundTripSamples = rt;
+    const auto r = TakeRenderer::render (take, options);
+    checkInvariants (r);
+    CHECK (r.originBar == 1);
+    CHECK (pairedNotes (r) == std::vector<SimpleNote> { { 40, 160, 60 }, { 960, 1920, 62 } });
+    CHECK (r.audio.startSample == rt);
+
+    // A sung (Voice) take with the same events is shifted by the round trip
+    auto voice = take;
+    voice.settings.testPattern = false;
+    const auto v = pairedNotes (TakeRenderer::render (voice, options));
+    REQUIRE (v.size() == 1); // the first note lies before Play in compensated time: dropped
+    CHECK (v[0] == SimpleNote { 960 - 164, 1920 - 164, 62 });
+}
+
+TEST_CASE ("TakeRenderer: a free grab ends at the grab moment", "[takerenderer]")
+{
+    // Grab at sample 480000 (transport stopped); the grab collected events for 250 ms after it
+    auto take = freeTake (sr48, 120.0);
+    take.kind = TakeKind::grab;
+    take.startSample = 0;
+    take.endSample = 480000;
+    take.captureEndSample = 480000 + 12000;
+    addNote (take, 60, 100000, 200000);
+    addEvent (take, 400000, 1100, VsEvent::makeNoteOn (0, 1, 62, 100));                     // sounding at the click
+    addEvent (take, 480000 + 4800, 1100, VsEvent::makeNoteOn (0, 1, 64, 100));              // sung 100 ms after it
+    addEvent (take, 480000 + 12000, 0, VsEvent::makeNoteOff (0, 1, 62), 0, EventTimingKind::none, true);
+    addEvent (take, 480000 + 12000, 0, VsEvent::makeNoteOff (0, 1, 64), 0, EventTimingKind::none, true);
+    sortEvents (take);
+
+    const auto r = TakeRenderer::render (take, raw());
+    checkInvariants (r);
+    // Ticks from the first note-on at 120 BPM: 25 samples per tick
+    CHECK (pairedNotes (r) == std::vector<SimpleNote> { { 0, 4000, 60 }, { 12000, 15200, 62 } });
+    CHECK (r.endTick == 15200);
+    CHECK (r.audio == AudioSpan { 100000, 380000 }); // the WAV ends at the grab moment as well
+}

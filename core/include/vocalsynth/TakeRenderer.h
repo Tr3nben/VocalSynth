@@ -82,15 +82,21 @@ struct RenderedTake
 
     Order (binding): compensation -> version -> quantize -> pairing / clamping.
     1. Compensation. Event time t = estimatedSample (Clean note-ons: refinedSample when set) minus
-       options.roundTripSamples for synced takes (free takes: no round trip, spec 5).
-       Synced takes: t is clamped into [take.startSample, take.endSample] (host-time span, see Take): a note
-       whose compensated end is <= startSample or whose compensated start is >= endSample is dropped, other
-       notes are cut to the span (what arrived in the capture tail after endSample was sung before it).
-       Origin (shared by Raw, Clean, every quantize setting and the WAV): the take's first note-on (lowest
-       emit sample; synthetic ones count) at o = refinedSample if set, else estimatedSample, independent of
-       options.version (the worker refines before publishing, so Raw and Clean agree), then
-       - synced: originBeats = start of the bar containing timeline.beatsAt (clamp (o - roundTrip, start,
-         end)) (TakeTimeline::barAt, with its snap tolerance); ticks = llround ((beatsAt (t) - originBeats)
+       options.roundTripSamples for synced takes (free takes: no round trip, spec 5; test-pattern takes:
+       no round trip for the events either, the pattern is generated at the block's playhead and has no
+       input latency, but the WAV span keeps it: the input audio still arrives a round trip late).
+       t is clamped into the kept span (host-time span, see Take): synced [take.startSample,
+       take.endSample], free (-inf, take.endSample]. A note whose compensated end is <= startSample
+       (synced) or whose compensated start is >= endSample is dropped, other notes are cut to the span
+       (synced: what arrived in the capture tail after endSample was sung before it; free grab: a note
+       started in the detection tail after the grab moment is not part of the grab).
+       Origin (shared by Raw, Clean, every quantize setting and the WAV): the earliest compensated start
+       o (refinedSample if set, else estimatedSample; synthetic note-ons count) among the notes that
+       survive the clamp, independent of options.version (the worker refines before publishing, so Raw
+       and Clean agree); a note the clamp drops never decides tick 0 or the bar in the file name; no
+       surviving note: o = take.startSample. Then
+       - synced: originBeats = start of the bar containing timeline.beatsAt (clamp (o, start, end))
+         (TakeTimeline::barAt, with its snap tolerance); ticks = llround ((beatsAt (t) - originBeats)
          * ppq);
        - free: s0 = o - freePreRollMs; ticks = llround ((t - s0) / sr * freeBpm / 60 * ppq).
        Events before the origin clamp to tick 0.
@@ -99,10 +105,13 @@ struct RenderedTake
        across a ring overflow stays one note, as the synth heard it). Clean (first stage): correction merge (EventTimingFlags::correction), ghost notes
        < max (cleanMinNoteMs, settings.minNoteLengthMs) removed, transition notes (< cleanTransitionMaxMs
        between two notes with a gap <= cleanTransitionMaxGapMs, pitch between its neighbours) merged into
-       the following note, octave strays (< cleanOctaveStrayMaxMs, >= cleanOctaveStraySemitones from both
-       neighbours) removed. Clean never moves a note by more than the merged span.
+       the following note; a run of transition notes merges completely: the previous neighbour is the
+       nearest kept note, the length test uses each note's sung length), octave strays
+       (< cleanOctaveStrayMaxMs, >= cleanOctaveStraySemitones from both neighbours) removed. Clean never
+       moves a note by more than the merged span.
     3. Quantize (synced takes only, never free): note starts move strength * (nearest grid line - start)
-       (grid lines at multiples of quantizeGridTicks from tick 0 = a bar start); ends to the nearest grid
+       (grid lines at multiples of quantizeGridTicks from every bar start of the rendered time-signature
+       map, plus the bar lines: in 7/8 a 1/4 grid keeps every downbeat); ends to the nearest grid
        line when quantizeEnds (length >= half a grid step); bends and CCs that belong to a note move with
        its start (clamped into the note).
     4. Pairing / clamping: note-offs without a sounding note are dropped; every note-on has a note-off
@@ -139,7 +148,7 @@ public:
     static RenderedTake render (const Take& take, const RenderOptions& options);
 
     /** computeRoundTripSamples (offset, take.maxBlockSize, take.sampleRate) for synced takes, 0 for free
-        takes. */
+        takes. Synced test-pattern takes get it as well; render() applies it to their WAV span only (see 1.). */
     static int64_t roundTripFor (const Take& take, const CaptureOffsetSettings& offset) noexcept;
 
     /** The WAV span of render (take, options).audio without rendering the events (worker: WAV cache).

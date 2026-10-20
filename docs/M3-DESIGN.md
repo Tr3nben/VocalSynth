@@ -299,8 +299,11 @@ chunk pushes at most 16 audio frames + 1024 events at once, far below the capaci
 - Event ring: `eventCapacity = 2^18` records (events, markers, settings, gaps; not audio / transport) =
   8 MiB, allocated in `prepare()` on the worker thread. ~22 min of True-mode bends (200/s).
 - Timeline: every transport record goes into a `TakeTimeline` (section 6); segments older than the oldest
-  retained event or audio sample (whichever is older) are evicted (the segment containing it stays). Open
-  takes keep their own timeline (5.2), so this only limits grabs.
+  retained event or audio sample (whichever is older) are evicted (the segment containing it stays), and in
+  any case those older than `timelineLookbackSeconds` = 600 s before the newest sample (an old record that
+  stays in a quiet session must not keep the re-sync segments of tempo automation growing: bound
+  100/s x 600 s x ~72 B = ~4.3 MB). Open takes keep their own timeline (5.2), so this only limits grabs
+  (at most 120 s / 32 bars back).
 - Audio: **RAM, float, in chunks of 65536 samples (256 KiB)**, allocated lazily by the worker as the history
   fills and reused as a ring once full. Capacity = `min (audioHistoryMinutes x 60 x sr, maxAudioBytes / 4)`
   rounded up to whole chunks, `maxAudioBytes = 256 MiB`. No disk spool: simpler (no file failures, no spool
@@ -308,7 +311,10 @@ chunk pushes at most 16 audio frames + 1024 events at once, far below the capaci
 - Eviction: oldest first, events and audio independently. Takes own their events (5.2), so eviction never
   drops a listed take; it only reduces what a grab can reach and can truncate the audio of a very long take.
 - Clear marker: drops everything before the marker but keeps the transport / settings state in force.
-  Clearing reset: drops everything.
+  Clearing reset: drops everything and starts a new clock epoch (`getClockEpoch()`, stored per take as
+  `Take::clockEpoch`): the audio of the ended epoch is moved aside (not copied) and stays readable under its
+  epoch until the worker released it (no take of it needs audio any more), so the take the reset closed
+  still gets its refinement, overview and WAV, and old spans never address the new clock's audio.
 
 Memory and disk per instance (audio look-back 10 min, the default):
 
@@ -551,8 +557,9 @@ Clamped to >= 0. Example: ASIO 2048 at 48 kHz -> 4096 samples = 85.3 ms. rt is a
 (the parameters are read when the user drags, and by the worker for the WAV cache), so changing the offset
 after singing re-times the export. It is **per take**: `TakeRenderer::roundTripFor (take,
 CaptureOffsetSettings)` uses the take's own max block and rate (from its reset record); synced takes only
-(free takes have no grid; spec 5). Musical time of a captured sample s is taken at `s - rt` for MIDI and
-audio: the WAV covers capture-clock samples `[sampleAtBeats (origin) + rt, endSample + rt)`. Compensated
+(free takes have no grid; spec 5). Synced test-pattern takes apply rt to their WAV span only: the pattern
+is generated at the block's playhead (no input latency), the input audio still arrives rt late. Musical
+time of a captured sample s is taken at `s - rt` for MIDI and audio: the WAV covers capture-clock samples `[sampleAtBeats (origin) + rt, endSample + rt)`. Compensated
 synced event times are clamped into the take's host-time span `[startSample, endSample]`; the capture tail
 (5.2) guarantees that every event up to `endSample + rt` is in the take for any rt the parameters allow.
 
@@ -578,9 +585,10 @@ pairing / clamping):
 1. **Compensation and origin.** Event time t = `estimatedSample` (Clean note-ons: `refinedSample` if set),
    minus rt for synced takes; synced times are then clamped into `[startSample, endSample]` (notes entirely
    outside are dropped: sung before the transport start or after Stop / the split). Origin: the take's
-   first note-on (lowest emit sample, synthetic ones included) at `o = refinedSample` if set, else
-   `estimatedSample` - for every version (the worker refines before publishing), so the Clean first note
-   never lies before tick 0. Synced = start of the bar containing `clamp (o - rt, start, end)` (decision 1),
+   earliest compensated note-on start among the notes that survive the clamp (synthetic ones included;
+   `o = refinedSample` if set, else `estimatedSample`, minus rt) - for every version (the worker refines
+   before publishing), so the Clean first note never lies before tick 0, and a note the clamp drops never
+   decides tick 0 or the bar in the file name. Synced = start of the bar containing `clamp (o, start, end)` (decision 1),
    free = `o - freePreRollMs` (default 0). The origin is independent of version and quantize, so Raw, Clean,
    every quantize setting and the WAV share tick 0. Synced ticks `llround ((U (t) - U (origin)) x PPQ)`;
    free ticks from seconds at `freeBpm`. Events before the origin clamp to tick 0.
@@ -591,7 +599,9 @@ pairing / clamping):
    neighbours) merged into the following note, octave strays (< 200 ms, >= 11 semitones from both neighbours)
    removed. Clean never moves a note by more than the merged span.
 3. **Quantize** (synced only; free takes are never quantized): grids 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32
-   (`quantizeGridTicks`: PPQ / 1, 2, 3, 4, 6, 8), start moves `strength x (nearest grid - start)` (llround),
+   (`quantizeGridTicks`: PPQ / 1, 2, 3, 4, 6, 8), laid out per bar of the rendered time-signature map (grid
+   lines from every bar start plus the bar lines: 1/4 in 7/8 keeps every downbeat; in 4/4 / 3/4 this is the
+   plain grid from tick 0), start moves `strength x (nearest grid - start)` (llround),
    ends to the grid when enabled (length >= half a grid step). Bends / CCs of a note move with its start
    (clamped into the note).
 4. **Pairing / clamping.** Unpaired note-offs are dropped (capture switched on mid-note, gaps); every
@@ -733,10 +743,10 @@ text "0.3.0 – M3 capture". Contents (spec 10):
 | Moment | What happens |
 |---|---|
 | constructor | `CaptureTap`, then `CaptureWorker` (member order: the worker is destroyed first; no thread), instance id; no files |
-| `prepareToPlay` | `worker.suspend()` (drains the rings, parks; no-op before the first start) -> `captureTap.prepare (sr, maxBlock)` (rings, reset record armed) -> `worker.start()` (first time: creates the thread; the thread allocates the history and deletes stale folders) or `worker.resume()` |
+| `prepareToPlay` | `worker.suspend()` (waits for a drain after this request, parks; no-op before the first start) -> `captureTap.prepare (sr, maxBlock)` (rings, reset record armed) -> `worker.start()` (first time: creates the thread; the thread allocates the history and deletes stale folders) or `worker.resume()` |
 | `releaseResources` | nothing for the capture (the history survives FL's engine stop/start) |
 | `reset()` (host) | `flushPending` as today; the next block's flush also calls `captureTap.flushNotes()` |
-| destructor | `worker.stop()` (signal, notify, `waitForThreadToExit (-1)`: no `stopThread (timeout)`, which kills the thread on timeout; returns within one bounded step, an unfinished WAV job is aborted) -> `deleteInstanceFolder` |
+| destructor | `worker.stop()` (signal, notify, join: no timeout kill; returns within one bounded step, an unfinished WAV job is aborted, then the file thread finishes its queue and is joined) -> `deleteInstanceFolder` |
 | tests | `getCaptureWorker().setManualSteppingForTests (true)` before the first `prepareToPlay`: `start()` prepares the history on the calling thread and creates no thread; the test drives `runStepForTests()` |
 
 pluginval / Steinberg validator / clap-validator open and close many instances quickly: no thread before
@@ -886,3 +896,39 @@ result.
   host blocks 2048 / 480 / 64: one take `_Take01_Bar003_Clean.mid`, notes in order within 1/64 note of the
   beats (measured: C4 and E4 exact, A3 +4 ticks = 2 ms), WAV sample 0 = bar 3 beat 1, `.mid` byte-identical
   and WAV identical for all three block sizes.
+
+### 19.1 Review fixes (2026-10-17)
+
+Real-time and correctness review with cross-check; the sections above describe the result.
+
+- **RT-1 file thread** (5.3, 15): every file operation of the worker (WAV cache open / slice write /
+  finish / abort, cached-WAV deletes, heartbeat, the stale-folder cleanup) runs as a task on a second
+  thread, in order; a WAV job has at most one task in flight and the worker moves it on only when that task
+  is done. The worker thread never takes `fileMutex`, so a slow `persistWav` copy (another drive, SMB) or a
+  rename held by Defender can no longer stop the drain (the rings hold ~2.7 s). Test: the file lock is held
+  while 8 s of audio arrive in ~0.7 s: no overflow, the WAV finishes after the lock is released.
+- **RT-2** (5.1): the history timeline is bounded by `timelineLookbackSeconds`.
+- **RT-3** (15): `suspend()` waits for a drain that started after its own request (generation counter), so
+  a `suspend()` right after `resume()` no longer returns before the worker drained what the audio thread
+  pushed in between (`CaptureTap::prepare()` resets the rings).
+- **RT-4** (5.3): the audio look-back option is applied after the drain and marked applied even if its
+  allocation fails; `prepareHistory()` catches everything and is retried at most once a second; the
+  stale-folder cleanup runs once, on the file thread.
+- **RT-5**: `processBlock` derives the chunk's audio pointer from the same `CaptureBlockSettings` it gave
+  `beginBlock` (one load of `captureEnabled` / `captureAudio` per block).
+- **F1** (9): origin from the first note that survives the clamp; the worker lists a take only if its Raw
+  export has a note and shows that count (`Take::noteCount`).
+- **F2** (9): a run of transition notes merges completely (nearest kept neighbour, sung length).
+- **F3** (9): quantize grid per bar.
+- **F4** (5.1): clock epochs (see 5.1); the WAV re-render check uses the take's own epoch.
+- **F5** (8): synced test-pattern takes: no round trip for the events.
+- **F6** (9): free takes (grabs) end at `endSample`: notes started in the grab's detection tail are
+  dropped, notes held across the grab moment end there.
+- **F7**: `Take::noteCount` is kept up to date while the take is open (status line "N notes").
+- **F9** (16): the CaptureTap cost test (< 1 % of a 128-sample block) runs in CI (`[capturetap][cpu]`); a
+  processor test checks the worst 128-sample block with the capture running (Voice, Wide, True bends,
+  audio on, transport playing) < 20 % (Release; measured 7.5 % worst, 2.7 % mean on the 4-core dev box).
+  Regression tests for each finding above.
+- Not changed: Clean's ghost removal may still remove the first Raw note (origin independent of the
+  version, design choice 9.1: Raw, Clean and the WAV share tick 0).
+

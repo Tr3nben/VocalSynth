@@ -25,8 +25,18 @@ namespace vocalsynth
 
     Eviction: oldest first. Event records and audio are evicted independently (getOldestEventSample(),
     getAudioRange()). Timeline segments older than the oldest retained event or audio sample (whichever is
-    older) are dropped (the segment containing that sample stays). Open takes keep their own timeline
-    (TakeSegmenter), so eviction never breaks a long take; it only limits how far back a grab reaches.
+    older) are dropped (the segment containing that sample stays), and in any case those older than
+    timelineLookbackSeconds before the newest sample: transport records (tempo automation re-syncs up to
+    100 per second while playing) never enter the event ring, so an old record that stays in a quiet
+    session must not keep the timeline growing (bound: 100 / s * 600 s * ~72 B = ~4.3 MB). Open takes keep
+    their own timeline (TakeSegmenter), so eviction never breaks a long take; it only limits how far back
+    a grab reaches (a grab reaches at most 120 s or 32 bars, well inside the timeline look-back).
+
+    Clock epochs: a clearing reset (new sample rate) restarts the capture clock at 0 and increments
+    getClockEpoch(). Sample positions of an earlier epoch never address the new epoch's audio. The audio
+    of the epoch just ended is retained (moved aside, not copied) until releaseRetainedAudio(), so the
+    takes that the reset closed can still be refined and get their WAV (readAudio / getAudioRange with
+    that epoch); memory meanwhile: the retained chunks plus the new epoch's (lazily allocated) ones.
 
     Audio is addressed by capture-clock sample. addAudio() must be contiguous with the previous frame; a
     forward jump (dropped frames) zero-fills the hole and counts it as missing; audio off (marker audioOff
@@ -42,6 +52,7 @@ public:
     static constexpr double defaultAudioMinutes = 10.0;
     static constexpr double minAudioMinutes = 1.0;
     static constexpr double maxAudioMinutes = 30.0;
+    static constexpr double timelineLookbackSeconds = 600.0;
 
     /** Worker thread. Allocates the event ring (NOT real-time; may throw std::bad_alloc) and sets the audio
         look-back (minutes clamped to [minAudioMinutes, maxAudioMinutes]). Clears everything. */
@@ -78,6 +89,21 @@ public:
     /** Copies audio [fromSample, fromSample + destination.size()) into destination; samples outside the
         stored range (or in zero-filled holes) are 0. Returns the number of samples that were stored audio. */
     std::size_t readAudio (int64_t fromSample, std::span<float> destination) const noexcept;
+
+    /** Number of clearing resets since construction (prepare() does not change it). */
+    uint32_t getClockEpoch() const noexcept { return clockEpoch; }
+
+    /** getAudioRange() / readAudio() of an epoch: the current one, or the retained previous one (see
+        class comment); any other epoch has no audio (empty range, zeros). */
+    AudioRange getAudioRange (uint32_t epoch) const noexcept;
+    std::size_t readAudio (uint32_t epoch, int64_t fromSample, std::span<float> destination) const noexcept;
+
+    /** Whether the previous epoch's audio is retained, and which epoch it is. */
+    bool hasRetainedAudio() const noexcept { return retained.valid; }
+    uint32_t getRetainedEpoch() const noexcept { return retained.epoch; }
+
+    /** Frees the retained audio of the previous epoch (the worker: once no take of it needs audio). */
+    void releaseRetainedAudio() noexcept;
 
     /** Sample of the oldest record still in the ring (getEndSample() if empty). */
     int64_t getOldestEventSample() const noexcept;
@@ -116,6 +142,8 @@ private:
     void pruneHoles() noexcept;
     static void writeAudio (Chunks& target, int64_t startSample, std::span<const float> samples);
     static void readChunks (const Chunks& source, int64_t startSample, std::span<float> destination) noexcept;
+    static std::size_t readStore (const Chunks& source, const AudioRange& range, const std::vector<AudioRange>& gaps,
+                                  int64_t fromSample, std::span<float> destination) noexcept;
 
     double sampleRate = 48000.0;
     int maxBlockSize = 0;
@@ -137,6 +165,19 @@ private:
     std::vector<AudioRange> holes;             ///< zero-filled holes inside audioRange (dropped frames)
     uint64_t missingAudioSamples = 0;
     int64_t endSample = 0;
+
+    // Clock epochs (see class comment)
+    struct RetainedAudio
+    {
+        bool valid = false;
+        uint32_t epoch = 0;
+        Chunks chunks;
+        AudioRange range {};
+        std::vector<AudioRange> holes;
+    };
+
+    uint32_t clockEpoch = 0;
+    RetainedAudio retained;
 };
 
 } // namespace vocalsynth

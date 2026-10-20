@@ -341,3 +341,75 @@ TEST_CASE ("CaptureHistory: shrinking the look-back keeps the newest audio and f
     CHECK (matchesSignal (h, 5'000'000 - capacity, 200000));
     CHECK (matchesSignal (h, 5'000'000 - 100, 100100));
 }
+
+TEST_CASE ("CaptureHistory: the timeline is bounded by its look-back even if an old record stays", "[capturehistory]")
+{
+    // A quiet session: one settings record at the start stays the oldest record for good, while tempo
+    // automation re-syncs the transport 100 times a second (transport records never enter the ring)
+    auto h = makeHistory (1.0);
+    h.addRecord (settingsWithRange (0, 2));
+    const auto lookback = static_cast<int64_t> (CaptureHistory::timelineLookbackSeconds * 48000.0);
+    const int64_t step = 480;
+    const int64_t end = lookback + 5 * 60 * 48000; // 15 minutes
+
+    for (int64_t s = 0; s < end; s += step)
+        h.addRecord (playingRecord (s, static_cast<double> (s) / 24000.0, 120.0 + static_cast<double> ((s / step) % 5) * 0.01));
+
+    CHECK (h.getOldestEventSample() == 0);
+    const auto& segments = h.getTimeline().getSegments();
+    const auto maxSegments = static_cast<std::size_t> (lookback / step) + 2 * 64 + 2;
+    CHECK (segments.size() <= maxSegments);
+    CHECK (segments.front().startSample >= end - lookback - 64 * step - step);
+    CHECK (h.getTimeline().isPlayingAt (static_cast<double> (end - 1)));
+
+    // Grabs reach at most 120 s / 32 bars back: well inside the look-back
+    CHECK (CaptureHistory::timelineLookbackSeconds >= 120.0);
+    CHECK (h.getTimeline().isPlayingAt (static_cast<double> (end - 120 * 48000)));
+}
+
+TEST_CASE ("CaptureHistory: a clearing reset starts a new clock epoch and keeps the old audio aside", "[capturehistory]")
+{
+    auto h = makeHistory (1.0);
+    const auto first = h.getClockEpoch();
+    addSignal (h, 0, 100000);
+    const auto bytesBefore = h.getAllocatedAudioBytes();
+
+    // Same-rate reset: same epoch
+    h.addRecord (CaptureRecord::makeReset (100000, { 48000.0, 1024, false }));
+    CHECK (h.getClockEpoch() == first);
+    CHECK_FALSE (h.hasRetainedAudio());
+
+    // New rate: the clock restarts at 0 in a new epoch; the old audio stays readable under its epoch
+    h.addRecord (CaptureRecord::makeReset (0, { 44100.0, 512, true }));
+    CHECK (h.getClockEpoch() == first + 1);
+    REQUIRE (h.hasRetainedAudio());
+    CHECK (h.getRetainedEpoch() == first);
+    CHECK (h.getAudioRange().from == h.getAudioRange().to);
+    CHECK (h.getAudioRange (first).from == 0);
+    CHECK (h.getAudioRange (first).to == 100000);
+
+    std::vector<float> got (1000, -1.0f);
+    CHECK (h.readAudio (first, 50000, got) == 1000);
+
+    for (std::size_t i = 0; i < got.size(); ++i)
+        REQUIRE (got[i] == scenarioSignal (50000 + static_cast<int64_t> (i)));
+
+    // New audio on the new clock never shows through old positions, and the other way round
+    std::vector<float> loud (4096, 0.5f);
+    h.addAudio (0, loud);
+    CHECK (h.readAudio (first, 0, got) == 1000);
+    CHECK (got[0] == scenarioSignal (0));
+    CHECK (h.readAudio (h.getClockEpoch(), 0, got) == 1000);
+    CHECK (got[0] == 0.5f);
+    CHECK (h.readAudio (first + 7, 0, got) == 0); // an epoch that is gone: silence
+    CHECK (got[0] == 0.0f);
+    CHECK (h.getAudioRange (first + 7).from == h.getAudioRange (first + 7).to);
+    CHECK (h.getAllocatedAudioBytes() > bytesBefore);
+
+    // Released by the worker once no take needs it
+    h.releaseRetainedAudio();
+    CHECK_FALSE (h.hasRetainedAudio());
+    CHECK (h.getAudioRange (first).from == h.getAudioRange (first).to);
+    CHECK (h.readAudio (first, 50000, got) == 0);
+    CHECK (h.getAllocatedAudioBytes() == chunk * sizeof (float));
+}

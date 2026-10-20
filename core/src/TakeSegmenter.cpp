@@ -61,11 +61,14 @@ CapturedEvent makeSynthetic (int64_t sample, const VsEvent& event) noexcept
     return e;
 }
 
-/** Appends one event to a take and keeps its open-note set. */
+/** Appends one event to a take and keeps its open-note set and note count. */
 void addToTake (Take& take, std::array<std::bitset<128>, 16>& notes, const CapturedEvent& e)
 {
     if (isNoteOn (e.event))
+    {
         notes[channelIndex (e.event)][noteIndex (e.event)] = true;
+        ++take.noteCount;
+    }
     else if (isNoteOff (e.event))
         notes[channelIndex (e.event)][noteIndex (e.event)] = false;
 
@@ -528,6 +531,7 @@ void TakeSegmenter::openTakeAt (int64_t sample, TakeMode mode, TakeKind kind, co
     take.maxBlockSize = maxBlockSize;
     take.settings = settings;
     take.freeBpm = hostBpm;
+    take.clockEpoch = history.getClockEpoch();
 
     if (mode == TakeMode::synced)
         take.timeline = history.getTimeline().slice (sample, sample);
@@ -737,6 +741,7 @@ std::optional<Take> TakeSegmenter::buildGrab (const CaptureHistory& history, int
     take.maxBlockSize = history.getMaxBlockSize();
     take.settings = history.getSettingsAt (start);
     take.freeBpm = timeline.empty() ? TakeTimeline::fallbackBpm : timeline.bpmAt (marker_);
+    take.clockEpoch = history.getClockEpoch();
 
     // Segments of [start, captureEnd) only: a transport record AT captureEnd may or may not be in the
     // history yet when the grab is built (it arrives with the record that triggers the build, or with a
