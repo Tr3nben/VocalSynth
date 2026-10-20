@@ -50,6 +50,10 @@ void DspLoadMeter::addBlock (double processingSeconds, int numSamples) noexcept
         peak = juce::jmax (load, peak * std::exp (-blockSeconds / peakDecayTimeConstantSeconds));
     }
 
+    // The two smoothings decay at different rates, so with a fluctuating load the average can drift
+    // slightly above the decayed peak; a peak below the average makes no sense on screen.
+    peak = juce::jmax (peak, average);
+
     publishedAverage.store (static_cast<float> (average), std::memory_order_relaxed);
     publishedPeak.store (static_cast<float> (peak), std::memory_order_relaxed);
     publishedValid.store (true, std::memory_order_relaxed);

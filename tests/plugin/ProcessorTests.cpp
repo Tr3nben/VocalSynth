@@ -1712,6 +1712,25 @@ TEST_CASE ("DspLoadMeter averages over time and lets the peak decay", "[plugin][
     CHECK (meter.getReading().peakProportion == Catch::Approx (1.0f));
     CHECK (meter.getReading().averageProportion < 0.1f);
 
+    // The peak never falls below the average, also with a fluctuating load (seen on a CI runner):
+    // a slowly decaying high load followed by blocks just below the decayed peak
+    {
+        vocalsynth::DspLoadMeter m;
+        m.prepare (48000.0);
+        m.addBlock (0.005, 480); // 50 %
+        bool peakBelowAverage = false;
+
+        for (int i = 0; i < 2000; ++i)
+        {
+            const auto r = m.getReading();
+            m.addBlock (0.0099 * (double) r.peakProportion, 480); // load = 99 % of the current peak
+            const auto after = m.getReading();
+            peakBelowAverage = peakBelowAverage || after.peakProportion < after.averageProportion;
+        }
+
+        CHECK_FALSE (peakBelowAverage);
+    }
+
     // The averaging does not depend on the block size: 1 s of 1-sample blocks equals 1 s of 4800-sample blocks
     vocalsynth::DspLoadMeter tiny, large;
     tiny.prepare (48000.0);
