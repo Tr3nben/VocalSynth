@@ -451,8 +451,9 @@ TEST_CASE ("CaptureExporter: heartbeat, stale-folder cleanup and instance folder
         REQUIRE (f.getChildFile (CaptureExporter::heartbeatFileName).setLastModificationTime (old));
     }
 
+    // Without a heartbeat the newest file decides (a folder's own time cannot be set on Windows)
     REQUIRE (staleNoHeartbeat.getChildFile ("x.mid").replaceWithText ("x"));
-    REQUIRE (staleNoHeartbeat.setLastModificationTime (old));
+    REQUIRE (staleNoHeartbeat.getChildFile ("x.mid").setLastModificationTime (old));
     CaptureExporter::touchHeartbeat (fresh);
     CHECK (fresh.getChildFile (CaptureExporter::heartbeatFileName).existsAsFile());
 

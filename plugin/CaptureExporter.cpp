@@ -268,8 +268,26 @@ int deleteStaleInstanceFolders (const juce::File& root, const juce::String& keep
             continue;
 
         const auto heartbeat = folder.getChildFile (heartbeatFileName);
-        const auto lastAlive = heartbeat.existsAsFile() ? heartbeat.getLastModificationTime()
-                                                        : folder.getLastModificationTime();
+        auto lastAlive = folder.getLastModificationTime();
+
+        if (heartbeat.existsAsFile())
+        {
+            lastAlive = heartbeat.getLastModificationTime();
+        }
+        else
+        {
+            // No heartbeat (crashed before writing one): the newest file decides. Its own time is more
+            // reliable than the folder's, which Windows only updates when entries are added or removed.
+            const auto files = folder.findChildFiles (juce::File::findFiles, true);
+
+            if (! files.isEmpty())
+            {
+                lastAlive = files.getFirst().getLastModificationTime();
+
+                for (const auto& f : files)
+                    lastAlive = juce::jmax (lastAlive, f.getLastModificationTime());
+            }
+        }
 
         if (now - lastAlive > maxAge && folder.deleteRecursively())
             ++deleted;
