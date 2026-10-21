@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vocalsynth/CaptureMode.h"
 #include "vocalsynth/CaptureOptions.h"
 #include "vocalsynth/VoiceSettings.h"
 
@@ -49,6 +50,14 @@ inline const juce::ParameterID captureAudio { "captureAudio", captureParameterVe
 inline const juce::ParameterID captureOffsetMode { "captureOffsetMode", captureParameterVersionHint };
 inline const juce::ParameterID captureOffsetMs { "captureOffsetMs", captureParameterVersionHint };
 inline const juce::ParameterID captureFineOffsetMs { "captureFineOffsetMs", captureParameterVersionHint };
+
+// M3.1 take length and Record mode (docs/M3.1-DESIGN.md 2). Version hint 3: added after 0.3.0, whose
+// parameters have hints 1 and 2 (same AUv2 index reasoning as above). recordBars is a parameter; the Record /
+// Cancel button is not (a UI command to the CaptureTap, docs/M3.1-DESIGN.md 4).
+inline constexpr int takeLengthParameterVersionHint = 3;
+inline const juce::ParameterID captureMode { "captureMode", takeLengthParameterVersionHint };
+inline const juce::ParameterID takeMaxBars { "takeMaxBars", takeLengthParameterVersionHint };
+inline const juce::ParameterID recordBars { "recordBars", takeLengthParameterVersionHint };
 
 /** Choice index == static_cast<int> (vocalsynth::TestPattern). Only append new entries at the end. */
 inline const juce::StringArray testPatternChoices { "Off", "Notes", "Pitch Bend", "CC Sweep", "All" };
@@ -107,6 +116,12 @@ inline constexpr std::array<const char*, numScales> scaleNames { "Chromatic",   
                                                                  "Mixolydian" };
 inline constexpr std::array<const char*, numBendModes> bendModeNames { "Off", "Anchored", "True" };
 inline constexpr std::array<const char*, numCaptureOffsetModes> captureOffsetModeNames { "Auto", "Manual", "Off" };
+inline constexpr std::array<const char*, numCaptureModes> captureModeNames { "Background", "Record" };
+// Index == index into vocalsynth::takeMaxBarsChoices / recordBarsChoices (checked below)
+inline constexpr std::array<const char*, takeMaxBarsChoices.size()> takeMaxBarsNames { "Off", "4 bars", "8 bars",
+                                                                                      "16 bars", "32 bars" };
+inline constexpr std::array<const char*, recordBarsChoices.size()> recordBarsNames { "1 bar",  "2 bars",  "4 bars",
+                                                                                    "8 bars", "16 bars", "32 bars" };
 // U+00B1 PLUS-MINUS SIGN as UTF-8; the literal is split so the hex escape does not swallow the digit
 inline constexpr std::array<const char*, numBendRanges> bendRangeNames {
     "\xc2\xb1" "2", "\xc2\xb1" "12", "\xc2\xb1" "24", "\xc2\xb1" "48"
@@ -115,7 +130,9 @@ inline constexpr std::array<const char*, numBendRanges> bendRangeNames {
 static_assert (detail::allNamed (sourceNames) && detail::allNamed (voiceRangeNames)
                && detail::allNamed (pitchAlgorithmNames) && detail::allNamed (keyNames)
                && detail::allNamed (scaleNames) && detail::allNamed (bendModeNames)
-               && detail::allNamed (bendRangeNames) && detail::allNamed (captureOffsetModeNames));
+               && detail::allNamed (bendRangeNames) && detail::allNamed (captureOffsetModeNames)
+               && detail::allNamed (captureModeNames) && detail::allNamed (takeMaxBarsNames)
+               && detail::allNamed (recordBarsNames));
 
 inline const juce::StringArray sourceChoices = detail::toStringArray (sourceNames);
 inline const juce::StringArray voiceRangeChoices = detail::toStringArray (voiceRangeNames);
@@ -125,6 +142,9 @@ inline const juce::StringArray scaleChoices = detail::toStringArray (scaleNames)
 inline const juce::StringArray bendModeChoices = detail::toStringArray (bendModeNames);
 inline const juce::StringArray bendRangeChoices = detail::toStringArray (bendRangeNames);
 inline const juce::StringArray captureOffsetModeChoices = detail::toStringArray (captureOffsetModeNames);
+inline const juce::StringArray captureModeChoices = detail::toStringArray (captureModeNames);
+inline const juce::StringArray takeMaxBarsChoiceNames = detail::toStringArray (takeMaxBarsNames);
+inline const juce::StringArray recordBarsChoiceNames = detail::toStringArray (recordBarsNames);
 
 // Defaults (docs/M2-SPEC.md). They must equal the core VoiceSettings defaults, checked below.
 inline constexpr int defaultSourceIndex = static_cast<int> (Source::voice);
@@ -133,7 +153,7 @@ inline constexpr int defaultPitchAlgorithmIndex = static_cast<int> (PitchAlgorit
 inline constexpr int defaultKeyIndex = 0;                                                 // C
 inline constexpr int defaultScaleIndex = static_cast<int> (Scale::chromatic);
 inline constexpr float defaultStickinessPercent = 50.0f;
-inline constexpr float defaultGateThresholdDb = -40.0f;
+inline constexpr float defaultGateThresholdDb = -35.0f;   // v0.3.1 (was -40), docs/M3.1-DESIGN.md 5
 inline constexpr float defaultMinNoteLengthMs = 60.0f;
 inline constexpr int defaultOctaveShift = 0;
 inline constexpr int defaultBendModeIndex = static_cast<int> (BendMode::off);
@@ -165,6 +185,13 @@ inline constexpr float maxCaptureOffsetMsParam = static_cast<float> (vocalsynth:
 inline constexpr float minCaptureFineOffsetMsParam = static_cast<float> (vocalsynth::minCaptureFineOffsetMs);
 inline constexpr float maxCaptureFineOffsetMsParam = static_cast<float> (vocalsynth::maxCaptureFineOffsetMs);
 static_assert (static_cast<int> (CaptureOffsetMode::automatic) == 0 && static_cast<int> (CaptureOffsetMode::off) == 2);
+
+// M3.1 defaults (docs/M3.1-DESIGN.md 2): Background, takes at most 16 bars, Record 8 bars
+inline constexpr int defaultCaptureModeIndex = static_cast<int> (CaptureMode::background);
+// takeMaxBars / recordBars defaults: vocalsynth::defaultTakeMaxBarsIndex / defaultRecordBarsIndex (core)
+static_assert (static_cast<int> (CaptureMode::background) == 0 && static_cast<int> (CaptureMode::record) == 1);
+static_assert (takeMaxBarsForIndex (defaultTakeMaxBarsIndex) == 16 && takeMaxBarsForIndex (0) == 0);
+static_assert (recordBarsForIndex (defaultRecordBarsIndex) == 8);
 
 /** Bend Range text -> choice index. Accepts the exact choice names and anything that carries the semitone
     number ("12", "+-12", the UTF-8 name read as Latin-1, ...): CLAP hosts pass UTF-8 text, which the
@@ -282,6 +309,16 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 
     floatParameter (captureFineOffsetMs, "Capture Fine Offset", minCaptureFineOffsetMsParam,
                     maxCaptureFineOffsetMsParam, defaultCaptureFineOffsetMs, "ms", oneDecimalText);
+
+    // --- M3.1 take length and Record mode (appended after the M3 parameters, docs/M3.1-DESIGN.md 2) ---
+    layout.add (std::make_unique<juce::AudioParameterChoice> (captureMode, "Capture Mode", captureModeChoices,
+                                                              defaultCaptureModeIndex));
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (takeMaxBars, "Take Max Length", takeMaxBarsChoiceNames,
+                                                              defaultTakeMaxBarsIndex));
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (recordBars, "Record Length", recordBarsChoiceNames,
+                                                              defaultRecordBarsIndex));
 
     return layout;
 }

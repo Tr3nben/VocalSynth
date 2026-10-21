@@ -5,6 +5,7 @@
 #include "CaptureTestHelpers.h"
 
 #include "vocalsynth/CaptureDrain.h"
+#include "vocalsynth/TakeRenderer.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -317,4 +318,96 @@ TEST_CASE ("CaptureDrain: producer and consumer on two threads give the same tak
     threaded.history.readAudio (sc.length - 100000, a);
     single.history.readAudio (sc.length - 100000, b);
     CHECK (a == b);
+}
+
+TEST_CASE ("CaptureDrain M3.1: take limit, Record takes and Grab are identical for every block size",
+           "[capturedrain][takelength][recordmode]")
+{
+    // Every control point on a multiple of P = 430080 = lcm (7, 64, 480, 512, 4096) (8.96 s, 4.48 bars at
+    // 120 BPM): background synced takes cut after 4 bars, Record mode with a complete take, one shortened by
+    // Stop, one armed while stopped (starts where playback starts), a Grab, back to Background, free takes
+    // cut after 4 bars.
+    constexpr int64_t P = 430080;
+    const double sr = 48000.0;
+    TapScenario sc;
+    sc.sampleRate = sr;
+    sc.maxBlock = 4096;
+    sc.length = 11 * P + 1234;
+    sc.playhead = PlayheadSim (sr);
+    sc.playhead.add ({ 0, true, 0.0, 120.0, 4, 4 });
+    sc.playhead.change (5 * P, false, 120.0);
+    sc.playhead.change (7 * P, true, 120.0);
+    sc.playhead.change (9 * P, false, 120.0);
+
+    CaptureSettingsInfo background;
+    background.takeMaxBars = 4;
+    auto record = background;
+    record.captureMode = CaptureMode::record;
+    sc.settingsFrom = { { 0, background }, { 2 * P, record }, { 8 * P, background } };
+    sc.recordAt = { { 3 * P, 2 }, { 4 * P, 8 }, { 6 * P, 1 } };
+    sc.grabAt = { 8 * P };
+    sc.grabBars = 2;
+
+    for (int64_t s = 123, k = 0; s < sc.length; s += 5000, ++k)
+    {
+        const auto note = static_cast<uint8_t> (60 + k % 12);
+        sc.events.push_back ({ s, VsEvent::makeNoteOn (0, 1, note, 90),
+                               { static_cast<int32_t> ((k * 37) % 2000), EventTimingKind::measured, 0 } });
+        sc.events.push_back ({ s + 3077, VsEvent::makeNoteOff (0, 1, note),
+                               { static_cast<int32_t> ((k * 53) % 3000), EventTimingKind::model, 0 } });
+    }
+
+    std::stable_sort (sc.events.begin(), sc.events.end(),
+                      [] (const ScheduledEvent& a, const ScheduledEvent& b) { return a.sample < b.sample; });
+
+    std::vector<Take> reference;
+
+    for (const int blockSize : { 4096, 1, 7, 64, 480, 512 })
+    {
+        CAPTURE (blockSize);
+        Pipeline p;
+        runTap (p.tap, sc, blockSize, [&] { p.drain(); });
+        CHECK (p.tap.getOverflowCounts().records == 0);
+
+        if (blockSize == 4096)
+        {
+            reference = p.closed;
+            const auto count = [&reference] (auto predicate)
+            { return std::count_if (reference.begin(), reference.end(), predicate); };
+
+            // 2P of background play = 8.96 bars: anchored at bar 1, cut at bars 5 and 9
+            CHECK (count ([] (const Take& t) { return t.mode == TakeMode::synced && t.kind == TakeKind::automatic && t.maxBars == 4; }) >= 3);
+            CHECK (count ([] (const Take& t) { return t.kind == TakeKind::grab; }) == 1);
+            CHECK (count ([] (const Take& t) { return t.mode == TakeMode::free && t.maxBars == 4; }) >= 2);
+            REQUIRE (count ([] (const Take& t) { return t.kind == TakeKind::record; }) == 3);
+
+            std::vector<Take> records;
+            std::copy_if (reference.begin(), reference.end(), std::back_inserter (records),
+                          [] (const Take& t) { return t.kind == TakeKind::record; });
+
+            // Armed at 3P (bar 14.44) for 2 bars: bars 15 .. 17
+            CHECK (records[0].startSample == 14 * 96000);
+            CHECK (records[0].endSample == 16 * 96000);
+            CHECK (records[0].anchorBar == 15);
+            // Armed at 4P for 8 bars from bar 19, stopped at 5P
+            CHECK (records[1].startSample == 18 * 96000);
+            CHECK (records[1].endSample == 5 * P);
+            // Armed at 6P while stopped: starts at the first bar line after Play at 7P (ppq 89.6 -> 92)
+            CHECK (records[2].startSample == 7 * P + 57600);
+            CHECK (records[2].endSample == records[2].startSample + 96000);
+            CHECK (records[2].anchorBar == 24);
+
+            for (const auto& t : records)
+            {
+                RenderOptions o;
+                o.roundTripSamples = TakeRenderer::roundTripFor (t, CaptureOffsetSettings {});
+                const auto r = TakeRenderer::render (t, o);
+                CHECK (r.originBar == t.anchorBar);
+                CHECK (r.endTick == (t.endSample == 5 * P ? 5 : t.maxBars) * 3840); // stopped after 4.4 bars
+            }
+            continue;
+        }
+
+        checkSameTakes (p.closed, reference);
+    }
 }

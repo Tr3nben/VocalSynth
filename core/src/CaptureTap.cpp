@@ -190,6 +190,18 @@ void CaptureTap::beginBlock (const TransportInfo& transport, const CaptureBlockS
         handledClear = n;
         pushMarker (CaptureMarkerKind::clear);
     }
+
+    if (const auto n = recordCancelRequests.load (std::memory_order_acquire); n != handledRecordCancel)
+    {
+        handledRecordCancel = n;
+        pushMarker (CaptureMarkerKind::recordCancel);
+    }
+
+    if (const auto n = recordRequests.load (std::memory_order_acquire); n != handledRecord)
+    {
+        handledRecord = n;
+        pushMarker (CaptureMarkerKind::recordArm, recordBars.load (std::memory_order_relaxed));
+    }
 }
 
 void CaptureTap::flushNotes() noexcept
@@ -266,6 +278,17 @@ void CaptureTap::requestGrab (int bars, double seconds) noexcept
 void CaptureTap::requestClear() noexcept
 {
     clearRequests.fetch_add (1, std::memory_order_release);
+}
+
+void CaptureTap::requestRecord (int bars) noexcept
+{
+    recordBars.store (std::max (1, bars), std::memory_order_relaxed);
+    recordRequests.fetch_add (1, std::memory_order_release);
+}
+
+void CaptureTap::requestRecordCancel() noexcept
+{
+    recordCancelRequests.fetch_add (1, std::memory_order_release);
 }
 
 CaptureTap::OverflowCounts CaptureTap::getOverflowCounts() const noexcept

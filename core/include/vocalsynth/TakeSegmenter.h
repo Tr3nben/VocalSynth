@@ -1,12 +1,15 @@
 #pragma once
 
 #include "vocalsynth/CaptureHistory.h"
+#include "vocalsynth/CaptureMode.h"
+#include "vocalsynth/CaptureOptions.h"
 #include "vocalsynth/CaptureRecord.h"
 #include "vocalsynth/Take.h"
 
 #include <array>
 #include <bitset>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -53,7 +56,35 @@ namespace vocalsynth
 
     The open take collects events, notes, settings and (synced) its timeline segments as records arrive;
     closed takes get the take number (counting from 1 per instance, never reused, also not after Clear),
-    assigned when the take opens. */
+    assigned when the take opens.
+
+    M3.1 take length and Record mode (docs/M3.1-DESIGN.md 3, 4; settings captureMode / takeMaxBars travel in
+    the settings record, Record / Cancel as markers, so everything is timed by the audio clock):
+    7. Synced background takes are anchored at their first note: anchor bar X = the bar (TakeTimeline::barAt)
+       containing max (startSample, h), h = estimatedSample - rtSeg of the take's first note-on with
+       h >= startSample, or startSample if a note sounding at the start (synthetic note-on, or a note-on with
+       h < startSample) has a note-off with h > startSample or is still on at startSample + the capture tail.
+       rtSeg = computeRoundTripSamples (setOffsetSettings(), maxBlockSize, rate), 0 for test-pattern takes.
+       With takeMaxBars N > 0 at that moment (Take::maxBars = N, Take::anchorBar = X): startSample = max
+       (startSample, start of bar X), and the take is cut at the N-th bar line after the start of bar X
+       (TakeTimeline::barLineAfter, counted as the timeline crosses them) like a newTake marker there: the
+       next synced take opens at the cut and anchors by the same rule (a note held across the cut: at the
+       cut, i.e. bar X + N; otherwise at the bar of its own first note). Stop ends it earlier (rule 1).
+    8. Free background takes are cut at startSample + freeModeBarsToSamples (N, rate, freeBpm) like a free
+       manual split (synthetic note-offs); sounding notes continue in a new free take, else the segmenter
+       waits for the next note-on. The gap rule stays.
+    9. Record mode: no background takes (no synced / free takes, newTake ignored; state syncedIdle while
+       playing). recordArm (N = grabBars) arms; the Record take (kind record) starts at the first bar line at
+       or after the marker (TakeTimeline::firstBarLineAtOrAfter on the history timeline; stopped: where
+       playback starts; a jump during the count-in recomputes it) and ends by itself at the N-th bar line
+       after its start (capture tail as rule 1), then disarms. Stop ends it there (kept); Stop during the
+       count-in keeps it armed. recordCancel disarms, or discards the Record take being recorded.
+       Background -> Record closes an open background take at the switch; Record -> Background drops the
+       arm, ends a Record take there (kept) and resumes the background rules (playing: a synced take opens).
+       Grabs work in both modes.
+    Bar lines, cuts and the Record start are taken at sample C once a record or advanceTo() comes after C
+    (every record up to C is in by then), so the result never depends on the drain pattern. An anchored take
+    may hold events emitted before its (moved) startSample; the renderer's host-time clamp drops them. */
 class TakeSegmenter
 {
 public:
@@ -79,7 +110,8 @@ public:
         off,           ///< captureEnabled off (or before the first reset record)
         freeWaiting,   ///< stopped, no take open
         freeRecording, ///< stopped, a free take is open
-        synced         ///< playing, a synced take is open
+        synced,        ///< playing, a synced take is open (background, or a Record take being recorded)
+        syncedIdle     ///< playing, no take open (Record mode: not recording)
     };
 
     /** Forgets the open take and all note / transport state (the take numbering continues). */
@@ -88,6 +120,20 @@ public:
     /** Clamped to [minTakeGapSeconds, maxTakeGapSeconds]; applies from the next note-off on. */
     void setTakeGapSeconds (double seconds) noexcept;
     double getTakeGapSeconds() const noexcept { return takeGapSeconds; }
+
+    /** Capture offset used for the anchor of synced takes (rule 7). The worker sets it before each drain;
+        default: CaptureOffsetSettings {} (Auto). */
+    void setOffsetSettings (const CaptureOffsetSettings& offset) noexcept { offsetSettings = offset; }
+
+    /** Record-mode state at the newest sample (updated by process() and advanceTo()); O(1). */
+    RecordStatus getRecordStatus() const noexcept { return recordStatus; }
+
+    /** Mode and take limit of the newest settings record. */
+    CaptureMode getCaptureMode() const noexcept { return settings.captureMode; }
+    int getTakeMaxBars() const noexcept { return settings.takeMaxBars; }
+
+    /** Bar k (1 .. maxBars) of the open take at the newest sample, 0 if it is not anchored or has no limit. */
+    int getOpenTakeBar() const noexcept;
 
     /** Feeds one record in stream order, AFTER history.addRecord (record) (grabs read the history).
         Takes that close are appended to closedTakes (closed = true, oldest first). */
@@ -137,6 +183,21 @@ private:
     {
         Take take;
         std::array<std::bitset<128>, 16> notes {};
+        int64_t collectFrom = 0;  ///< events emitted from here on belong to it (startSample may move later)
+        // M3.1 take length (rules 7 - 9)
+        bool anchored = true;     ///< synced background takes start unanchored
+        std::array<std::bitset<128>, 16> anchorCandidates {}; ///< notes sounding at startSample (rule 7)
+        int64_t anchorDeadline = 0; ///< candidates still on here anchor at startSample
+        double lineSample = 0.0;  ///< newest bar line counted (start of bar X at first), fractional sample
+        int barsDone = 0;         ///< bar lines crossed after the start of bar X
+        int64_t freeCutSample = std::numeric_limits<int64_t>::max(); ///< free take: cut here (rule 8)
+    };
+
+    enum class RecordPhase : uint8_t
+    {
+        idle,
+        armed,
+        recording
     };
 
     struct PendingGrab
@@ -155,6 +216,16 @@ private:
     void handleMarker (int64_t sample, const MarkerRecord& marker, const CaptureHistory& history,
                        std::vector<Take>& closedTakes);
     void handleGap (int64_t sample);
+    void handleSettings (int64_t sample, const CaptureSettingsInfo& info, const CaptureHistory& history,
+                         std::vector<Take>& closedTakes);
+    void handleRecordMarker (int64_t sample, const MarkerRecord& marker);
+    bool backgroundMode() const noexcept { return settings.captureMode == CaptureMode::background; }
+    /** Opens the synced take at sample (background) or goes to syncedIdle (Record mode). */
+    void startSyncedState (int64_t sample, const CaptureHistory& history);
+    void trackAnchor (const CapturedEvent& event);
+    void anchorOpenTake (int64_t at);
+    int64_t segmentRoundTrip (const Take& take) const noexcept;
+    void updateRecordStatus (const CaptureHistory& history) noexcept;
 
     /** Handles everything due at or before sample (closing tails, pending grabs, the free gap) in time order. */
     void advanceInternal (int64_t sample, const CaptureHistory& history, std::vector<Take>& closedTakes);
@@ -183,6 +254,13 @@ private:
     std::vector<Builder> closingTakes; ///< synced takes in their capture tail (usually 0 or 1)
     std::vector<PendingGrab> pendingGrabs;
     int64_t freeStartAllowedFrom = 0;  ///< no free take starts with a note-on before this (synced tail)
+    CaptureOffsetSettings offsetSettings {};
+
+    // Record mode (rule 9)
+    RecordPhase recordPhase = RecordPhase::idle;
+    int recordBars = 0;
+    int64_t recordSearchFrom = 0;      ///< the Record take starts at the first bar line at or after this
+    RecordStatus recordStatus;
 
     // Stream state
     double sampleRate = 48000.0;

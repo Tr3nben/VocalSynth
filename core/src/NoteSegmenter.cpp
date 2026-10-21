@@ -46,6 +46,10 @@ void NoteSegmenter::reset() noexcept
     lastFrameVoiced = false;
     noteLevelDb = PitchFrame::silenceDb;
     noteLevelSample = 0;
+    historyCount = 0;
+    historyNext = 0;
+    noteFromRest = false;
+    restStartSample = 0;
     provisional = false;
     provisionalStartSample = 0;
     provisionalSeenStrong = false;
@@ -203,6 +207,8 @@ void NoteSegmenter::processOnsetFrame (const PitchFrame& frame, int64_t absolute
                                        velocitySensitivityPercent);
     startNote (q, outputNote, velocity, fastMaxRmsDb, p, absoluteSample, sampleOffset, bend, out,
                onsetTiming (absoluteSample, true, p));
+    noteFromRest = true;
+    restStartSample = absoluteSample;
     provisional = true;
     provisionalStartSample = absoluteSample;
     provisionalSeenStrong = false;
@@ -222,6 +228,10 @@ void NoteSegmenter::setSettings (const VoiceSettings& settings) noexcept
     gateThresholdDb = settings.gateThresholdDb;
     hysteresisSemitones = stickiness.hysteresisSemitones;
     minChangeSamples = toSamples (stickiness.minChangeMs);
+    arrivalSamples = toSamples (arrivalFraction * stickiness.minChangeMs);
+    glideWindowSamples = toSamples (glideWindowMs);
+    onsetGlideHoldSamples = toSamples (onsetGlideHoldMs);
+    onsetGlideWindowSamples = toSamples (onsetGlideWindowMs);
     minNoteSamples = toSamples (static_cast<double> (settings.minNoteLengthMs));
     octaveShift = settings.octaveShift;
     velocitySensitivityPercent = static_cast<double> (settings.velocitySensitivityPercent);
@@ -294,6 +304,7 @@ bool NoteSegmenter::processProvisionalFrame (const PitchFrame& frame, bool stron
             changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out,
                         correction);
             noteEstimatedStart = provisionalStart; // the corrected note is the provisional one
+            noteFromRest = true;                   // ... and still the start from rest (onset glide hold)
             return true; // a normal note from now on (startNote() cleared provisional)
         }
 
@@ -339,6 +350,8 @@ void NoteSegmenter::processIdleFrame (const PitchFrame& frame, bool strong, doub
                                        velocitySensitivityPercent);
     startNote (q, outputNote, velocity, onsetMaxRmsDb, p, absoluteSample, sampleOffset, bend, out,
                onsetTiming (absoluteSample, false, p));
+    noteFromRest = true;
+    restStartSample = absoluteSample;
     fastBlocked = false; // the full window agrees with a voice again: the false start was a one-off
 }
 
@@ -349,6 +362,83 @@ bool NoteSegmenter::isPitchReliable (const PitchFrame& frame, int64_t absoluteSa
     noteLevelDb = std::max (frame.rmsDb, static_cast<float> (std::max (fallen, static_cast<double> (PitchFrame::silenceDb))));
     noteLevelSample = absoluteSample;
     return frame.confidence >= confidenceOn && frame.rmsDb >= noteLevelDb - bendHoldDropDb;
+}
+
+void NoteSegmenter::pushPitchHistory (double p, int64_t absoluteSample) noexcept
+{
+    const auto index = static_cast<std::size_t> (historyNext);
+    historyPitch[index] = p;
+    historySample[index] = absoluteSample;
+    historyNext = historyNext + 1 < pitchHistoryFrames ? historyNext + 1 : 0;
+    historyCount = std::min (historyCount + 1, pitchHistoryFrames);
+}
+
+double NoteSegmenter::pitchSlope (int64_t absoluteSample, int64_t windowSamples) const noexcept
+{
+    // Least squares over (t, p), t in seconds relative to absoluteSample (newest first)
+    double sumT = 0.0, sumP = 0.0, sumTT = 0.0, sumTP = 0.0;
+    int n = 0;
+
+    for (int i = 0; i < historyCount; ++i)
+    {
+        const auto index = static_cast<std::size_t> ((historyNext - 1 - i + pitchHistoryFrames) % pitchHistoryFrames);
+        const auto age = absoluteSample - historySample[index];
+
+        if (age > windowSamples)
+            break;
+
+        const auto t = -static_cast<double> (age) / sampleRate;
+        const auto v = historyPitch[index];
+        sumT += t;
+        sumP += v;
+        sumTT += t * t;
+        sumTP += t * v;
+        ++n;
+    }
+
+    if (n < 3)
+        return 0.0;
+
+    const auto count = static_cast<double> (n);
+    const auto denominator = count * sumTT - sumT * sumT;
+    return denominator > 0.0 ? (count * sumTP - sumT * sumP) / denominator : 0.0;
+}
+
+bool NoteSegmenter::hasArrived (int64_t absoluteSample, int64_t windowSamples, int candidate) const noexcept
+{
+    auto lo = std::numeric_limits<double>::max();
+    auto hi = std::numeric_limits<double>::lowest();
+
+    for (int i = 0; i < historyCount; ++i)
+    {
+        const auto index = static_cast<std::size_t> ((historyNext - 1 - i + pitchHistoryFrames) % pitchHistoryFrames);
+
+        if (absoluteSample - historySample[index] > windowSamples)
+            return hi - lo <= arrivalMaxSpreadSemitones + stickinessEpsilonSemitones; // the span is covered
+
+        const auto v = historyPitch[index];
+
+        if (std::abs (v - static_cast<double> (candidate)) > arrivalMaxDistanceSemitones + stickinessEpsilonSemitones)
+            return false;
+
+        lo = std::min (lo, v);
+        hi = std::max (hi, v);
+    }
+
+    return false; // the history does not reach back over the whole span
+}
+
+bool NoteSegmenter::isGliding (int64_t absoluteSample) const noexcept
+{
+    // Only the frames since the change timer started count: those beyond the change threshold. A step to
+    // another note is flat there (its jump lies before), a glide through or into the note is not.
+    const auto sinceTimer = absoluteSample - changeTimerStart;
+
+    if (noteFromRest && absoluteSample - restStartSample < onsetGlideHoldSamples
+        && std::abs (pitchSlope (absoluteSample, std::min (onsetGlideWindowSamples, sinceTimer))) > onsetGlideHoldSemitonesPerSecond)
+        return true;
+
+    return std::abs (pitchSlope (absoluteSample, std::min (glideWindowSamples, sinceTimer))) > glideHoldSemitonesPerSecond;
 }
 
 void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double p, int64_t absoluteSample,
@@ -387,6 +477,7 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
 
     if (! weak)
     {
+        historyCount = 0;
         lastFrameVoiced = false;
         changeTimerRunning = false;
 
@@ -402,6 +493,13 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
 
     lastFrameVoiced = true;
     unvoicedFrames = 0;
+
+    // Pitch history for the v0.3.1 change rules: consecutive frames that may request a change
+    if (frame.confidence >= confidenceOn)
+        pushPitchHistory (p, absoluteSample);
+    else
+        historyCount = 0;
+
     const auto residualCents = 100.0 * (p - static_cast<double> (activeQuantisedNote));
     const auto reliable = isPitchReliable (frame, absoluteSample);
 
@@ -431,7 +529,13 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
         changeTimerStart = absoluteSample;
     }
 
-    if (absoluteSample - changeTimerStart >= minChangeSamples && absoluteSample - noteStartSample >= minNoteSamples)
+    // T_min, or the shorter arrival span once the voice has landed on the candidate; neither while the
+    // pitch is still gliding (the timer keeps running: the change comes where the glide ends)
+    const auto elapsed = absoluteSample - changeTimerStart;
+    const auto timeUp = elapsed >= minChangeSamples
+                        || (elapsed >= arrivalSamples && hasArrived (absoluteSample, arrivalSamples, candidate));
+
+    if (timeUp && absoluteSample - noteStartSample >= minNoteSamples && ! isGliding (absoluteSample))
     {
         lastTiming.update = {};
         changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out,
@@ -459,6 +563,8 @@ void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float le
     noteStartSample = absoluteSample;
     unvoicedFrames = 0;
     changeTimerRunning = false;
+    historyCount = 0;
+    noteFromRest = false; // the callers that start from rest set it again
     onsetFrames = 0;
     onsetMaxRmsDb = PitchFrame::silenceDb;
     provisional = false;

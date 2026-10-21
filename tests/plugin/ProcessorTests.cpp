@@ -2345,6 +2345,7 @@ TEST_CASE ("Capture: 10 minutes of capture keep the overflow counters at 0", "[p
 
     VocalSynthProcessor p (Variant::fx);
     p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlainValue (p, params::takeMaxBars, 0.0f); // Off: one 10-minute take (the default cuts after 16 bars)
 
     if (source == params::Source::testPattern)
         setPattern (p, vocalsynth::TestPattern::all); // notes, bends and CCs

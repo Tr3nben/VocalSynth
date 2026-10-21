@@ -94,7 +94,8 @@ struct RenderedTake
        o (refinedSample if set, else estimatedSample; synthetic note-ons count) among the notes that
        survive the clamp, independent of options.version (the worker refines before publishing, so Raw
        and Clean agree); a note the clamp drops never decides tick 0 or the bar in the file name; no
-       surviving note: o = take.startSample. Then
+       surviving note: o = take.startSample (Record takes, M3.1: always o = take.startSample, the first
+       recorded bar, also if the first note comes later). Then
        - synced: originBeats = start of the bar containing timeline.beatsAt (clamp (o, start, end))
          (TakeTimeline::barAt, with its snap tolerance); ticks = llround ((beatsAt (t) - originBeats)
          * ppq);
@@ -119,9 +120,14 @@ struct RenderedTake
        earlier one ends at the later start), minimum length 1 tick, ticks >= 0, bends reset to centre after
        the last note (bends exported only if bendsEnabled (options.bends, take.settings.bendMode); then
        bendRangeSemitones = take.settings.bendRangeSemitones), CCs only if options.controlChanges.
-    endTick: synced = the first bar line at or after the last event tick (a note-off exactly on a bar line
-    adds no bar; bars counted from tick 0 with the rendered time-signature map), at least one bar; free =
-    the last event tick (at least 1).
+    3a. Quantize never moves a note start to or past the end of the take (the bar line at or after endSample;
+       that start stays unquantized) and never moves a note end past it (M3.1).
+    endTick (docs/M3.1-DESIGN.md 3.4, 4.3): synced = the first bar line at or after the version's last
+    note-off tick (a note-off exactly on a bar line adds no bar; bars counted from tick 0 with the rendered
+    time-signature map), at least one bar; bends / CCs after it do not extend the take (their ticks are
+    clamped to endTick), so Clean (which drops click / noise ghosts) loses trailing noise-only bars. Record
+    takes are never trimmed: the bar line at or after endSample (N bars when complete, whole bars when Stop
+    shortened it). Free = the last note-off tick (at least 1).
     Tempo / time-signature maps: synced = timeline.tempoMap / timeSignatureMap from originBeats, converted
     to ticks (a time-signature change sits at the host bar start where it took effect); free = freeBpm, 4/4.
 
@@ -151,9 +157,12 @@ public:
         takes. Synced test-pattern takes get it as well; render() applies it to their WAV span only (see 1.). */
     static int64_t roundTripFor (const Take& take, const CaptureOffsetSettings& offset) noexcept;
 
-    /** The WAV span of render (take, options).audio without rendering the events (worker: WAV cache).
-        Synced: [sampleAtBeats (originBeats) + roundTrip, take.endSample + roundTrip) (capture clock: host
-        time + round trip is where that audio arrived); free: [s0, take.endSample). WAV sample 0 = tick 0. */
+    /** The WAV span of render (take, options).audio (worker: WAV cache); one span for every version and
+        quantize setting (docs/M3.1-DESIGN.md 3.4). Synced: [sampleAtBeats (originBeats) + roundTrip, end) with
+        end = sampleAtBeats (where the Clean render with these options but quantize off ends) + roundTrip, at
+        most take.endSample + roundTrip (capture clock: host time + round trip is where that audio arrived);
+        Record takes: end = take.endSample + roundTrip. Free: [s0, min (take.endSample, Clean's last note-off +
+        TakeSegmenter::freeTailSeconds)). WAV sample 0 = tick 0. A Raw export may be longer than its WAV. */
     static AudioSpan computeAudioSpan (const Take& take, const RenderOptions& options);
 
     /** Worker, after a take closed with audio and before it is published: sets CapturedEvent::refinedSample

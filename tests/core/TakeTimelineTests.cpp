@@ -332,3 +332,111 @@ TEST_CASE ("TakeTimeline: deterministic sampleAtBeats round trip over a tempo ma
     for (double s = -5000.0; s < 200000.0; s += 1234.5)
         CHECK (tl.sampleAtBeats (tl.beatsAt (s)) == Approx (s).margin (1e-6));
 }
+
+//==============================================================================
+// M3.1 bar lines as the transport plays them (docs/M3.1-DESIGN.md 3.1, 4.1)
+
+TEST_CASE ("TakeTimeline: bar lines at constant tempo, in 3/4, after a tempo change", "[taketimeline][barlines]")
+{
+    const double sr = 48000.0;
+    TakeTimeline tl;
+    tl.reset (sr);
+    tl.addTransport (1000, playingAt (0.0, 120.0)); // bar 1 at sample 1000, 96000 samples per bar
+
+    auto line = tl.barLineAfter (1000.0);
+    REQUIRE (line.has_value());
+    CHECK (line->sample == Approx (97000.0));
+    CHECK (line->beats == Approx (4.0));
+    CHECK (tl.barLineAfter (line->sample)->sample == Approx (193000.0)); // the next one, not the same line
+
+    // At or after: a line on the query or just before it (snap tolerance) is the query itself
+    CHECK (tl.firstBarLineAtOrAfter (97000.0)->sample == Approx (97000.0));
+    CHECK (tl.firstBarLineAtOrAfter (97000.0 + 500.0)->sample == Approx (97500.0)); // 1/48 beat late: on it
+    CHECK (tl.firstBarLineAtOrAfter (97000.0 + 2000.0)->sample == Approx (193000.0));
+    CHECK (tl.firstBarLineAtOrAfter (96999.0)->sample == Approx (97000.0));
+    // Before the first segment: extrapolated with its grid
+    CHECK (tl.barLineAfter (1000.0 - 96000.0)->sample == Approx (1000.0));
+
+    // Tempo change to 60 BPM at bar 3: bars 3 and 4 take 192000 samples each
+    tl.addTransport (193000, playingAt (8.0, 60.0));
+    CHECK (tl.barLineAfter (193000.0)->sample == Approx (385000.0));
+    CHECK (tl.barLineAfter (97000.0)->sample == Approx (193000.0)); // the line where the segments meet: once
+
+    TakeTimeline waltz;
+    waltz.reset (sr);
+    waltz.addTransport (0, playingAt (0.0, 120.0, 3, 4));
+    CHECK (waltz.barLineAfter (0.0)->sample == Approx (72000.0));
+    CHECK (waltz.barLineAfter (72000.0)->sample == Approx (144000.0));
+}
+
+TEST_CASE ("TakeTimeline: bar lines across a loop wrap, a jump and a stop", "[taketimeline][barlines]")
+{
+    const double sr = 48000.0;
+
+    SECTION ("loop wrap onto a bar line: one line where the passes meet")
+    {
+        TakeTimeline tl;
+        tl.reset (sr);
+        tl.addTransport (0, playingAt (0.0, 120.0));
+        tl.addTransport (4 * 96000, playingAt (0.0, 120.0)); // bars 1..4 loop
+        CHECK (tl.barLineAfter (3.0 * 96000.0)->sample == Approx (4.0 * 96000.0));
+        CHECK (tl.barLineAfter (4.0 * 96000.0)->sample == Approx (5.0 * 96000.0));
+        CHECK (tl.barAt (4.0 * 96000.0 + 10.0).number == 1);
+    }
+
+    SECTION ("the host reports the wrap one block late: the old pass's line counts, the new grid continues")
+    {
+        TakeTimeline tl;
+        tl.reset (sr);
+        tl.addTransport (0, playingAt (0.0, 120.0));
+        tl.addTransport (4 * 96000 + 2048, playingAt (2048.0 / 24000.0, 120.0));
+        const auto first = tl.barLineAfter (3.0 * 96000.0);
+        REQUIRE (first.has_value());
+        CHECK (first->sample == Approx (4.0 * 96000.0));
+        CHECK (tl.barLineAfter (first->sample)->sample == Approx (5.0 * 96000.0));
+    }
+
+    SECTION ("a jump to the middle of a bar: the next line of the new grid")
+    {
+        TakeTimeline tl;
+        tl.reset (sr);
+        tl.addTransport (0, playingAt (0.0, 120.0));
+        tl.addTransport (60000, playingAt (10.0, 120.0)); // jump to beat 3 of bar 3
+        CHECK (tl.firstBarLineAtOrAfter (30000.0)->sample == Approx (60000.0 + 2.0 * 24000.0));
+        CHECK (tl.barAt (60000.0 + 48000.0).number == 4);
+    }
+
+    SECTION ("stopped: the first line where playback starts")
+    {
+        TakeTimeline tl;
+        tl.reset (sr);
+        tl.addTransport (0, stoppedAt (0.0));
+        CHECK_FALSE (tl.firstBarLineAtOrAfter (100.0).has_value());
+        CHECK_FALSE (tl.barLineAfter (100.0).has_value());
+
+        tl.addTransport (50000, playingAt (0.0, 120.0)); // starts on beat 1
+        CHECK (tl.firstBarLineAtOrAfter (100.0)->sample == Approx (50000.0));
+
+        TakeTimeline mid;
+        mid.reset (sr);
+        mid.addTransport (0, stoppedAt (1.0));
+        mid.addTransport (50000, playingAt (1.0, 120.0)); // starts on beat 2: the next bar line
+        CHECK (mid.firstBarLineAtOrAfter (100.0)->sample == Approx (50000.0 + 3.0 * 24000.0));
+
+        TakeTimeline late;
+        late.reset (sr);
+        late.addTransport (0, stoppedAt (0.01));
+        late.addTransport (50000, playingAt (0.01, 120.0)); // within the snap tolerance after beat 1: on it
+        CHECK (late.firstBarLineAtOrAfter (100.0)->sample == Approx (50000.0));
+    }
+
+    SECTION ("a stop ends the lines of the playing pass")
+    {
+        TakeTimeline tl;
+        tl.reset (sr);
+        tl.addTransport (0, playingAt (0.0, 120.0));
+        tl.addTransport (150000, stoppedAt (150000.0 / 24000.0));
+        CHECK (tl.barLineAfter (0.0)->sample == Approx (96000.0));
+        CHECK_FALSE (tl.barLineAfter (96000.0).has_value());
+    }
+}

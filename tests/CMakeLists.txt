@@ -37,7 +37,9 @@ add_executable(VocalSynthCoreTests
     core/TakeRendererTests.cpp
     core/SmfWriterTests.cpp
     core/WavWriterTests.cpp
-    core/CaptureCompensationTests.cpp)
+    core/CaptureCompensationTests.cpp
+    # M3.1 take length and Record mode (docs/M3.1-DESIGN.md 9)
+    core/CaptureModeTests.cpp)
 target_link_libraries(VocalSynthCoreTests PRIVATE VocalSynthCore Catch2::Catch2WithMain)
 set_target_properties(VocalSynthCoreTests PROPERTIES FOLDER "Tests")
 catch_discover_tests(VocalSynthCoreTests DISCOVERY_MODE PRE_TEST)
@@ -56,7 +58,9 @@ add_executable(VocalSynthPluginTests
     plugin/CaptureParameterTests.cpp
     plugin/CaptureWorkerTests.cpp
     plugin/CaptureExporterTests.cpp
-    plugin/CapturePanelTests.cpp)
+    plugin/CapturePanelTests.cpp
+    # M3.1 take length and Record mode (docs/M3.1-DESIGN.md 9)
+    plugin/RecordModeTests.cpp)
 target_link_libraries(VocalSynthPluginTests PRIVATE VocalSynthPluginCode Catch2::Catch2)
 target_compile_definitions(VocalSynthPluginTests PRIVATE
     $<TARGET_PROPERTY:VocalSynthFX,COMPILE_DEFINITIONS>

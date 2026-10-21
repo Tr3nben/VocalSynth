@@ -237,6 +237,12 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
     jassert (captureEnabledParam != nullptr && captureAudioParam != nullptr && captureOffsetModeParam != nullptr
              && captureOffsetMsParam != nullptr && captureFineOffsetMsParam != nullptr);
 
+    captureModeParam = apvts.getRawParameterValue (params::captureMode.getParamID());
+    takeMaxBarsParam = apvts.getRawParameterValue (params::takeMaxBars.getParamID());
+    recordBarsParam = apvts.getRawParameterValue (params::recordBars.getParamID());
+
+    jassert (captureModeParam != nullptr && takeMaxBarsParam != nullptr && recordBarsParam != nullptr);
+
     captureWorker.setOptions (toWorkerOptions (captureState));
 
     // Never resized: processBlock downmixes chunks of at most maxChunkSamples
@@ -609,6 +615,9 @@ CaptureBlockSettings VocalSynthProcessor::makeCaptureBlockSettings (params::Sour
     b.captureEnabled = isCaptureEnabled();
     b.captureAudio = isCaptureAudioEnabled();
     b.bypassed = bypassed;
+    // M3.1: in the settings record, so a mode / limit change is timed by the audio clock (docs/M3.1-DESIGN.md 4.2)
+    b.settings.captureMode = getCaptureMode();
+    b.settings.takeMaxBars = getTakeMaxBars();
 
     if (source == params::Source::voice)
     {
@@ -707,6 +716,22 @@ bool VocalSynthProcessor::isCaptureEnabled() const noexcept
 bool VocalSynthProcessor::isCaptureAudioEnabled() const noexcept
 {
     return captureAudioParam->load (std::memory_order_relaxed) >= 0.5f;
+}
+
+CaptureMode VocalSynthProcessor::getCaptureMode() const noexcept
+{
+    const auto index = juce::roundToInt (captureModeParam->load (std::memory_order_relaxed));
+    return static_cast<CaptureMode> (juce::jlimit (0, numCaptureModes - 1, index));
+}
+
+int VocalSynthProcessor::getTakeMaxBars() const noexcept
+{
+    return takeMaxBarsForIndex (juce::roundToInt (takeMaxBarsParam->load (std::memory_order_relaxed)));
+}
+
+int VocalSynthProcessor::getRecordBars() const noexcept
+{
+    return recordBarsForIndex (juce::roundToInt (recordBarsParam->load (std::memory_order_relaxed)));
 }
 
 //==============================================================================

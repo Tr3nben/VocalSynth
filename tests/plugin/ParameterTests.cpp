@@ -81,7 +81,7 @@ TEST_CASE ("M2 parameters exist with the spec IDs, ranges and defaults", "[plugi
     checkChoice (p, bendRange, { plusMinus + "2", plusMinus + "12", plusMinus + "24", plusMinus + "48" }, 0);
 
     checkFloat (p, stickiness, 0.0f, 100.0f, 50.0f);
-    checkFloat (p, gateThreshold, -70.0f, -10.0f, -40.0f); // v0.2.1: -40 (was -45; user test: -35 .. -40 dB)
+    checkFloat (p, gateThreshold, -70.0f, -10.0f, -35.0f); // v0.3.1: -35 (v0.2.1 -40, before -45; corpus sweep, user test -35 .. -40 dB)
     checkFloat (p, minNoteLength, 20.0f, 250.0f, 60.0f);
     checkFloat (p, velocitySensitivity, 0.0f, 100.0f, 70.0f);
 
@@ -129,7 +129,7 @@ TEST_CASE ("M2 value texts carry no unit (the label does)", "[plugin][parameters
 
     CHECK (getParameter (p, stickiness).getCurrentValueAsText() == "50");
     CHECK (getParameter (p, stickiness).getLabel() == "%");
-    CHECK (getParameter (p, gateThreshold).getCurrentValueAsText() == "-40.0");
+    CHECK (getParameter (p, gateThreshold).getCurrentValueAsText() == "-35.0");
     CHECK (getParameter (p, gateThreshold).getLabel() == "dB");
     CHECK (getParameter (p, minNoteLength).getCurrentValueAsText() == "60");
     CHECK (getParameter (p, minNoteLength).getLabel() == "ms");

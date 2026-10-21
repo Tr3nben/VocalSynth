@@ -318,7 +318,7 @@ TEST_CASE ("NoteSegmenter: silence, noise-like and quiet frames never start a no
     rig.frames (unvoiced(), 200);
     rig.frames (unvoiced (-20.0f), 200);                  // loud but aperiodic
     rig.frames (voicedAt (60.0, 0.79f, -20.0f), 200);     // just below confidenceOn
-    rig.frames (voicedAt (60.0, 0.95f, -40.01f), 200);    // just below the gate (default -40 dB)
+    rig.frames (voicedAt (60.0, 0.95f, -35.01f), 200);    // just below the gate (default -35 dB)
     rig.frames (voicedAt (60.0, 0.70f, -42.0f), 200);     // weak but never strong
     rig.frames ({ std::numeric_limits<float>::quiet_NaN(), 0.95f, -20.0f }, 20);
     rig.frames ({ 261.6f, std::numeric_limits<float>::quiet_NaN(), -20.0f }, 20);
@@ -418,8 +418,9 @@ TEST_CASE ("NoteSegmenter: weak frames hold the note but never change it", "[not
 
     SECTION ("weak frames break the T_min run of strong ones")
     {
+        // 55.0 lies on the candidate, so a strong run would change after the arrival span already
         const auto tMin = NoteSegmenter::stickinessFromPercent (50.0).minChangeMs;
-        const auto almost = rig.framesIn (tMin) - 2;
+        const auto almost = rig.framesIn (NoteSegmenter::arrivalFraction * tMin) - 2;
 
         for (int i = 0; i < 20; ++i)
         {
@@ -532,6 +533,11 @@ TEST_CASE ("NoteSegmenter: stickiness boundary 0.5 + h and T_min", "[notesegment
     const auto sticky = NoteSegmenter::stickinessFromPercent (static_cast<double> (percent));
     const auto threshold = 0.5 + sticky.hysteresisSemitones;
     const auto tMinSamples = std::llround (sticky.minChangeMs * 0.001 * sr);
+    const auto arrivalSamples = std::llround (NoteSegmenter::arrivalFraction * sticky.minChangeMs * 0.001 * sr);
+    // v0.3.1: a pitch within arrivalMaxDistanceSemitones of the candidate changes after the arrival span
+    // (at 100 % the threshold 0.9 itself lies within 0.2 of the neighbour)
+    const auto waitFor = [&] (double distanceToCandidate)
+    { return distanceToCandidate <= NoteSegmenter::arrivalMaxDistanceSemitones ? arrivalSamples : tMinSamples; };
     auto s = withStickiness (percent);
     s.minNoteLengthMs = 20.0f; // shorter than every T_min, so T_min decides
     CAPTURE (percent, sr);
@@ -546,7 +552,7 @@ TEST_CASE ("NoteSegmenter: stickiness boundary 0.5 + h and T_min", "[notesegment
         CHECK (rig.segmenter.getActiveNote() == 60);
     }
 
-    SECTION ("just above the threshold: changes after exactly T_min")
+    SECTION ("just above the threshold: changes after exactly T_min (or the arrival span on the new note)")
     {
         SegmenterRig rig (s, sr);
         rig.frames (voicedAt (60.0), 50);
@@ -557,8 +563,9 @@ TEST_CASE ("NoteSegmenter: stickiness boundary 0.5 + h and T_min", "[notesegment
         REQUIRE (ons.size() == 2);
         CHECK (ons[1].event.data1 == 61);
         const auto waited = ons[1].position - conditionStart;
-        CHECK (waited >= tMinSamples);
-        CHECK (waited < tMinSamples + rig.hop);
+        const auto expected = waitFor (1.0 - threshold - 0.01);
+        CHECK (waited >= expected);
+        CHECK (waited < expected + rig.hop);
     }
 
     SECTION ("downwards as well")
@@ -575,7 +582,7 @@ TEST_CASE ("NoteSegmenter: stickiness boundary 0.5 + h and T_min", "[notesegment
     {
         SegmenterRig rig (s, sr);
         rig.frames (voicedAt (60.0), 50);
-        const auto almost = static_cast<int> (tMinSamples / rig.hop) - 1; // frames < T_min
+        const auto almost = static_cast<int> (waitFor (1.0 - threshold - 0.05) / rig.hop) - 1; // frames < T_min
 
         for (int i = 0; i < 10; ++i)
         {
@@ -596,17 +603,19 @@ TEST_CASE ("NoteSegmenter: stickiness boundary 0.5 + h and T_min", "[notesegment
         CHECK (rig.noteOffs().empty());
     }
 
-    SECTION ("a large jump also waits T_min, then goes straight to the nearest note")
+    SECTION ("a large jump also waits T_min (the arrival span when it lands on the note), then goes straight to the nearest note")
     {
+        const auto [target, distance] = GENERATE (table<double, double> ({ { 67.2, 0.2 }, { 67.3, 0.3 } }));
+        CAPTURE (target);
         SegmenterRig rig (s, sr);
         rig.frames (voicedAt (60.0), 50);
         const auto conditionStart = rig.now();
-        rig.framesFor (voicedAt (67.2), 200.0);
+        rig.framesFor (voicedAt (target), 200.0);
         const auto ons = rig.noteOns();
         REQUIRE (ons.size() == 2);
         CHECK (ons[1].event.data1 == 67);
-        CHECK (ons[1].position - conditionStart >= tMinSamples);
-        CHECK (ons[1].position - conditionStart < tMinSamples + rig.hop);
+        CHECK (ons[1].position - conditionStart >= waitFor (distance));
+        CHECK (ons[1].position - conditionStart < waitFor (distance) + rig.hop);
     }
 }
 
@@ -758,6 +767,280 @@ TEST_CASE ("NoteSegmenter: glissando steps monotonically through the notes", "[n
             CHECK (ons[i].position - ons[i - 1].position >= std::llround (0.060 * rig.sampleRate));
     }
 
+    checkMidiInvariants (rig.events);
+}
+
+// --- v0.3.1 segmentation (docs/M2-DESIGN.md 12): arrival, glide hold, onset glide hold -------------------
+
+namespace
+{
+std::vector<int> noteNumbersOf (const SegmenterRig& rig)
+{
+    std::vector<int> result;
+
+    for (const auto& e : rig.noteOns())
+        result.push_back (e.event.data1);
+
+    return result;
+}
+
+/** Frames of a linear pitch ramp from -> to at semitonesPerSecond (the last frame reaches `to`). */
+void ramp (SegmenterRig& rig, double from, double to, double semitonesPerSecond)
+{
+    const auto seconds = std::abs (to - from) / semitonesPerSecond;
+    const auto n = std::max (1, static_cast<int> (std::ceil (seconds * rig.sampleRate / static_cast<double> (rig.hop))));
+
+    for (int i = 1; i <= n; ++i)
+        rig.frame (voicedAt (from + (to - from) * static_cast<double> (i) / static_cast<double> (n)));
+}
+} // namespace
+
+TEST_CASE ("NoteSegmenter v0.3.1: a change that lands on the new note waits only the arrival span",
+           "[notesegmenter][segmentation]")
+{
+    const auto percent = GENERATE (25.0f, 50.0f, 100.0f);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto sticky = NoteSegmenter::stickinessFromPercent (static_cast<double> (percent));
+    const auto tMinSamples = std::llround (sticky.minChangeMs * 0.001 * sr);
+    const auto arrivalSamples = std::llround (NoteSegmenter::arrivalFraction * sticky.minChangeMs * 0.001 * sr);
+    auto s = withStickiness (percent);
+    s.minNoteLengthMs = 20.0f;
+    CAPTURE (percent, sr);
+
+    SECTION ("within arrivalMaxDistanceSemitones of the new note: the arrival span")
+    {
+        const auto target = GENERATE (62.0, 62.0 + NoteSegmenter::arrivalMaxDistanceSemitones - 0.01,
+                                      62.0 - NoteSegmenter::arrivalMaxDistanceSemitones + 0.01);
+        CAPTURE (target);
+        SegmenterRig rig (s, sr);
+        rig.framesFor (voicedAt (60.0), 200.0);
+        const auto conditionStart = rig.now();
+        rig.framesFor (voicedAt (target), 200.0);
+
+        REQUIRE (noteNumbersOf (rig) == std::vector<int> { 60, 62 });
+        const auto waited = rig.noteOns()[1].position - conditionStart;
+        CHECK (waited >= arrivalSamples);
+        CHECK (waited < arrivalSamples + rig.hop);
+        CHECK (waited < tMinSamples);
+    }
+
+    SECTION ("farther from the new note (beyond the change threshold): T_min as before")
+    {
+        const auto target = 62.0 - NoteSegmenter::arrivalMaxDistanceSemitones - 0.05;
+        SegmenterRig rig (s, sr);
+        rig.framesFor (voicedAt (60.0), 200.0);
+        const auto conditionStart = rig.now();
+        rig.framesFor (voicedAt (target), 200.0);
+
+        REQUIRE (noteNumbersOf (rig) == std::vector<int> { 60, 62 });
+        const auto waited = rig.noteOns()[1].position - conditionStart;
+        CHECK (waited >= tMinSamples);
+        CHECK (waited < tMinSamples + rig.hop);
+    }
+
+    SECTION ("an unsteady pitch near the new note (spread > arrivalMaxSpreadSemitones): T_min")
+    {
+        const auto wobble = 0.5 * NoteSegmenter::arrivalMaxSpreadSemitones + 0.02; // within the distance, spread too wide
+        REQUIRE (wobble < NoteSegmenter::arrivalMaxDistanceSemitones);
+        SegmenterRig rig (s, sr);
+        rig.framesFor (voicedAt (60.0), 200.0);
+        const auto conditionStart = rig.now();
+
+        for (int i = 0; i < rig.framesIn (200.0); ++i)
+            rig.frame (voicedAt (62.0 + (i % 2 == 0 ? wobble : -wobble)));
+
+        REQUIRE (noteNumbersOf (rig) == std::vector<int> { 60, 62 });
+        const auto waited = rig.noteOns()[1].position - conditionStart;
+        CHECK (waited >= tMinSamples);
+        CHECK (waited < tMinSamples + rig.hop);
+    }
+
+    SECTION ("weak frames clear the history: the arrival span starts again")
+    {
+        SegmenterRig rig (s, sr);
+        rig.framesFor (voicedAt (60.0), 200.0);
+        const auto almost = static_cast<int> (arrivalSamples / rig.hop) - 1;
+
+        for (int i = 0; i < 10; ++i)
+        {
+            rig.frames (voicedAt (62.0), almost);
+            rig.frame (voicedAt (62.0, 0.7f)); // weak: holds the note, breaks the run
+        }
+
+        CHECK (noteNumbersOf (rig) == std::vector<int> { 60 });
+    }
+
+}
+
+TEST_CASE ("NoteSegmenter v0.3.1: wide vibrato still gives one note", "[notesegmenter][segmentation]")
+{
+    // Default stickiness: the arrival rule needs the pitch within 0.2 st of the neighbour, i.e. 0.8 st from
+    // the note, which a +-80 cents vibrato only touches at its peak; T_min (0.7 st for 35 ms) holds up to
+    // +-80 cents at 5.5 Hz and +-75 cents at 4.5 Hz (slower vibrato stays longer near its peak).
+    const auto [rateHz, extent] = GENERATE (table<double, double> ({ { 4.5, 0.75 }, { 5.5, 0.8 }, { 6.5, 0.8 } }));
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (rateHz, extent, sr);
+    SegmenterRig rig (VoiceSettings {}, sr);
+
+    const auto hopSeconds = static_cast<double> (rig.hop) / sr;
+
+    for (int i = 0; i < rig.framesIn (3000.0); ++i)
+    {
+        const auto t = static_cast<double> (i) * hopSeconds;
+        rig.frame (voicedAt (60.0 + extent * std::sin (2.0 * std::numbers::pi * rateHz * t)));
+    }
+
+    rig.frames (unvoiced(), 50);
+    CHECK (noteNumbersOf (rig) == std::vector<int> { 60 });
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter v0.3.1: a fast glide goes straight to the note where it ends", "[notesegmenter][segmentation]")
+{
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto [from, to] = GENERATE (table<double, double> ({ { 60.0, 64.0 }, { 64.0, 60.0 }, { 60.0, 67.0 } }));
+    const auto rate = GENERATE (40.0, 80.0); // semitones per second, above glideHoldSemitonesPerSecond
+    CAPTURE (sr, from, to, rate);
+    REQUIRE (rate > NoteSegmenter::glideHoldSemitonesPerSecond);
+    SegmenterRig rig (VoiceSettings {}, sr);
+
+    rig.framesFor (voicedAt (from), 300.0); // long after the onset: only the glide hold applies
+    const auto glideEnd = rig.now() + static_cast<int64_t> (std::ceil (std::abs (to - from) / rate * sr));
+    ramp (rig, from, to, rate);
+    rig.framesFor (voicedAt (to), 300.0);
+    rig.frames (unvoiced(), 50);
+
+    REQUIRE (noteNumbersOf (rig) == std::vector<int> { static_cast<int> (from), static_cast<int> (to) });
+
+    // The timer ran during the glide: the change comes within the arrival span after the glide ends
+    const auto arrival = std::llround (NoteSegmenter::arrivalFraction * NoteSegmenter::stickinessFromPercent (50.0).minChangeMs * 0.001 * sr);
+    CHECK (rig.noteOns()[1].position - glideEnd <= arrival + 2 * rig.hop);
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter v0.3.1: a scoop right after the onset goes straight to its target", "[notesegmenter][segmentation]")
+{
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto [from, to, rate] = GENERATE (table<double, double, double> ({ { 57.0, 60.0, 30.0 },
+                                                                             { 58.0, 60.0, 20.0 },
+                                                                             { 62.0, 60.0, 25.0 } }));
+    CAPTURE (sr, from, to, rate);
+    // Slower than the glide hold, faster than the onset glide hold, over within onsetGlideHoldMs
+    REQUIRE (rate < NoteSegmenter::glideHoldSemitonesPerSecond);
+    REQUIRE (rate > NoteSegmenter::onsetGlideHoldSemitonesPerSecond);
+    REQUIRE (1000.0 * std::abs (to - from) / rate < NoteSegmenter::onsetGlideHoldMs);
+
+    SECTION ("from rest: one change, to the target")
+    {
+        SegmenterRig rig (VoiceSettings {}, sr);
+        rig.frames (unvoiced(), 20);
+        rig.frame (voicedAt (from)); // note start from rest
+        ramp (rig, from, to, rate);
+        rig.framesFor (voicedAt (to), 300.0);
+        rig.frames (unvoiced(), 50);
+        CHECK (noteNumbersOf (rig) == std::vector<int> { static_cast<int> (from), static_cast<int> (to) });
+        checkMidiInvariants (rig.events);
+    }
+
+    SECTION ("the same glide later in a note still steps through the notes (slow glissando)")
+    {
+        SegmenterRig rig (VoiceSettings {}, sr);
+        rig.framesFor (voicedAt (from), 300.0);
+        ramp (rig, from, to, rate);
+        rig.framesFor (voicedAt (to), 300.0);
+        rig.frames (unvoiced(), 50);
+        const auto notes = noteNumbersOf (rig);
+        CHECK (notes.front() == static_cast<int> (from));
+        CHECK (notes.back() == static_cast<int> (to));
+        CHECK (notes.size() >= 2);
+        checkMidiInvariants (rig.events);
+    }
+}
+
+TEST_CASE ("NoteSegmenter v0.3.1: a clean step right after the onset is not held as a glide",
+           "[notesegmenter][segmentation]")
+{
+    // The glide holds look only at the frames since the change timer started: the jump itself lies before.
+    const auto percent = GENERATE (0.0f, 10.0f, 50.0f);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (percent, sr);
+    auto s = withStickiness (percent);
+    s.minNoteLengthMs = 20.0f;
+    SegmenterRig rig (s, sr);
+    const auto sticky = NoteSegmenter::stickinessFromPercent (static_cast<double> (percent));
+    const auto arrival = std::llround (NoteSegmenter::arrivalFraction * sticky.minChangeMs * 0.001 * sr);
+    const auto minNote = std::llround (0.020 * sr);
+
+    rig.frames (unvoiced(), 10);
+    const auto onPosition = rig.now();
+    rig.framesFor (voicedAt (60.0), 30.0); // young note from rest
+    const auto conditionStart = rig.now();
+    rig.framesFor (voicedAt (62.0), 200.0);
+
+    REQUIRE (noteNumbersOf (rig) == std::vector<int> { 60, 62 });
+    const auto expected = std::max (conditionStart + arrival, onPosition + minNote);
+    CHECK (rig.noteOns()[1].position >= expected);
+    CHECK (rig.noteOns()[1].position < expected + rig.hop);
+}
+
+TEST_CASE ("NoteSegmenter v0.3.1: dropouts and dips hold one note, a clear gap re-attacks", "[notesegmenter][segmentation]")
+{
+    // Evidence (vocadito_1, docs/M2-DESIGN.md 12): held notes did not split at voicing dropouts; these
+    // guarantees are pinned here so the change rules cannot break them.
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (sr);
+    VoiceSettings s;
+    const auto gate = s.gateThresholdDb;
+    SegmenterRig rig (s, sr);
+    rig.framesFor (voicedAt (60.0), 200.0);
+
+    SECTION ("short unvoiced dropouts (releaseFrames - 1 frames), loud or silent")
+    {
+        for (int i = 0; i < 20; ++i)
+        {
+            rig.frames (i % 2 == 0 ? unvoiced() : unvoiced (-20.0f), NoteSegmenter::releaseFrames - 1);
+            rig.framesFor (voicedAt (60.0), 40.0);
+        }
+
+        CHECK (noteNumbersOf (rig) == std::vector<int> { 60 });
+        CHECK (rig.noteOffs().empty());
+    }
+
+    SECTION ("confidence dips (breathy voice) of 80 ms")
+    {
+        for (int i = 0; i < 5; ++i)
+        {
+            rig.framesFor (voicedAt (60.0, NoteSegmenter::confidenceOff), 80.0);
+            rig.framesFor (voicedAt (60.0), 100.0);
+        }
+
+        CHECK (noteNumbersOf (rig) == std::vector<int> { 60 });
+        CHECK (rig.noteOffs().empty());
+    }
+
+    SECTION ("level dips to just below the gate (within the hysteresis) of 80 ms")
+    {
+        for (int i = 0; i < 5; ++i)
+        {
+            rig.framesFor (voicedAt (60.0, 0.95f, gate - NoteSegmenter::gateHysteresisDb + 0.1f), 80.0);
+            rig.framesFor (voicedAt (60.0), 100.0);
+        }
+
+        CHECK (noteNumbersOf (rig) == std::vector<int> { 60 });
+        CHECK (rig.noteOffs().empty());
+    }
+
+    SECTION ("a clear gap (below the gate, a consonant) between repeated notes gives two notes")
+    {
+        const auto gapMs = GENERATE (20.0, 60.0);
+        CAPTURE (gapMs);
+        rig.framesFor (unvoiced (gate - 10.0f), gapMs);
+        rig.framesFor (voicedAt (60.0), 200.0);
+        CHECK (noteNumbersOf (rig) == std::vector<int> { 60, 60 });
+        CHECK (rig.noteOffs().size() == 1);
+    }
+
+    rig.flush();
     checkMidiInvariants (rig.events);
 }
 
@@ -1026,7 +1309,7 @@ TEST_CASE ("NoteSegmenter: octave shift", "[notesegmenter]")
 TEST_CASE ("NoteSegmenter: velocity from the onset RMS and sensitivity", "[notesegmenter]")
 {
     const auto sensitivity = GENERATE (0.0f, 70.0f, 100.0f);
-    const auto rms = GENERATE (-40.0f, -30.0f, -9.0f, -3.0f); // from the default gate (-40 dB) up
+    const auto rms = GENERATE (-35.0f, -30.0f, -9.0f, -3.0f); // from the default gate (-35 dB) up
     VoiceSettings s;
     const auto gate = static_cast<double> (s.gateThresholdDb);
     s.velocitySensitivityPercent = sensitivity;
@@ -1045,10 +1328,10 @@ TEST_CASE ("NoteSegmenter: velocity from the onset RMS and sensitivity", "[notes
         CHECK (rig.noteOns()[0].event.data2 == 100);
 
     // A note change takes the level of the change frame
-    rig.framesFor (voicedAt (65.0, 0.95f, -40.0f), 100.0);
+    rig.framesFor (voicedAt (65.0, 0.95f, -35.0f), 100.0);
     REQUIRE (rig.noteOns().size() == 2);
     CHECK (rig.noteOns()[1].event.data2
-           == NoteSegmenter::velocityFor (-40.0, gate, static_cast<double> (sensitivity)));
+           == NoteSegmenter::velocityFor (-35.0, gate, static_cast<double> (sensitivity)));
 }
 
 TEST_CASE ("NoteSegmenter: flush ends the note at the given offset and returns to idle", "[notesegmenter]")

@@ -102,7 +102,7 @@ public:
     /** The Capture tab (for the tests). */
     CapturePanel& getCapturePanel() noexcept { return capturePanel; }
 
-    /** Header line under the plugin name: "Version 0.3.0 - M3 capture   |   Format: VST3" (en dash). */
+    /** Header line under the plugin name: "Version 0.3.1 - M3 capture   |   Format: VST3" (en dash). */
     juce::String getVersionText() const;
 
 private:

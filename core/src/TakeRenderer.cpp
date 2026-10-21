@@ -1,5 +1,7 @@
 #include "vocalsynth/TakeRenderer.h"
 
+#include "vocalsynth/TakeSegmenter.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -369,7 +371,9 @@ Origin computeOrigin (const Take& take, const RenderOptions& o)
 
     if (origin.synced)
     {
-        const auto hostSample = std::clamp (first, take.startSample, std::max (take.startSample, take.endSample));
+        // Record takes: tick 0 = the first recorded bar, also if the first note comes later (M3.1 4.3)
+        const auto from = take.kind == TakeKind::record ? take.startSample : first;
+        const auto hostSample = std::clamp (from, take.startSample, std::max (take.startSample, take.endSample));
         const auto bar = take.timeline.barAt (static_cast<double> (hostSample));
         origin.beats = bar.startBeats;
         origin.bar = bar.number;
@@ -381,25 +385,6 @@ Origin computeOrigin (const Take& take, const RenderOptions& o)
     }
 
     return origin;
-}
-
-AudioSpan audioSpanFor (const Take& take, const Origin& origin)
-{
-    AudioSpan span;
-
-    if (origin.synced)
-    {
-        const auto start = static_cast<int64_t> (std::llround (take.timeline.sampleAtBeats (origin.beats))) + origin.roundTrip;
-        span.startSample = start;
-        span.numSamples = std::max<int64_t> (0, take.endSample + origin.roundTrip - start);
-    }
-    else
-    {
-        span.startSample = origin.freeStart;
-        span.numSamples = std::max<int64_t> (0, take.endSample - origin.freeStart);
-    }
-
-    return span;
 }
 
 void dropNote (std::vector<Note>& notes, std::size_t index)
@@ -580,7 +565,10 @@ struct BarGrid
     }
 };
 
-void applyQuantize (std::vector<Note>& notes, const RenderOptions& o, const std::vector<TickTimeSignature>& signatures)
+/** limitTick: the end of the take (the bar line at or after endSample): a start that would move to or past
+    it stays unquantized, ends never move past it (docs/M3.1-DESIGN.md 3.4). */
+void applyQuantize (std::vector<Note>& notes, const RenderOptions& o, const std::vector<TickTimeSignature>& signatures,
+                    int64_t limitTick)
 {
     const auto grid = quantizeGridTicks (o.quantize, o.ticksPerQuarterNote);
 
@@ -598,7 +586,11 @@ void applyQuantize (std::vector<Note>& notes, const RenderOptions& o, const std:
 
         const auto length = n.endTick - n.startTick;
         const auto target = lines.nearest (n.startTick);
-        const auto start = n.startTick + static_cast<int64_t> (std::llround (strength * static_cast<double> (target - n.startTick)));
+        auto start = n.startTick + static_cast<int64_t> (std::llround (strength * static_cast<double> (target - n.startTick)));
+
+        if (start >= limitTick && start > n.startTick)
+            start = n.startTick; // never to or past the end of the take: keeps >= 1 tick inside it
+
         n.startShiftTicks = start - n.startTick;
         n.startTick = start;
 
@@ -609,11 +601,12 @@ void applyQuantize (std::vector<Note>& notes, const RenderOptions& o, const std:
             if (end - start < halfGrid)
                 end = lines.atOrAfter (start + halfGrid); // the first grid line at least half a step after the start
 
-            n.endTick = end;
+            n.endTick = std::max (std::min (end, limitTick), start + 1);
         }
         else if (n.endTick <= start)
         {
-            n.endTick = start + std::max<int64_t> (1, length); // moved past its end: keeps its length
+            // Moved past its end: keeps its length (inside the take)
+            n.endTick = std::max (std::min (start + std::max<int64_t> (1, length), limitTick), start + 1);
         }
     }
 }
@@ -692,19 +685,19 @@ int64_t barLineAtOrAfter (const std::vector<TickTimeSignature>& signatures, int 
 
     return std::max<int64_t> (tick, static_cast<int64_t> (4) * ppq);
 }
-} // namespace
 
-RenderedTake TakeRenderer::render (const Take& take, const RenderOptions& options)
+/** Everything of render() except the WAV span (o sanitised). lastNoteEnd: compensated sample of the end of
+    the version's last note (noSample if it has none). */
+RenderedTake renderEvents (const Take& take, const RenderOptions& o, const Origin& origin, int64_t& lastNoteEnd)
 {
-    const auto o = sanitise (options);
-    const auto origin = computeOrigin (take, o);
     const auto clean = o.version == ExportVersion::clean && ! take.settings.testPattern; // the pattern is exact
+    const auto record = origin.synced && take.kind == TakeKind::record;
 
     RenderedTake r;
     r.ticksPerQuarterNote = o.ticksPerQuarterNote;
     r.originBar = origin.synced ? origin.bar : 0;
     r.originBeats = origin.synced ? origin.beats : 0.0;
-    r.audio = audioSpanFor (take, origin);
+    lastNoteEnd = CapturedEvent::noSample;
 
     // --- tempo / time-signature maps (the quantize grid is laid out per bar of the rendered map) ------
     if (origin.synced)
@@ -783,14 +776,38 @@ RenderedTake TakeRenderer::render (const Take& take, const RenderOptions& option
     {
         n.startTick = tickAt (take, origin, n.start);
         n.endTick = std::max (n.startTick, tickAt (take, origin, n.end));
+
+        if (! n.dropped)
+            lastNoteEnd = lastNoteEnd == CapturedEvent::noSample ? n.end : std::max (lastNoteEnd, n.end);
     }
+
+    // The end of the take in the export: the bar line at or after endSample (a cut / a complete Record take
+    // ends exactly on one; the tick of a bar line may round one tick over it)
+    const auto takeEndTick = origin.synced
+                                 ? barLineAtOrAfter (r.timeSignatures, o.ticksPerQuarterNote,
+                                                     std::max<int64_t> (0, tickAt (take, origin, std::max (take.startSample, take.endSample)) - 1))
+                                 : std::numeric_limits<int64_t>::max();
 
     // --- 3. quantize (synced only) --------------------------------------------------------------------
     if (origin.synced && o.quantize != QuantizeGrid::off)
-        applyQuantize (notes, o, r.timeSignatures);
+        applyQuantize (notes, o, r.timeSignatures, takeEndTick);
 
     // --- 4. pairing / clamping ------------------------------------------------------------------------
     applyPairing (notes);
+
+    // --- end of the track (docs/M3.1-DESIGN.md 3.4, 4.3): the version's notes decide, not bends / CCs ----
+    int64_t lastNoteOffTick = 0;
+
+    for (const auto& n : notes)
+        if (! n.dropped)
+            lastNoteOffTick = std::max (lastNoteOffTick, n.endTick);
+
+    if (record)
+        r.endTick = std::max (takeEndTick, lastNoteOffTick); // never trimmed: N bars (Stop: whole bars)
+    else if (origin.synced)
+        r.endTick = barLineAtOrAfter (r.timeSignatures, o.ticksPerQuarterNote, lastNoteOffTick);
+    else
+        r.endTick = std::max<int64_t> (1, lastNoteOffTick);
 
     const auto exportBends = bendsEnabled (o.bends, take.settings.bendMode);
     r.bendRangeSemitones = exportBends ? std::max (1, take.settings.bendRangeSemitones) : 0;
@@ -842,6 +859,8 @@ RenderedTake TakeRenderer::render (const Take& take, const RenderOptions& option
         {
             tick = tickAt (take, origin, c.time);
         }
+
+        tick = std::min (tick, r.endTick); // bends / CCs after the last note never extend the take
 
         out.push_back ({ TickEvent { tick, c.type, c.channel, c.data1, c.data2, c.bend }, c.order });
     }
@@ -904,23 +923,84 @@ RenderedTake TakeRenderer::render (const Take& take, const RenderOptions& option
             ++r.noteCount;
     }
 
-    const auto lastEventTick = r.events.empty() ? int64_t { 0 } : r.events.back().tick;
+    if (! r.events.empty())
+        r.endTick = std::max (r.endTick, r.events.back().tick); // (cannot happen: every tick is clamped)
 
-    // --- end of the track ------------------------------------------------------------------------------
     if (origin.synced)
     {
-        r.endTick = barLineAtOrAfter (r.timeSignatures, o.ticksPerQuarterNote, lastEventTick);
-
         // Meta changes at or after the end of the track are meaningless
         const auto beforeEnd = [&r] (int64_t tick) { return tick == 0 || tick < r.endTick; };
         std::erase_if (r.tempos, [&] (const TickTempo& t) { return ! beforeEnd (t.tick); });
         std::erase_if (r.timeSignatures, [&] (const TickTimeSignature& t) { return ! beforeEnd (t.tick); });
     }
-    else
+
+    return r;
+}
+
+/** The WAV span (docs/M3.1-DESIGN.md 3.4, 4.3). WAV sample 0 = tick 0. Synced: [sampleAtBeats (originBeats)
+    + rt, end) with end = endSample + rt for Record takes, else the bar line where the Clean render with the
+    WAV options (quantize off) ends + rt, at most endSample + rt. Free: [s0, end) with end = Clean's last
+    note-off + freeTailSeconds, at most endSample. clean / cleanLastNoteEnd: that Clean render if the caller
+    has it (else it is rendered here). */
+AudioSpan audioSpanFor (const Take& take, const RenderOptions& o, const Origin& origin, const RenderedTake* clean,
+                        int64_t cleanLastNoteEnd)
+{
+    AudioSpan span;
+    const auto record = origin.synced && take.kind == TakeKind::record;
+    RenderedTake rendered;
+
+    if (clean == nullptr && ! record)
     {
-        r.endTick = std::max<int64_t> (1, lastEventTick);
+        auto wavOptions = o;
+        wavOptions.version = ExportVersion::clean;
+        wavOptions.quantize = QuantizeGrid::off;
+        rendered = renderEvents (take, wavOptions, origin, cleanLastNoteEnd);
+        clean = &rendered;
     }
 
+    if (origin.synced)
+    {
+        const auto start = static_cast<int64_t> (std::llround (take.timeline.sampleAtBeats (origin.beats))) + origin.roundTrip;
+        auto end = take.endSample + origin.roundTrip;
+
+        if (! record)
+        {
+            const auto endBeats = origin.beats + static_cast<double> (clean->endTick) / static_cast<double> (o.ticksPerQuarterNote);
+            end = std::min (end, static_cast<int64_t> (std::llround (take.timeline.sampleAtBeats (endBeats))) + origin.roundTrip);
+        }
+
+        span.startSample = start;
+        span.numSamples = std::max<int64_t> (0, end - start);
+    }
+    else
+    {
+        auto end = take.endSample;
+
+        if (cleanLastNoteEnd != CapturedEvent::noSample)
+            end = std::min (end, cleanLastNoteEnd + msToSamples (TakeSegmenter::freeTailSeconds * 1000.0, origin.sampleRate));
+
+        span.startSample = origin.freeStart;
+        span.numSamples = std::max<int64_t> (0, end - origin.freeStart);
+    }
+
+    return span;
+}
+
+/** Whether render (take, o) is the render the WAV span follows (Clean, quantize off). */
+bool isWavRender (const Take& take, const RenderOptions& o) noexcept
+{
+    return (o.version == ExportVersion::clean || take.settings.testPattern) && o.quantize == QuantizeGrid::off;
+}
+} // namespace
+
+RenderedTake TakeRenderer::render (const Take& take, const RenderOptions& options)
+{
+    const auto o = sanitise (options);
+    const auto origin = computeOrigin (take, o);
+    int64_t lastNoteEnd = CapturedEvent::noSample;
+    auto r = renderEvents (take, o, origin, lastNoteEnd);
+    r.audio = isWavRender (take, o) ? audioSpanFor (take, o, origin, &r, lastNoteEnd)
+                                    : audioSpanFor (take, o, origin, nullptr, CapturedEvent::noSample);
     return r;
 }
 
@@ -935,7 +1015,7 @@ int64_t TakeRenderer::roundTripFor (const Take& take, const CaptureOffsetSetting
 AudioSpan TakeRenderer::computeAudioSpan (const Take& take, const RenderOptions& options)
 {
     const auto o = sanitise (options);
-    return audioSpanFor (take, computeOrigin (take, o));
+    return audioSpanFor (take, o, computeOrigin (take, o), nullptr, CapturedEvent::noSample);
 }
 
 void TakeRenderer::refineNoteOnsets (Take& take, std::span<const float> audio, int64_t audioStartSample)

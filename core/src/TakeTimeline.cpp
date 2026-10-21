@@ -231,6 +231,58 @@ BarPosition TakeTimeline::barAt (double sample) const noexcept
     return bar;
 }
 
+std::optional<BarLine> TakeTimeline::firstBarLineAtOrAfter (double sample) const noexcept
+{
+    return findBarLine (sample, false);
+}
+
+std::optional<BarLine> TakeTimeline::barLineAfter (double sample) const noexcept
+{
+    return findBarLine (sample, true);
+}
+
+std::optional<BarLine> TakeTimeline::findBarLine (double sample, bool after) const noexcept
+{
+    if (segments.empty() || ! std::isfinite (sample))
+        return std::nullopt;
+
+    const auto* containing = segmentAt (sample);
+    const auto beats0 = beatsAt (sample);
+    const auto bound = after ? beats0 + barSnapToleranceBeats : beats0 - barSnapToleranceBeats;
+
+    for (auto i = static_cast<std::size_t> (containing - segments.data()); i < segments.size(); ++i)
+    {
+        const auto& seg = segments[i];
+
+        if (! seg.playing)
+            continue;
+
+        const bool isLast = i + 1 == segments.size();
+        const auto barLength = barLengthOf (seg);
+
+        // Lowest beats a line of this segment may have, then the first line of its grid at or above it
+        const auto lowest = std::max (seg.beats - barSnapToleranceBeats, bound);
+        const auto lowestPpq = seg.hostPpq + (lowest - seg.beats);
+        const auto k = std::ceil ((lowestPpq - seg.barAnchorPpq) / barLength - 1.0e-9);
+        auto beats = std::max (seg.beats, seg.beats + (seg.barAnchorPpq + k * barLength - seg.hostPpq));
+
+        if (! after)
+            beats = std::max (beats, beats0); // a line just before the query counts as at it
+
+        if (! isLast && ! (beats < segments[i + 1].beats))
+            continue; // past this segment: the next segment's grid decides
+
+        auto lineSample = static_cast<double> (seg.startSample) + (beats - seg.beats) / beatsPerSample (seg, sampleRate);
+
+        if (! after)
+            lineSample = std::max (lineSample, sample);
+
+        return BarLine { lineSample, beats };
+    }
+
+    return std::nullopt;
+}
+
 std::vector<TempoPoint> TakeTimeline::tempoMap (double fromBeats, double toBeats) const
 {
     std::vector<TempoPoint> map;

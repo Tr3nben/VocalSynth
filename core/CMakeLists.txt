@@ -52,7 +52,10 @@ add_library(VocalSynthCore STATIC
     src/CaptureDrain.cpp
     src/TakeRenderer.cpp
     src/SmfWriter.cpp
-    src/WavWriter.cpp)
+    src/WavWriter.cpp
+    # M3.1 take length and Record mode (docs/M3.1-DESIGN.md)
+    include/vocalsynth/CaptureMode.h
+    src/CaptureMode.cpp)
 
 target_include_directories(VocalSynthCore PUBLIC include)
 target_compile_features(VocalSynthCore PUBLIC cxx_std_23)

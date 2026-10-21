@@ -24,6 +24,9 @@
 //   --markdown <file|->      also write a Markdown summary (tables per algorithm, range, dataset, sweep)
 //   --summary-only           leave out the per-file results
 //   --notes                  also list the detected notes per file
+//   --frames <prefix>        diagnostics for a single input file without a sweep: writes every analysis frame
+//                            to <prefix><algorithm>.csv (time, raw and processed f0 / confidence / RMS, active
+//                            note, voiced) and the notes to <prefix><algorithm>.notes.csv
 //
 // File names: "<range>_<dataset>_<rest>.wav" (tools/corpus writes them so). The range prefix selects the
 // voice range (--range auto); the second token groups the results ("byDataset"); "byRange" groups by range.
@@ -97,6 +100,7 @@ struct Options
     vocalsynth::VoiceSettings settings {};
     std::vector<float> gates, stickiness, minNotes; ///< sweep lists (empty = the single value in settings)
     bool listNotes = false;
+    std::string framesPrefix;
     bool selfTest = false;
     bool unitTest = false;
     bool keepCorpus = false;
@@ -116,23 +120,26 @@ struct RunResult
     std::vector<DetectedNote> notes;
     double collarSeconds = 0.0;
     double latencyModelMs = 0.0;
+    std::string framesCsv; ///< only with --frames
 };
 
 struct FrameRecord
 {
     int64_t hopSample;
-    float raw;
-    float processed;
+    vocalsynth::PitchFrame raw;
+    vocalsynth::PitchFrame processed;
+    int activeNote;
     bool voiced;
 };
 
 void recordFrame (void* context, const vocalsynth::AnalysisFrameInfo& info) noexcept
 {
     static_cast<std::vector<FrameRecord>*> (context)->push_back (
-        { info.hopSample, info.raw.frequencyHz, info.processed.frequencyHz, info.voiced });
+        { info.hopSample, info.raw, info.processed, info.activeNote, info.voiced });
 }
 
-RunResult runPipeline (const std::vector<float>& mono, double sampleRate, const vocalsynth::VoiceSettings& settings, int block)
+RunResult runPipeline (const std::vector<float>& mono, double sampleRate, const vocalsynth::VoiceSettings& settings, int block,
+                       bool withFramesCsv = false)
 {
     vocalsynth::VoicePipeline pipeline;
     pipeline.prepare (sampleRate, block);
@@ -185,8 +192,27 @@ RunResult runPipeline (const std::vector<float>& mono, double sampleRate, const 
     for (const auto& f : frames)
     {
         const auto t = (static_cast<double> (f.hopSample) - centre) / sampleRate;
-        result.raw.push_back ({ t, static_cast<double> (f.raw), f.voiced });
-        result.processed.push_back ({ t - medianDelay / sampleRate, static_cast<double> (f.processed), f.voiced });
+        result.raw.push_back ({ t, static_cast<double> (f.raw.frequencyHz), f.voiced });
+        result.processed.push_back ({ t - medianDelay / sampleRate, static_cast<double> (f.processed.frequencyHz), f.voiced });
+    }
+
+    if (withFramesCsv)
+    {
+        // Emit time of the frame (input sample that completed the hop) and the window centre of the raw frame
+        result.framesCsv = "emit_s,centre_s,raw_hz,raw_conf,raw_db,proc_hz,proc_conf,proc_db,active_note,voiced\n";
+        char line[256];
+
+        for (const auto& f : frames)
+        {
+            std::snprintf (line, sizeof (line), "%.6f,%.6f,%.3f,%.4f,%.2f,%.3f,%.4f,%.2f,%d,%d\n",
+                           static_cast<double> (f.hopSample) / sampleRate,
+                           (static_cast<double> (f.hopSample) - centre) / sampleRate,
+                           static_cast<double> (f.raw.frequencyHz), static_cast<double> (f.raw.confidence),
+                           static_cast<double> (f.raw.rmsDb), static_cast<double> (f.processed.frequencyHz),
+                           static_cast<double> (f.processed.confidence), static_cast<double> (f.processed.rmsDb),
+                           f.activeNote, f.voiced ? 1 : 0);
+            result.framesCsv += line;
+        }
     }
 
     const auto factor = static_cast<double> (pipeline.getDecimationFactor());
@@ -372,6 +398,8 @@ struct TaskResult
     int detectedNotes = 0;
 };
 
+bool writeText (const std::string& path, const std::string& text);
+
 TaskResult runTask (const Options& options, const InputFile& file, const vocalsynth::VoiceSettings& gridSettings,
                     PitchAlgorithm algorithm)
 {
@@ -415,7 +443,25 @@ TaskResult runTask (const Options& options, const InputFile& file, const vocalsy
                    + ",\"channels\":" + std::to_string (wav.numChannels) + ",\"seconds\":" + number (r.seconds, 3)
                    + ",\"pitchOnly\":" + (labels.pitchOnly ? "true" : "false");
 
-    const auto run = runPipeline (wav.mono, wav.sampleRate, settings, options.block);
+    const auto run = runPipeline (wav.mono, wav.sampleRate, settings, options.block, ! options.framesPrefix.empty());
+
+    if (! options.framesPrefix.empty())
+    {
+        std::string notesCsv = "onset_s,offset_s,midi_note,velocity\n";
+
+        for (const auto& n : run.notes)
+            notesCsv += number (n.onsetSeconds, 6) + "," + number (n.offsetSeconds, 6) + "," + std::to_string (n.midiNote)
+                        + "," + std::to_string (n.velocity) + "\n";
+
+        const auto prefix = options.framesPrefix + algorithmName (algorithm);
+
+        if (! writeText (prefix + ".csv", run.framesCsv) || ! writeText (prefix + ".notes.csv", notesCsv))
+        {
+            r.ok = false;
+            r.error = "cannot write " + prefix + ".csv";
+            return r;
+        }
+    }
     r.detectedNotes = static_cast<int> (run.notes.size());
     r.json = std::string (",\"") + algorithmName (algorithm) + "\":{\"detectedNotes\":" + std::to_string (run.notes.size())
              + ",\"latencyModelMs\":" + number (run.latencyModelMs, 2) + ",\"collarMs\":" + ms (run.collarSeconds);
@@ -1062,7 +1108,7 @@ bool parseArgs (int argc, char** argv, Options& o, std::string& error)
         else if (a == "--summary-only")
             o.summaryOnly = true;
         else if (a == "--corpus-dir" || a == "--write-corpus" || a == "--range" || a == "--algorithm" || a == "--labels"
-                 || a == "--f0-ref" || a == "--json" || a == "--markdown")
+                 || a == "--f0-ref" || a == "--json" || a == "--markdown" || a == "--frames")
         {
             const auto* v = value();
 
@@ -1076,6 +1122,7 @@ bool parseArgs (int argc, char** argv, Options& o, std::string& error)
                            : a == "--labels"       ? o.labels
                            : a == "--f0-ref"       ? o.f0Ref
                            : a == "--json"         ? o.jsonPath
+                           : a == "--frames"       ? o.framesPrefix
                                                    : o.markdownPath;
             target = v;
         }
@@ -1305,6 +1352,9 @@ int main (int argc, char** argv)
 
     std::size_t baseIndex = 0;
     auto grid = buildGrid (options, baseIndex);
+
+    if (! options.framesPrefix.empty() && (files.size() != 1 || grid.size() != 1))
+        return usage ("--frames needs a single input file and no sweep");
 
     std::string json = "{\"tool\":\"vs-eval\",\"selfTest\":" + std::string (options.selfTest ? "true" : "false")
                        + ",\"blockSize\":" + std::to_string (options.block) + ",\"settings\":"

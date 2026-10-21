@@ -1,5 +1,6 @@
 #pragma once
 
+#include "vocalsynth/CaptureMode.h"
 #include "vocalsynth/EventTiming.h"
 #include "vocalsynth/VoiceSettings.h"
 #include "vocalsynth/VsEvent.h"
@@ -38,6 +39,12 @@ struct CaptureSettingsInfo
     int channel = 1;
     float minNoteLengthMs = 60.0f;
     bool testPattern = false;            ///< source = Test Pattern (no detection delay)
+    /** M3.1 (docs/M3.1-DESIGN.md 4.2): how takes are made; in the stream so a mode change is timed by the
+        audio clock. */
+    CaptureMode captureMode = CaptureMode::background;
+    /** M3.1: longest background take in bars, 0 = Off. The plain default stays "no limit" (0.3.0 behaviour);
+        the plugin sends the parameter (default 16). Travels as one byte (clamped to 0..255). */
+    int takeMaxBars = 0;
 
     constexpr bool operator== (const CaptureSettingsInfo&) const noexcept = default;
 };
@@ -53,7 +60,9 @@ enum class CaptureMarkerKind : uint8_t
     audioOn,     ///< captureAudio switched on (audio frames follow)
     audioOff,    ///< captureAudio switched off (no audio frames until audioOn)
     bypassOn,    ///< host bypass started (audio of bypassed blocks is captured as silence)
-    bypassOff
+    bypassOff,
+    recordArm,   ///< M3.1 Record button: grabBars = N bars to record (docs/M3.1-DESIGN.md 4)
+    recordCancel ///< M3.1 Cancel: disarms, or discards the Record take being recorded
 };
 
 enum class CaptureRecordType : uint8_t
@@ -83,7 +92,7 @@ struct EventRecord
 struct MarkerRecord
 {
     CaptureMarkerKind kind = CaptureMarkerKind::newTake;
-    int grabBars = 8;          ///< grab only
+    int grabBars = 8;          ///< grab; recordArm: the bars to record
     double grabSeconds = 30.0; ///< grab only
 };
 

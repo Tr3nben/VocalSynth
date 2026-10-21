@@ -241,6 +241,11 @@ public:
     bool isCaptureEnabled() const noexcept;
     bool isCaptureAudioEnabled() const noexcept;
 
+    /** M3.1 parameters (raw atomics, any thread): captureMode, takeMaxBars in bars (0 = Off), recordBars. */
+    CaptureMode getCaptureMode() const noexcept;
+    int getTakeMaxBars() const noexcept;
+    int getRecordBars() const noexcept;
+
     const juce::String& getInstanceId() const noexcept { return instanceId; }
 
     static constexpr std::size_t eventBufferCapacity = 1024;
@@ -302,6 +307,11 @@ private:
     std::atomic<float>* captureOffsetModeParam = nullptr;
     std::atomic<float>* captureOffsetMsParam = nullptr;
     std::atomic<float>* captureFineOffsetMsParam = nullptr;
+
+    // M3.1 parameters (raw atomics, read on any thread)
+    std::atomic<float>* captureModeParam = nullptr;
+    std::atomic<float>* takeMaxBarsParam = nullptr;
+    std::atomic<float>* recordBarsParam = nullptr;
 
     // Audio-thread state (prepared in prepareToPlay, no allocation in processBlock)
     TestPatternGenerator generator;

@@ -2,6 +2,7 @@
 
 #include "CaptureTestHelpers.h"
 
+#include "vocalsynth/TakeRenderer.h"
 #include "vocalsynth/TakeSegmenter.h"
 
 #include <catch2/catch_approx.hpp>
@@ -905,4 +906,747 @@ TEST_CASE ("TakeSegmenter: grab N seconds (free); clamped to the history; no not
     CHECK (g.closed.empty());
     CHECK (g.segmenter.getNextTakeNumber() == 1);
     CHECK_FALSE (TakeSegmenter::makeGrab (g.history, 48000, { CaptureMarkerKind::grab, 8, 10.0 }, 1).has_value());
+}
+
+//==============================================================================
+// M3.1 take length and Record mode (docs/M3.1-DESIGN.md 3, 4)
+
+namespace
+{
+constexpr int64_t rt = 1024;   // Auto round trip of the RecordFeeder's 512-sample blocks (rtSeg)
+constexpr int64_t barTicks = 3840;
+
+CaptureSettingsInfo withLimit (int bars, CaptureMode mode = CaptureMode::background)
+{
+    CaptureSettingsInfo info;
+    info.takeMaxBars = bars;
+    info.captureMode = mode;
+    return info;
+}
+
+CaptureSettingsInfo recordMode() { return withLimit (16, CaptureMode::record); }
+
+/** A note sung at host time [from, to), emitted a round trip later (no detection delay). */
+void sing (RecordFeeder& f, int64_t from, int64_t to, int note)
+{
+    f.noteOn (from + rt, note);
+    f.noteOff (to + rt, note);
+}
+
+RenderOptions rawWithRoundTrip()
+{
+    RenderOptions o;
+    o.version = ExportVersion::raw;
+    o.roundTripSamples = rt;
+    return o;
+}
+
+struct TickNote
+{
+    int64_t start = 0;
+    int64_t end = 0;
+    int pitch = 0;
+    bool operator== (const TickNote&) const = default;
+};
+
+std::vector<TickNote> tickNotes (const RenderedTake& r)
+{
+    std::vector<TickNote> notes;
+    std::array<int64_t, 128> on {};
+    on.fill (-1);
+
+    for (const auto& e : r.events)
+    {
+        if (e.type == TickEventType::noteOn)
+            on[e.data1] = e.tick;
+        else if (e.type == TickEventType::noteOff && on[e.data1] >= 0)
+        {
+            notes.push_back ({ on[e.data1], e.tick, e.data1 });
+            on[e.data1] = -1;
+        }
+    }
+
+    return notes;
+}
+} // namespace
+
+TEST_CASE ("TakeSegmenter M3.1: a background take is anchored at its first note and cut after N bars",
+           "[takesegmenter][takelength]")
+{
+    RecordFeeder f;
+    f.settings (0, withLimit (4));
+    f.transport (0, true, 0.0);
+    REQUIRE (f.segmenter.getOpenTake() != nullptr);
+    CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+    CHECK (f.segmenter.getOpenTakeBar() == 0); // waiting for a note
+    CHECK (f.segmenter.getTakeMaxBars() == 4);
+
+    // Sung before Play (host time < 0), emitted after it: ended before the start, never anchors
+    f.noteOn (500, 59);
+    f.noteOff (900, 59);
+    CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+
+    // The first note sung in bar 3 anchors the take there
+    f.noteOn (2 * bar + 10000 + rt, 60);
+    const auto* open = f.segmenter.getOpenTake();
+    REQUIRE (open != nullptr);
+    CHECK (open->anchorBar == 3);
+    CHECK (open->maxBars == 4);
+    CHECK (open->startSample == 2 * bar);
+    CHECK (f.segmenter.getOpenTakeBar() == 1);
+    f.noteOff (2 * bar + 40000 + rt, 60);
+    sing (f, 4 * bar + 1000, 5 * bar + 90000, 62); // ends in the 4th bar of the take (bar 6)
+
+    f.advance (5 * bar + 1);
+    CHECK (f.segmenter.getOpenTakeBar() == 4);
+
+    // Cut at the 4th bar line after the start of bar 3 = bar 7, once the stream is past it
+    f.advance (6 * bar);
+    CHECK (f.segmenter.getOpenTake()->number == 1);
+    f.advance (6 * bar + 1);
+    REQUIRE (f.segmenter.getOpenTake() != nullptr);
+    CHECK (f.segmenter.getOpenTake()->number == 2);
+    CHECK (f.segmenter.getOpenTake()->kind == TakeKind::automatic);
+    CHECK (f.segmenter.getOpenTake()->startSample == 6 * bar);
+    CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+    CHECK (f.segmenter.getOpenTakeBar() == 0);
+    CHECK (f.segmenter.getState() == TakeSegmenter::State::synced);
+
+    f.advance (6 * bar + tail);
+    REQUIRE (f.closed.size() == 1);
+    const auto first = f.closed[0];
+    CHECK (first.number == 1);
+    CHECK (first.kind == TakeKind::automatic);
+    CHECK (first.startSample == 2 * bar);
+    CHECK (first.endSample == 6 * bar);
+    CHECK (first.captureEndSample == 6 * bar + tail);
+    CHECK (first.anchorBar == 3);
+    CHECK (first.maxBars == 4);
+
+    const auto r = TakeRenderer::render (first, rawWithRoundTrip());
+    CHECK (r.originBar == 3);
+    CHECK (r.endTick == 4 * barTicks);
+    CHECK (r.noteCount == 2); // the pre-roll note is dropped
+
+    // After a pause the next note opens a take at its own bar (9), not at the cut (bar 7)
+    sing (f, 8 * bar + 5000, 8 * bar + 30000, 64);
+    REQUIRE (f.segmenter.getOpenTake() != nullptr);
+    CHECK (f.segmenter.getOpenTake()->number == 2);
+    CHECK (f.segmenter.getOpenTake()->anchorBar == 9);
+    CHECK (f.segmenter.getOpenTake()->startSample == 8 * bar);
+    f.transport (9 * bar, false, 36.0); // Stop before the cut ends it there
+    f.advance (9 * bar + tail);
+    REQUIRE (f.closed.size() == 2);
+    CHECK (f.closed[1].number == 2);
+    CHECK (f.closed[1].startSample == 8 * bar);
+    CHECK (f.closed[1].endSample == 9 * bar);
+    const auto second = TakeRenderer::render (f.closed[1], rawWithRoundTrip());
+    CHECK (second.originBar == 9);
+    CHECK (second.endTick == barTicks);
+}
+
+TEST_CASE ("TakeSegmenter M3.1: a note held across the cut continues in the next take at bar X + N",
+           "[takesegmenter][takelength]")
+{
+    RecordFeeder f;
+    f.settings (0, withLimit (4));
+    f.transport (0, true, 0.0);
+    f.noteOn (1000 + rt, 60);
+    f.advance (4 * bar + 1); // cut at bar 5 while 60 is held
+    REQUIRE (f.segmenter.getOpenTake() != nullptr);
+    CHECK (f.segmenter.getOpenTake()->number == 2);
+    CHECK (f.segmenter.getOpenTake()->anchorBar == 0); // 60 sounds at the start: decided by its note-off
+
+    f.noteOff (4 * bar + 20000 + rt, 60); // sung until after the bar line: anchors take 2 at the cut
+    CHECK (f.segmenter.getOpenTake()->anchorBar == 5);
+    CHECK (f.segmenter.getOpenTake()->startSample == 4 * bar);
+    sing (f, 5 * bar + 100, 5 * bar + 20000, 62);
+    f.transport (6 * bar, false, 24.0);
+    f.advance (6 * bar + tail);
+    REQUIRE (f.closed.size() == 2);
+
+    const auto& a = f.closed[0];
+    const auto& b = f.closed[1];
+    CHECK (a.startSample == 0);
+    CHECK (a.endSample == 4 * bar);
+    CHECK (a.anchorBar == 1);
+    CHECK (b.startSample == 4 * bar);
+    CHECK (b.endSample == 6 * bar);
+    CHECK (b.anchorBar == 5);
+    CHECK (b.events.front().synthetic);
+    CHECK (b.events.front().sample == 4 * bar);
+
+    // Consecutive in the export: take 1 = bars 1..4 with the note clipped at the end (with its note-off),
+    // take 2 = from bar 5, the note continues at tick 0
+    const auto ra = TakeRenderer::render (a, rawWithRoundTrip());
+    const auto rb = TakeRenderer::render (b, rawWithRoundTrip());
+    CHECK (ra.originBar == 1);
+    CHECK (ra.endTick == 4 * barTicks);
+    CHECK (tickNotes (ra) == std::vector<TickNote> { { 40, 4 * barTicks, 60 } });
+    CHECK (rb.originBar == 5);
+    REQUIRE (tickNotes (rb).size() == 2);
+    CHECK (tickNotes (rb)[0] == TickNote { 0, 800, 60 });
+}
+
+TEST_CASE ("TakeSegmenter M3.1: anchor candidates at the start of a take", "[takesegmenter][takelength]")
+{
+    SECTION ("a note that ended before the cut (emitted after it) does not anchor the next take")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        sing (f, 1000, 20000, 60);
+        f.noteOn (4 * bar - 5000 + rt, 62); // sung just before bar 5 ...
+        f.advance (4 * bar + 1);            // ... cut at bar 5 ...
+        f.noteOff (4 * bar - 524 + rt, 62); // ... ended before it
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+        sing (f, 6 * bar + 100, 6 * bar + 20000, 64);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 7);
+        CHECK (f.segmenter.getOpenTake()->startSample == 6 * bar);
+    }
+
+    SECTION ("a note sounding at the start and still on after the capture tail anchors at the start")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, false, 0.0);
+        f.noteOn (90000, 60); // free take
+        f.transport (100000, true, 0.0);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].mode == TakeMode::free);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        f.advance (100000 + tail - 1);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+        f.advance (100000 + tail);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 1);
+        CHECK (f.segmenter.getOpenTake()->startSample == 100000);
+        f.noteOff (100000 + 2 * bar, 60);
+        f.advance (100000 + 4 * bar + 1);
+        CHECK (f.segmenter.getOpenTake()->startSample == 100000 + 4 * bar); // cut after bars 1..4
+    }
+
+    SECTION ("the limit in force when the take is anchored applies; a change applies from the next take")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        sing (f, 1000, 20000, 60);
+        f.settings (bar, withLimit (8));
+        CHECK (f.segmenter.getOpenTake()->maxBars == 4);
+        f.advance (4 * bar + 1);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+        sing (f, 4 * bar + 1000, 4 * bar + 20000, 62);
+        CHECK (f.segmenter.getOpenTake()->maxBars == 8);
+        f.advance (12 * bar);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+        f.advance (12 * bar + 1);
+        CHECK (f.segmenter.getOpenTake()->number == 3);
+    }
+}
+
+TEST_CASE ("TakeSegmenter M3.1: limit Off keeps the 0.3.0 Play .. Stop take; New take restarts the count",
+           "[takesegmenter][takelength]")
+{
+    SECTION ("Off")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (0));
+        f.transport (0, true, 0.0);
+        sing (f, 2 * bar + 1000, 2 * bar + 20000, 60);
+        sing (f, 24 * bar + 1000, 24 * bar + 20000, 62);
+        f.advance (30 * bar);
+        CHECK (f.segmenter.getOpenTakeBar() == 0);
+        f.transport (30 * bar, false, 120.0);
+        f.advance (30 * bar + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].startSample == 0);
+        CHECK (f.closed[0].endSample == 30 * bar);
+        CHECK (f.closed[0].anchorBar == 0);
+        CHECK (f.closed[0].maxBars == 0);
+        const auto r = TakeRenderer::render (f.closed[0], rawWithRoundTrip());
+        CHECK (r.originBar == 3);
+        CHECK (r.endTick == 23 * barTicks); // bars 3 .. 25: ends at the bar line after the last note
+    }
+
+    SECTION ("New take")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        sing (f, 1000, 20000, 60);
+        f.marker (2 * bar + 100, CaptureMarkerKind::newTake);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->kind == TakeKind::manual);
+        CHECK (f.segmenter.getOpenTake()->startSample == 2 * bar + 100);
+        sing (f, 2 * bar + 5000, 2 * bar + 20000, 62);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 3);
+        CHECK (f.segmenter.getOpenTake()->startSample == 2 * bar + 100); // never before the split
+        f.advance (6 * bar + 1);                                          // 4 bars from bar 3
+        CHECK (f.segmenter.getOpenTake()->number == 3);
+        f.advance (6 * bar + tail);
+        REQUIRE (f.closed.size() == 2);
+        CHECK (f.closed[0].endSample == 2 * bar + 100);
+        CHECK (f.closed[1].endSample == 6 * bar);
+    }
+}
+
+TEST_CASE ("TakeSegmenter M3.1: the cut follows tempo changes and the time signature", "[takesegmenter][takelength]")
+{
+    SECTION ("120 -> 60 BPM at bar 3")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        sing (f, 1000, 20000, 60);
+        f.transport (2 * bar, true, 8.0, 60.0); // bars 3 and 4 take 192000 samples each
+        f.advance (2 * bar + 2 * 192000);
+        CHECK (f.segmenter.getOpenTake()->number == 1);
+        f.advance (2 * bar + 2 * 192000 + 1);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+        CHECK (f.segmenter.getOpenTake()->startSample == 2 * bar + 2 * 192000);
+    }
+
+    SECTION ("3/4")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0, 120.0, 3, 4);
+        sing (f, 73000, 90000, 60); // bar 2 (72000 samples per bar)
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 2);
+        f.advance (5 * 72000 + 1);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+        f.advance (5 * 72000 + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].startSample == 72000);
+        CHECK (f.closed[0].endSample == 5 * 72000);
+        const auto r = TakeRenderer::render (f.closed[0], rawWithRoundTrip());
+        CHECK (r.originBar == 2);
+        CHECK (r.endTick == 3 * 960);
+    }
+}
+
+TEST_CASE ("TakeSegmenter M3.1: free takes are cut after N bars at the host tempo (else 120 BPM)",
+           "[takesegmenter][takelength]")
+{
+    SECTION ("held note at 100 BPM: continues in the next free take")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, false, 0.0, 100.0);
+        const auto limit = freeModeBarsToSamples (4, 48000.0, 100.0);
+        CHECK (limit == 460800);
+        f.noteOn (48000, 60);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->maxBars == 4);
+        f.advance (48000 + limit);
+        CHECK (f.segmenter.getOpenTake()->number == 1);
+        f.advance (48000 + limit + 1);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].mode == TakeMode::free);
+        CHECK (f.closed[0].endSample == 48000 + limit);
+        CHECK (f.closed[0].events.back().synthetic); // the held note is closed at the cut
+        CHECK (notesPaired (f.closed[0]));
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->startSample == 48000 + limit);
+        CHECK (f.segmenter.getOpenTake()->events.front().synthetic);
+        f.noteOff (48000 + limit + 40000, 60);
+        f.advance (48000 + limit + 40000 + gap3s);
+        REQUIRE (f.closed.size() == 2);
+        CHECK (f.closed[1].endSample == 48000 + limit + 40000 + freeTail);
+    }
+
+    SECTION ("no playhead: 120 BPM; nothing sounding at the cut -> the next note-on starts a take")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.noTransport (0);
+        const auto limit = freeModeBarsToSamples (4, 48000.0, 120.0);
+        CHECK (limit == 384000);
+
+        for (int64_t k = 0; k < 8; ++k)
+        {
+            f.noteOn (50000 + k * 50000, 60);
+            f.noteOff (60000 + k * 50000, 60);
+        }
+
+        f.advance (50000 + limit + 1);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].endSample == 50000 + limit);
+        CHECK (f.closed[0].noteCount == 8);
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+        CHECK (f.segmenter.getState() == TakeSegmenter::State::freeWaiting);
+        f.noteOn (450000, 62);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->startSample == 450000);
+    }
+}
+
+//==============================================================================
+TEST_CASE ("TakeSegmenter M3.1: Record armed while playing starts at the next bar line and spans exactly N bars",
+           "[takesegmenter][recordmode]")
+{
+    RecordFeeder f;
+    f.settings (0, recordMode());
+    f.transport (0, true, 0.0);
+    CHECK (f.segmenter.getState() == TakeSegmenter::State::syncedIdle);
+    CHECK (f.segmenter.getOpenTake() == nullptr);
+    CHECK (f.segmenter.getRecordStatus().phase == RecordStatus::Phase::idle);
+
+    f.marker (bar + 30000, CaptureMarkerKind::recordArm, 2);
+    f.advance (bar + 40000);
+    auto status = f.segmenter.getRecordStatus();
+    CHECK (status.phase == RecordStatus::Phase::countIn);
+    CHECK (status.bars == 2);
+    CHECK (status.startBar == 3);
+    CHECK (status.beatsToStart == Approx (56000.0 / 24000.0));
+
+    // Sung over the start: begins in bar 2, held into bar 3
+    f.noteOn (bar + 50000 + rt, 60);
+    CHECK (f.segmenter.getOpenTake() == nullptr); // no background take in Record mode
+    f.advance (2 * bar);
+    CHECK (f.segmenter.getOpenTake() == nullptr);
+    f.advance (2 * bar + 1);
+    REQUIRE (f.segmenter.getOpenTake() != nullptr);
+    CHECK (f.segmenter.getOpenTake()->kind == TakeKind::record);
+    CHECK (f.segmenter.getOpenTake()->startSample == 2 * bar);
+    CHECK (f.segmenter.getState() == TakeSegmenter::State::synced);
+    status = f.segmenter.getRecordStatus();
+    CHECK (status.phase == RecordStatus::Phase::recording);
+    CHECK (status.barInTake == 1);
+    CHECK (status.startBar == 3);
+    CHECK (status.takeNumber == 1);
+
+    f.noteOff (2 * bar + 10000 + rt, 60);
+    sing (f, 2 * bar + 30000, 2 * bar + 60000, 62);
+    f.noteOn (3 * bar + 50000 + rt, 64); // held over the end
+    f.advance (3 * bar + 1);
+    CHECK (f.segmenter.getRecordStatus().barInTake == 2);
+    CHECK (f.segmenter.getOpenTakeBar() == 2);
+    f.advance (4 * bar + 1);
+    CHECK (f.segmenter.getOpenTake() == nullptr); // ended by itself, one shot
+    CHECK (f.segmenter.getState() == TakeSegmenter::State::syncedIdle);
+    CHECK (f.segmenter.getRecordStatus().phase == RecordStatus::Phase::idle);
+    f.noteOff (4 * bar + 20000 + rt, 64);
+    f.advance (4 * bar + tail);
+    REQUIRE (f.closed.size() == 1);
+
+    const auto& take = f.closed[0];
+    CHECK (take.kind == TakeKind::record);
+    CHECK (take.mode == TakeMode::synced);
+    CHECK (take.startSample == 2 * bar);
+    CHECK (take.endSample == 4 * bar);
+    CHECK (take.anchorBar == 3);
+    CHECK (take.maxBars == 2);
+
+    for (const auto version : { ExportVersion::raw, ExportVersion::clean })
+    {
+        auto o = rawWithRoundTrip();
+        o.version = version;
+        const auto r = TakeRenderer::render (take, o);
+        CHECK (r.originBar == 3);
+        CHECK (r.endTick == 2 * barTicks);
+        // 60 sung before bar 3 starts at X, 64 is clipped at the end with a note-off
+        CHECK (tickNotes (r) == std::vector<TickNote> { { 0, 400, 60 }, { 1200, 2400, 62 }, { 5840, 2 * barTicks, 64 } });
+        CHECK (r.audio.startSample == 2 * bar + rt);
+        CHECK (r.audio.numSamples == 2 * bar);
+    }
+
+    // Nothing else is recorded afterwards
+    sing (f, 5 * bar, 5 * bar + 20000, 65);
+    f.transport (6 * bar, false, 24.0);
+    sing (f, 7 * bar, 7 * bar + 20000, 65);
+    f.advance (12 * bar);
+    CHECK (f.closed.size() == 1);
+}
+
+TEST_CASE ("TakeSegmenter M3.1: Record start rules", "[takesegmenter][recordmode]")
+{
+    SECTION ("a marker exactly on a bar line starts there")
+    {
+        RecordFeeder f;
+        f.settings (0, recordMode());
+        f.transport (0, true, 0.0);
+        f.marker (2 * bar, CaptureMarkerKind::recordArm, 1);
+        f.advance (2 * bar + 1);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->startSample == 2 * bar);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 3);
+    }
+
+    SECTION ("armed while stopped: starts at the bar line where playback starts")
+    {
+        const double startPpq = GENERATE (0.0, 1.0);
+        RecordFeeder f;
+        f.settings (0, recordMode());
+        f.transport (0, false, startPpq);
+        f.marker (10000, CaptureMarkerKind::recordArm, 2);
+        f.advance (50000);
+        CHECK (f.segmenter.getRecordStatus().phase == RecordStatus::Phase::waitingForPlay);
+        CHECK (f.segmenter.getRecordStatus().bars == 2);
+        f.noteOn (60000, 60); // no free take in Record mode
+        f.noteOff (70000, 60);
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+
+        f.transport (100000, true, startPpq);
+        const auto expectedStart = startPpq == 0.0 ? 100000 : 100000 + 3 * 24000;
+        f.advance (100000 + 1);
+        CHECK (f.segmenter.getRecordStatus().phase
+               == (startPpq == 0.0 ? RecordStatus::Phase::recording : RecordStatus::Phase::countIn));
+        f.advance (expectedStart + 1);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->startSample == expectedStart);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == (startPpq == 0.0 ? 1 : 2));
+        f.advance (expectedStart + 2 * bar + 1);
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+    }
+
+    SECTION ("a jump during the count-in recomputes the start; Stop keeps it armed")
+    {
+        RecordFeeder f;
+        f.settings (0, recordMode());
+        f.transport (0, true, 0.0);
+        f.marker (48000, CaptureMarkerKind::recordArm, 4);
+        f.advance (50000);
+        CHECK (f.segmenter.getRecordStatus().startBar == 2);
+        f.transport (60000, true, 10.0); // jump to beat 3 of bar 3: the next line is bar 4
+        f.advance (60001);
+        CHECK (f.segmenter.getRecordStatus().startBar == 4);
+        CHECK (f.segmenter.getRecordStatus().beatsToStart == Approx (2.0 - 1.0 / 24000.0));
+        f.advance (96001);
+        CHECK (f.segmenter.getOpenTake() == nullptr); // the old grid's bar line does not count
+        f.transport (100000, false, 10.0 + 40000.0 / 24000.0);
+        f.advance (200000);
+        CHECK (f.segmenter.getRecordStatus().phase == RecordStatus::Phase::waitingForPlay);
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+        f.transport (300000, true, 16.0); // bar 5
+        f.advance (300001);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->startSample == 300000);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 5);
+    }
+}
+
+TEST_CASE ("TakeSegmenter M3.1: Record take Stop, Cancel and mode switches", "[takesegmenter][recordmode]")
+{
+    SECTION ("Stop before the end shortens the take (kept, whole bars in the export)")
+    {
+        RecordFeeder f;
+        f.settings (0, recordMode());
+        f.transport (0, true, 0.0);
+        f.marker (0, CaptureMarkerKind::recordArm, 8);
+        sing (f, 10000, 30000, 60);
+        f.transport (bar + 50000, false, 4.0 + 50000.0 / 24000.0);
+        CHECK (f.segmenter.getRecordStatus().phase == RecordStatus::Phase::idle);
+        f.advance (bar + 50000 + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].kind == TakeKind::record);
+        CHECK (f.closed[0].endSample == bar + 50000);
+        const auto r = TakeRenderer::render (f.closed[0], rawWithRoundTrip());
+        CHECK (r.endTick == 2 * barTicks);
+        CHECK (r.audio.numSamples == bar + 50000);
+        // One shot: playing again records nothing
+        f.transport (5 * bar, true, 8.0);
+        sing (f, 5 * bar + 1000, 5 * bar + 9000, 62);
+        f.advance (9 * bar);
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+    }
+
+    SECTION ("Cancel while armed disarms; Cancel while recording discards the take")
+    {
+        RecordFeeder f;
+        f.settings (0, recordMode());
+        f.transport (0, true, 0.0);
+        f.marker (1000, CaptureMarkerKind::recordArm, 2);
+        f.marker (2000, CaptureMarkerKind::recordCancel);
+        f.advance (3 * bar);
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+        CHECK (f.segmenter.getRecordStatus().phase == RecordStatus::Phase::idle);
+
+        f.marker (3 * bar, CaptureMarkerKind::recordArm, 2);
+        sing (f, 3 * bar + 1000, 3 * bar + 20000, 60);
+        f.advance (3 * bar + 30000);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->number == 1);
+        f.marker (3 * bar + 40000, CaptureMarkerKind::recordCancel);
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+        CHECK (f.segmenter.getState() == TakeSegmenter::State::syncedIdle);
+        f.advance (8 * bar);
+        CHECK (f.closed.empty());
+        CHECK (f.segmenter.getNextTakeNumber() == 1); // never listed: the number is free again
+
+        // The history still has it for a grab
+        f.marker (8 * bar, CaptureMarkerKind::grab, 8);
+        f.advance (8 * bar + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].kind == TakeKind::grab);
+        CHECK (f.closed[0].noteCount == 1);
+    }
+
+    SECTION ("Background -> Record closes the background take; Record -> Background ends a Record take there")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (16));
+        f.transport (0, true, 0.0);
+        sing (f, 1000, 20000, 60);
+        f.settings (bar + 10000, recordMode());
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+        CHECK (f.segmenter.getState() == TakeSegmenter::State::syncedIdle);
+        CHECK (f.segmenter.getCaptureMode() == CaptureMode::record);
+        f.marker (bar + 20000, CaptureMarkerKind::newTake); // disabled in Record mode
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+
+        f.marker (bar + 30000, CaptureMarkerKind::recordArm, 4);
+        sing (f, 2 * bar + 1000, 2 * bar + 20000, 62);
+        f.advance (2 * bar + 30000);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->kind == TakeKind::record);
+
+        f.settings (3 * bar + 5000, withLimit (16)); // back to Background while recording
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->kind == TakeKind::automatic);
+        CHECK (f.segmenter.getOpenTake()->startSample == 3 * bar + 5000);
+        CHECK (f.segmenter.getRecordStatus().phase == RecordStatus::Phase::idle);
+        sing (f, 3 * bar + 10000, 3 * bar + 20000, 64);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 4);
+        f.transport (5 * bar, false, 20.0);
+        f.advance (5 * bar + tail);
+        REQUIRE (f.closed.size() == 3);
+        CHECK (f.closed[0].kind == TakeKind::automatic);
+        CHECK (f.closed[0].endSample == bar + 10000);
+        CHECK (f.closed[1].kind == TakeKind::record);
+        CHECK (f.closed[1].startSample == 2 * bar);
+        CHECK (f.closed[1].endSample == 3 * bar + 5000);
+        CHECK (TakeRenderer::render (f.closed[1], rawWithRoundTrip()).endTick == 2 * barTicks);
+        CHECK (f.closed[2].kind == TakeKind::automatic);
+    }
+
+    SECTION ("Record mode while stopped: no free takes; Grab still works")
+    {
+        RecordFeeder f;
+        f.settings (0, recordMode());
+        f.transport (0, false, 0.0);
+
+        for (int64_t s = 48000; s < 10 * 48000; s += 48000)
+        {
+            f.noteOn (s, 60);
+            f.noteOff (s + 20000, 60);
+        }
+
+        f.advance (20 * 48000);
+        CHECK (f.closed.empty());
+        CHECK (f.segmenter.getOpenTake() == nullptr);
+        f.marker (20 * 48000, CaptureMarkerKind::grab, 8, 30.0);
+        f.advance (21 * 48000);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].kind == TakeKind::grab);
+        CHECK (f.closed[0].noteCount == 9);
+    }
+}
+
+TEST_CASE ("TakeSegmenter M3.1: take length and Record results do not depend on the advanceTo pattern",
+           "[takesegmenter][takelength][recordmode]")
+{
+    std::vector<CaptureRecord> records;
+    const auto tr = [&] (int64_t s, bool playing, double ppq, double bpm = 120.0)
+    {
+        TransportInfo t;
+        t.isPlaying = playing;
+        t.hasPpq = true;
+        t.ppqPosition = ppq;
+        t.hasBpm = true;
+        t.bpm = bpm;
+        t.hasTimeSignature = true;
+        t.hasBarStart = true;
+        t.ppqPositionOfLastBarStart = std::floor ((ppq + 1.0e-9) / 4.0) * 4.0;
+        records.push_back (CaptureRecord::makeTransport (s, t));
+    };
+    const auto mk = [&] (int64_t s, CaptureMarkerKind k, int bars = 2)
+    { records.push_back (CaptureRecord::makeMarker (s, { k, bars, 10.0 })); };
+
+    records.push_back (CaptureRecord::makeReset (0, { 48000.0, 512, true }));
+    records.push_back (CaptureRecord::makeSettings (0, withLimit (4)));
+    mk (0, CaptureMarkerKind::captureOn);
+    tr (0, true, 0.0);
+
+    std::mt19937 rng (5);
+
+    for (int64_t s = 1000; s < 60 * bar; s += 9000 + static_cast<int64_t> (rng() % 40000))
+    {
+        const auto note = static_cast<uint8_t> (50 + (rng() % 20));
+        const auto length = 3000 + static_cast<int64_t> (rng() % 60000);
+        records.push_back (CaptureRecord::makeEvent (s, VsEvent::makeNoteOn (0, 1, note, 100),
+                                                     { static_cast<int32_t> (rng() % 3000), EventTimingKind::measured, 0 }));
+        records.push_back (CaptureRecord::makeEvent (s + length, VsEvent::makeNoteOff (0, 1, note),
+                                                     { static_cast<int32_t> (rng() % 3000), EventTimingKind::measured, 0 }));
+    }
+
+    tr (9 * bar + 7, true, 36.0 + 7.0 / 24000.0, 97.0);                // tempo change mid-take
+    records.push_back (CaptureRecord::makeSettings (20 * bar + 3, recordMode()));
+    mk (21 * bar + 5000, CaptureMarkerKind::recordArm, 3);
+    mk (27 * bar, CaptureMarkerKind::recordArm, 8);
+    tr (30 * bar + 11, false, 100.0);                                  // Stop shortens the second Record take
+    tr (32 * bar, true, 101.0);                                        // a new pass, nothing armed
+    mk (33 * bar, CaptureMarkerKind::recordArm, 2);
+    mk (35 * bar, CaptureMarkerKind::grab, 2);
+    records.push_back (CaptureRecord::makeSettings (40 * bar + 1, withLimit (4)));
+    tr (50 * bar, false, 140.0);                                       // free takes with the 4-bar cut
+
+    std::stable_sort (records.begin(), records.end(),
+                      [] (const CaptureRecord& a, const CaptureRecord& b) { return a.sample < b.sample; });
+    const auto end = records.back().sample + 20 * 48000;
+
+    const auto run = [&] (int pattern)
+    {
+        CaptureHistory history;
+        history.prepare (1.0);
+        TakeSegmenter seg;
+        std::vector<Take> closed;
+        std::mt19937 coin (13);
+
+        for (const auto& r : records)
+        {
+            if (pattern == 2 || (pattern == 3 && coin() % 3 == 0))
+                seg.advanceTo (r.sample, history, closed);
+
+            history.addRecord (r);
+            seg.process (r, history, closed);
+
+            if (pattern == 1)
+                seg.advanceTo (r.sample, history, closed);
+        }
+
+        seg.advanceTo (end, history, closed);
+        return closed;
+    };
+
+    const auto reference = run (0);
+    const auto count = [&reference] (auto predicate)
+    { return std::count_if (reference.begin(), reference.end(), predicate); };
+    CHECK (count ([] (const Take& t) { return t.kind == TakeKind::record; }) == 3);
+    CHECK (count ([] (const Take& t) { return t.kind == TakeKind::grab; }) == 1);
+    CHECK (count ([] (const Take& t) { return t.mode == TakeMode::synced && t.kind == TakeKind::automatic && t.maxBars == 4; }) >= 4);
+    CHECK (count ([] (const Take& t) { return t.mode == TakeMode::free && t.maxBars == 4; }) >= 2);
+
+    for (const auto& t : reference)
+    {
+        CAPTURE (t.number, static_cast<int> (t.kind), t.startSample, t.endSample);
+        CHECK (notesPaired (t));
+
+        if (t.kind == TakeKind::record && t.endSample != 30 * bar + 11) // not the one Stop shortened
+        {
+            const auto r = TakeRenderer::render (t, rawWithRoundTrip());
+            CHECK (r.endTick == t.maxBars * barTicks); // exactly N bars
+        }
+    }
+
+    for (int pattern = 1; pattern <= 3; ++pattern)
+    {
+        CAPTURE (pattern);
+        const auto other = run (pattern);
+        REQUIRE (other.size() == reference.size());
+        for (std::size_t i = 0; i < other.size(); ++i)
+            CHECK (takeDifference (other[i], reference[i]).empty());
+    }
 }

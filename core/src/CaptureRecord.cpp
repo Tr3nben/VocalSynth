@@ -10,8 +10,8 @@ namespace vocalsynth
 //   reset:     word0 = sampleRate (double bits), word2 = maxBlockSize, byte0 = clearsHistory
 //   transport: word0 = ppq (double), word1 = bpm (double), word2 = ppq - lastBarStart (float bits),
 //              byte0 = flags, byte1 = numerator, byte2 = denominator
-//   settings:  word0 = testPattern, word2 = minNoteLengthMs (float bits), byte0 = bendMode,
-//              byte1 = bendRangeSemitones, byte2 = channel
+//   settings:  word0 = testPattern, word1 = captureMode | takeMaxBars << 8 (M3.1, bytes 0 and 1),
+//              word2 = minNoteLengthMs (float bits), byte0 = bendMode, byte1 = bendRangeSemitones, byte2 = channel
 //   event:     word0 = type | channel << 8 | data1 << 16 | data2 << 24 | uint16 (bend) << 32,
 //              word2 = delaySamples (int32 bits), byte0 = timing kind, byte1 = timing flags
 //   audio:     word2 = numSamples
@@ -77,6 +77,8 @@ CaptureRecord CaptureRecord::makeSettings (int64_t sample, const CaptureSettings
 {
     auto r = makeRecord (CaptureRecordType::settings, sample);
     r.word0 = info.testPattern ? 1u : 0u;
+    r.word1 = static_cast<uint64_t> (toByte (static_cast<int> (info.captureMode), 0, numCaptureModes - 1))
+              | (static_cast<uint64_t> (toByte (info.takeMaxBars, 0, 255)) << 8);
     r.word2 = std::bit_cast<uint32_t> (info.minNoteLengthMs);
     r.byte0 = toByte (static_cast<int> (info.bendMode), 0, numBendModes - 1);
     r.byte1 = toByte (info.bendRangeSemitones, 0, 255);
@@ -156,6 +158,8 @@ CaptureSettingsInfo CaptureRecord::asSettings() const noexcept
 
     CaptureSettingsInfo info;
     info.testPattern = word0 != 0;
+    info.captureMode = static_cast<CaptureMode> (std::min<uint64_t> (word1 & 0xffu, numCaptureModes - 1));
+    info.takeMaxBars = static_cast<int> ((word1 >> 8) & 0xffu);
     info.minNoteLengthMs = std::bit_cast<float> (word2);
     info.bendMode = static_cast<BendMode> (byte0);
     info.bendRangeSemitones = byte1;

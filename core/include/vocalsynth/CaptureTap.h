@@ -108,7 +108,8 @@ public:
         record if they changed, on/off markers for captureEnabled, captureAudio and bypass transitions
         (captureOff: note-offs for open notes first; captureOff / audioOff: the staged partial audio frame is
         completed with zeros and pushed before the marker), then the markers of pending requests: at most one
-        per kind per block (requests made between two blocks coalesce; a grab carries the newest lengths). */
+        per kind per block, in the order newTake, grab, clear, recordCancel, recordArm (requests made between
+        two blocks coalesce; a grab / Record carries the newest lengths). */
     void beginBlock (const TransportInfo& transport, const CaptureBlockSettings& settings) noexcept;
 
     /** Note-off for every note the tap saw on (and a bend centre on channels whose last bend was not 0) at
@@ -131,6 +132,11 @@ public:
     void requestNewTake() noexcept;
     void requestGrab (int bars, double seconds) noexcept;
     void requestClear() noexcept;
+    /** M3.1 Record button (docs/M3.1-DESIGN.md 4.2): marker recordArm carrying bars (clamped to >= 1). */
+    void requestRecord (int bars) noexcept;
+    /** M3.1 Cancel: marker recordCancel. Marker order at one block start: newTake, grab, clear, recordCancel,
+        recordArm. */
+    void requestRecordCancel() noexcept;
 
     /** Samples processed since the last clearing reset. Stored with release after the block's records were
         pushed: a consumer that loads it (acquire) and then drains the record ring has every record with
@@ -219,11 +225,16 @@ private:
     std::atomic<uint32_t> newTakeRequests { 0 };
     std::atomic<uint32_t> grabRequests { 0 };
     std::atomic<uint32_t> clearRequests { 0 };
+    std::atomic<uint32_t> recordRequests { 0 };
+    std::atomic<uint32_t> recordCancelRequests { 0 };
+    std::atomic<int> recordBars { 8 };
     std::atomic<int> grabBars { 8 };
     std::atomic<double> grabSeconds { 30.0 };
     uint32_t handledNewTake = 0;
     uint32_t handledGrab = 0;
     uint32_t handledClear = 0;
+    uint32_t handledRecord = 0;
+    uint32_t handledRecordCancel = 0;
 
     static_assert (std::atomic<int64_t>::is_always_lock_free);
     static_assert (std::atomic<double>::is_always_lock_free);

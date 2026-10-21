@@ -89,6 +89,17 @@ TEST_CASE ("CaptureRecord: other record types round-trip", "[capturerecord]")
     settings.testPattern = true;
     CHECK (CaptureRecord::makeSettings (7, settings).asSettings() == settings);
 
+    // M3.1 fields (word1: mode, bars); the plain default is Background without a limit
+    CHECK (CaptureSettingsInfo {}.captureMode == CaptureMode::background);
+    CHECK (CaptureSettingsInfo {}.takeMaxBars == 0);
+    settings.captureMode = CaptureMode::record;
+    settings.takeMaxBars = 32;
+    CHECK (CaptureRecord::makeSettings (7, settings).asSettings() == settings);
+    settings.takeMaxBars = 300;
+    CHECK (CaptureRecord::makeSettings (7, settings).asSettings().takeMaxBars == 255);
+    settings.takeMaxBars = -4;
+    CHECK (CaptureRecord::makeSettings (7, settings).asSettings().takeMaxBars == 0);
+
     CHECK (CaptureRecord::makeAudio (256, 256).asAudioNumSamples() == 256);
 
     const MarkerRecord marker { CaptureMarkerKind::grab, 16, 120.0 };
@@ -96,6 +107,12 @@ TEST_CASE ("CaptureRecord: other record types round-trip", "[capturerecord]")
     CHECK (m.kind == CaptureMarkerKind::grab);
     CHECK (m.grabBars == 16);
     CHECK (m.grabSeconds == 120.0);
+
+    const auto arm = CaptureRecord::makeMarker (100, { CaptureMarkerKind::recordArm, 8, 30.0 }).asMarker();
+    CHECK (arm.kind == CaptureMarkerKind::recordArm);
+    CHECK (arm.grabBars == 8);
+    CHECK (CaptureRecord::makeMarker (101, { CaptureMarkerKind::recordCancel }).asMarker().kind
+           == CaptureMarkerKind::recordCancel);
 
     const auto gap = CaptureRecord::makeGap (5, { 3, 1024 }).asGap();
     CHECK (gap.droppedRecords == 3);

@@ -418,8 +418,10 @@ void CaptureWorker::step()
         appliedOptions.takeGapSeconds = options.takeGapSeconds;
     }
 
-    // Drain the rings into the history and the segmenter
+    // Drain the rings into the history and the segmenter (the anchor of synced takes uses the round trip
+    // of the current offset parameters, docs/M3.1-DESIGN.md 3.3)
     closedScratch.clear();
+    segmenter.setOffsetSettings (sources.readOffset());
     drainer.drain (tap, history, segmenter, closedScratch);
     const auto clock = drainer.getLastClock();
     const auto now = nowMs();
@@ -998,6 +1000,8 @@ void CaptureWorker::updateOpenTakeSnapshot (bool due)
     copy->maxBlockSize = open->maxBlockSize;
     copy->settings = open->settings;
     copy->freeBpm = open->freeBpm;
+    copy->maxBars = open->maxBars;
+    copy->anchorBar = open->anchorBar;
     copy->noteCount = open->noteCount;
     copy->incomplete = open->incomplete;
 
@@ -1028,7 +1032,16 @@ void CaptureWorker::updateStatus (int64_t clock)
     }
 
     if (const auto* open = segmenter.getOpenTake(); open != nullptr)
+    {
         s.recordingTakeNumber = open->number;
+        s.openTakeBars = open->maxBars;
+        s.openTakeStartBar = open->anchorBar;
+        s.openTakeBar = segmenter.getOpenTakeBar();
+    }
+
+    s.mode = segmenter.getCaptureMode();
+    s.takeMaxBars = segmenter.getTakeMaxBars();
+    s.record = segmenter.getRecordStatus();
 
     s.audioHistoryBytes = history.getAllocatedAudioBytes();
 

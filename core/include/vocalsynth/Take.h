@@ -24,7 +24,8 @@ enum class TakeKind : uint8_t
 {
     automatic, ///< transport start/stop or free-mode note/gap rules
     manual,    ///< started by "New take"
-    grab       ///< "Grab last ..." (retroactive)
+    grab,      ///< "Grab last ..." (retroactive)
+    record     ///< M3.1 Record mode: exactly Take::maxBars bars from bar Take::anchorBar (docs/M3.1-DESIGN.md 4)
 };
 
 /** Whether the dry voice of a take is available (set by the worker when the take closes). */
@@ -59,8 +60,10 @@ struct CapturedEvent
 
     Two spans (docs/M3-DESIGN.md 5.2):
     - [startSample, endSample): where the take is, in host time (transport start / stop, markers; free takes:
-      first note-on emit sample to last note-off + freeTailSeconds). Synced exports clamp every compensated
-      event time (estimatedSample - roundTrip) into it.
+      first note-on emit sample to last note-off + freeTailSeconds; M3.1: a synced take anchored at bar X
+      starts at bar X at the earliest and is cut after maxBars bars, a Record take spans its bars exactly).
+      Synced exports clamp every compensated event time (estimatedSample - roundTrip) into it. An anchored
+      take may hold events emitted before its startSample (the clamp drops them).
     - [startSample, captureEndSample): the emit samples whose events the take holds. Synced takes and grabs
       keep collecting for TakeSegmenter::compensationTailSamples() after endSample, because what was sung
       just before Stop / the split / the grab reaches the plugin a round trip + detection delay later
@@ -85,6 +88,13 @@ struct Take
                                     ///< captureEndSample, kept by the segmenter while the take is open (the
                                     ///< history may evict the start of a long take); free: may be empty
     double freeBpm = TakeTimeline::fallbackBpm; ///< free mode: host bpm at the take start, else 120
+
+    /** M3.1 take length (docs/M3.1-DESIGN.md 3, 4): the limit in bars in force for this take (background:
+        takeMaxBars when the take was anchored / opened; Record: N), 0 = none. */
+    int maxBars = 0;
+    /** M3.1: FL bar number X the take is anchored at (synced background: the bar of its first note, set once
+        it is known; Record: the first recorded bar), 0 = not anchored (free takes, grabs, limit Off). */
+    int64_t anchorBar = 0;
 
     int noteCount = 0;              ///< note-ons (incl. synthetic ones at the take start); kept up to date
                                     ///< while the take is open (the status line shows it)

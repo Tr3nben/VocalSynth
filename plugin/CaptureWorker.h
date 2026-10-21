@@ -3,6 +3,7 @@
 #include "CaptureExporter.h"
 #include "vocalsynth/CaptureDrain.h"
 #include "vocalsynth/CaptureHistory.h"
+#include "vocalsynth/CaptureMode.h"
 #include "vocalsynth/CaptureOptions.h"
 #include "vocalsynth/CaptureRecord.h"
 #include "vocalsynth/CaptureTap.h"
@@ -58,6 +59,13 @@ struct CaptureStatus
     int timeSigDenominator = 4;
     int recordingTakeNumber = 0;      ///< 0 = none
     int64_t recordingBar = 0;         ///< synced: current bar (FL convention), 0 = none
+    // M3.1 (docs/M3.1-DESIGN.md 4.2, 7), from the stream the segmenter saw
+    CaptureMode mode = CaptureMode::background;
+    int takeMaxBars = 0;              ///< background limit in bars, 0 = Off
+    RecordStatus record;              ///< Record mode: armed / count-in / recording
+    int openTakeBar = 0;              ///< synced background take: bar k of openTakeBars, 0 = not anchored / no limit
+    int openTakeBars = 0;             ///< the open take's limit N (Take::maxBars), 0 = none
+    int64_t openTakeStartBar = 0;     ///< the open take's anchor bar X, 0 = not anchored
     CaptureTap::OverflowCounts overflow;
     std::size_t audioHistoryBytes = 0; ///< RAM of the audio look-back (grows over the first minutes)
     std::size_t takeBytes = 0;         ///< RAM of the listed takes (events, overviews)

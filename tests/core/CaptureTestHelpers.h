@@ -289,6 +289,8 @@ struct TapScenario
     PlayheadSim playhead { 48000.0 };
     std::vector<ScheduledEvent> events;                  ///< sorted by sample
     std::vector<int64_t> newTakeAt, grabAt, clearAt, flushAt;
+    std::vector<std::pair<int64_t, int>> recordAt;        ///< M3.1 Record button: sample, bars
+    std::vector<int64_t> recordCancelAt;
     int grabBars = 8;
     double grabSeconds = 30.0;
     std::vector<std::pair<int64_t, int64_t>> bypassed;   ///< [from, to)
@@ -350,6 +352,12 @@ void runTap (CaptureTap& tap, const TapScenario& sc, int blockSize, Consumer&& c
             tap.requestGrab (sc.grabBars, sc.grabSeconds);
         if (TapScenario::contains (sc.clearAt, start))
             tap.requestClear();
+        if (TapScenario::contains (sc.recordCancelAt, start))
+            tap.requestRecordCancel();
+
+        for (const auto& [at, bars] : sc.recordAt)
+            if (at == start)
+                tap.requestRecord (bars);
 
         CaptureBlockSettings bs;
         bs.captureEnabled = ! TapScenario::inside (sc.captureOff, start);
@@ -467,6 +475,8 @@ inline std::string takeDifference (const Take& a, const Take& b)
     field ("maxBlockSize", a.maxBlockSize, b.maxBlockSize);
     field ("settings", a.settings == b.settings, true);
     field ("freeBpm", a.freeBpm, b.freeBpm);
+    field ("maxBars", a.maxBars, b.maxBars);
+    field ("anchorBar", a.anchorBar, b.anchorBar);
     field ("noteCount", a.noteCount, b.noteCount);
     field ("incomplete", a.incomplete, b.incomplete);
     field ("audio", static_cast<int> (a.audio), static_cast<int> (b.audio));

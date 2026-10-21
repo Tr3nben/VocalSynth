@@ -3,6 +3,7 @@
 #include "CaptureSettings.h"
 #include "CaptureWorker.h"
 #include "FileDragSource.h"
+#include "vocalsynth/CaptureMode.h"
 #include "vocalsynth/Take.h"
 #include "vocalsynth/TakeRenderer.h"
 
@@ -49,14 +50,19 @@ public:
 
     //==============================================================================
     /** Status line, e.g. "Synced 128.0 BPM 4/4 - recording take 3 (bar 17)" (en dash), "Free - waiting for a
-        note", "Free - recording take 4", "Capture off"; overflow counters appended only when non-zero. */
-    static juce::String formatStatus (const CaptureStatus& status, bool captureEnabled, int openTakeNotes);
+        note", "Free - recording take 4", "Capture off"; overflow counters appended only when non-zero.
+        M3.1 (docs/M3.1-DESIGN.md 7): with a take limit "Synced 128.0 BPM 4/4 - take 3, bar 2/16 (bar 17)" /
+        "- take 3 waiting for a note", "Free - recording take 4 (max 16 bars)"; Record mode: "Record mode -
+        press Record (8 bars)" (recordBars), "Armed - starts when FL plays (8 bars)", "Starts at bar 17 -
+        3 beats", "Recording bar 3/8 (take 5)". */
+    static juce::String formatStatus (const CaptureStatus& status, bool captureEnabled, int openTakeNotes,
+                                      int recordBars = recordBarsForIndex (defaultRecordBarsIndex));
 
     /** "Audio history 34.5 MB  ·  takes 1.2 MB (5)". */
     static juce::String formatMemory (const CaptureStatus& status);
 
     /** Row text: "Take 3 · Bar 17 · 4 bars · 12 notes" (synced) / "Take 4 · 14:03:22 · 7.5 s · 5 notes"
-        (free), then the badges " · Grab", " · incomplete", " · audio truncated". */
+        (free), then the badges " · Rec" (Record take), " · Grab", " · incomplete", " · audio truncated". */
     static juce::String describeTake (const Take& take, const RenderedTake& rendered);
 
     /** "Grab last 8 bars" (synced) / "Grab last 30 s" (otherwise). */
@@ -88,6 +94,9 @@ public:
     void pressNewTake();
     void pressGrab();
     void pressClear(); ///< asks first (confirmClear)
+    /** M3.1 Record / Cancel button: Record (recordBars) when nothing is armed, else Cancel. */
+    void pressRecord();
+    juce::String getRecordButtonText() const { return recordButton.getButtonText(); }
 
     /** Clear confirmation: called with a callback that gets true for "Clear". Default: an async AlertWindow.
         Tests replace it. */
@@ -112,6 +121,7 @@ private:
     void update();
     void updateDragHandles();
     void updateGrabButton();
+    void updateModeControls (const CaptureStatus& status);
     void changeState (const std::function<void (CaptureState&)>& change);
     void showSaveMenu();
     void saveMidiAs();
@@ -135,6 +145,11 @@ private:
     CaptureStatus shownStatus;
     CaptureState shownState;
     bool shownSynced = false;
+    bool shownRecordMode = false;
+    bool hasShownMode = false;
+    bool recordActive = false;            ///< the Record button shows Cancel
+    double recordRequestedMs = -1.0e9;    ///< Record pressed, not yet in the worker status
+    double cancelRequestedMs = -1.0e9;    ///< Cancel pressed, not yet in the worker status
     std::optional<RenderOptions> previewOptions; ///< options the preview was painted with
 
     struct CachedRender
@@ -164,6 +179,15 @@ private:
     juce::ComboBox grabSecondsBox;
     juce::TextButton clearButton { "Clear" };
 
+    // M3.1 take length / Record mode (docs/M3.1-DESIGN.md 7)
+    juce::Label modeLabel { {}, "Mode" };
+    juce::ComboBox modeBox;
+    juce::Label maxLengthLabel { {}, "Max length" };
+    juce::ComboBox maxLengthBox;
+    juce::Label recordLengthLabel { {}, "Length" };
+    juce::ComboBox recordLengthBox;
+    juce::TextButton recordButton { "Record" };
+
     juce::Label versionLabel { {}, "Version" };
     juce::ComboBox versionBox;
     juce::Label bendsLabel { {}, "Bends" };
@@ -192,6 +216,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fineOffsetAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> captureAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> audioAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> maxLengthAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> recordLengthAttachment;
 
     std::unique_ptr<juce::FileChooser> fileChooser;
 

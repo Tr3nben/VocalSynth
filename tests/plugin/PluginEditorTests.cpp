@@ -150,10 +150,10 @@ TEST_CASE ("Editor: the Capture page shows the capture panel only", "[editor][ca
     vsEditor->showPage (VocalSynthEditor::Page::voice);
     CHECK_FALSE (panel.isVisible());
 
-    // Version text (header): "Version 0.3.0 - M3 capture" (en dash)
-    CHECK (vsEditor->getVersionText().startsWith ("Version 0.3.0 " + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x93"))
+    // Version text (header): "Version 0.3.1 - M3 capture" (en dash)
+    CHECK (vsEditor->getVersionText().startsWith ("Version 0.3.1 " + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x93"))
                                                   + " M3 capture"));
-    CHECK (juce::String (VOCALSYNTH_VERSION_STRING) == "0.3.0");
+    CHECK (juce::String (VOCALSYNTH_VERSION_STRING) == "0.3.1");
 
     editor.reset();
     processor.releaseResources();

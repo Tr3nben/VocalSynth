@@ -17,6 +17,7 @@ const juce::Colour backgroundColour { 0xff15171c };
 const juce::Colour panelColour { 0xff2a2e36 };
 const juce::Colour accentColour { 0xff3ddc97 };
 const juce::Colour warnColour { 0xffffa53d };
+const juce::Colour recordColour { 0xffd9434a };
 const juce::Colour textColour { 0xffd8dbe0 };
 const juce::Colour dimTextColour { 0xff8a9099 };
 
@@ -119,6 +120,28 @@ CapturePanel::CapturePanel (VocalSynthProcessor& p)
     for (auto* b : { &saveAsButton, &newTakeButton, &grabButton, &clearButton })
         addAndMakeVisible (*b);
 
+    // M3.1 take length / Record mode (docs/M3.1-DESIGN.md 7); the combos attach to the parameters below
+    modeBox.addItemList (params::captureModeChoices, 1);
+    modeBox.setTooltip ("Background: takes are made by themselves (cut after Max length). Record: press Record, "
+                        "VocalSynth records exactly Length bars from the next bar line");
+    maxLengthBox.addItemList (params::takeMaxBarsChoiceNames, 1);
+    maxLengthBox.setTooltip ("Longest background take: it starts at the bar of its first note and is cut after "
+                             "this many bars; singing after the cut starts the next take");
+    recordLengthBox.addItemList (params::recordBarsChoiceNames, 1);
+    recordLengthBox.setTooltip ("Record mode: how many bars one recording takes");
+    recordButton.setTooltip ("Starts at the next bar line (stopped: where FL starts playing) and stops by itself "
+                             "after Length bars. Press again to cancel");
+    recordButton.onClick = [this] { pressRecord(); };
+
+    for (auto* label : { &modeLabel, &maxLengthLabel, &recordLengthLabel })
+    {
+        styleLabel (*label, 13.0f, dimTextColour);
+        addAndMakeVisible (*label);
+    }
+
+    for (auto* c : std::initializer_list<juce::Component*> { &modeBox, &maxLengthBox, &recordLengthBox, &recordButton })
+        addAndMakeVisible (c);
+
     for (const auto bars : TakeSegmenter::grabBarChoices)
         grabBarsBox.addItem (juce::String (bars) + (bars == 1 ? " bar" : " bars"), bars);
 
@@ -215,6 +238,9 @@ CapturePanel::CapturePanel (VocalSynthProcessor& p)
     fineOffsetAttachment = std::make_unique<SliderAttachment> (apvts, params::captureFineOffsetMs.getParamID(), fineOffsetSlider);
     captureAttachment = std::make_unique<ButtonAttachment> (apvts, params::captureEnabled.getParamID(), captureButton);
     audioAttachment = std::make_unique<ButtonAttachment> (apvts, params::captureAudio.getParamID(), audioButton);
+    modeAttachment = std::make_unique<ComboBoxAttachment> (apvts, params::captureMode.getParamID(), modeBox);
+    maxLengthAttachment = std::make_unique<ComboBoxAttachment> (apvts, params::takeMaxBars.getParamID(), maxLengthBox);
+    recordLengthAttachment = std::make_unique<ComboBoxAttachment> (apvts, params::recordBars.getParamID(), recordLengthBox);
 
     confirmClear = [this] (std::function<void (bool)> onResult)
     {
@@ -238,6 +264,9 @@ CapturePanel::CapturePanel (VocalSynthProcessor& p)
         { &manualLabel, "manualLabel" },      { &offsetMsSlider, "offsetMs" },    { &fineLabel, "fineLabel" },
         { &fineOffsetSlider, "fineOffset" },  { &captureButton, "capture" },      { &audioButton, "captureAudio" },
         { &gapLabel, "gapLabel" },            { &gapSlider, "gap" },
+        { &modeLabel, "modeLabel" },          { &modeBox, "captureMode" },        { &maxLengthLabel, "maxLengthLabel" },
+        { &maxLengthBox, "takeMaxBars" },     { &recordLengthLabel, "recordLengthLabel" },
+        { &recordLengthBox, "recordBars" },   { &recordButton, "record" },
     };
 
     for (const auto& [component, id] : ids)
@@ -268,20 +297,57 @@ void CapturePanel::visibilityChanged()
 }
 
 //==============================================================================
-juce::String CapturePanel::formatStatus (const CaptureStatus& s, bool captureEnabled, int openTakeNotes)
+juce::String CapturePanel::formatStatus (const CaptureStatus& s, bool captureEnabled, int openTakeNotes, int recordBars)
 {
     juce::String text;
+    const auto barsText = [] (int bars) { return juce::String (bars) + (bars == 1 ? " bar" : " bars"); };
 
     if (! captureEnabled)
         text = "Capture off";
     else if (! s.started || s.state == TakeSegmenter::State::off)
         text = "Capture on " + enDash() + " waiting for audio";
-    else if (s.state == TakeSegmenter::State::synced)
+    else if (s.mode == CaptureMode::record)
+    {
+        // Record mode (docs/M3.1-DESIGN.md 7)
+        switch (s.record.phase)
+        {
+            case RecordStatus::Phase::idle:
+                text = "Record mode " + enDash() + " press Record (" + barsText (recordBars) + ")";
+                break;
+            case RecordStatus::Phase::waitingForPlay:
+                text = "Armed " + enDash() + " starts when FL plays (" + barsText (s.record.bars) + ")";
+                break;
+            case RecordStatus::Phase::countIn:
+            {
+                const auto beats = juce::jmax (1, static_cast<int> (std::ceil (s.record.beatsToStart - 1.0e-6)));
+                text << "Starts at bar " << (juce::int64) s.record.startBar << " " << enDash() << " " << beats
+                     << (beats == 1 ? " beat" : " beats");
+                break;
+            }
+            case RecordStatus::Phase::recording:
+                text << "Recording bar " << s.record.barInTake << "/" << s.record.bars << " (take "
+                     << s.record.takeNumber << ")";
+                break;
+        }
+    }
+    else if (s.state == TakeSegmenter::State::synced || s.state == TakeSegmenter::State::syncedIdle)
     {
         text = "Synced " + juce::String (s.bpm > 0.0 ? s.bpm : TakeTimeline::fallbackBpm, 1) + " BPM "
                + juce::String (s.timeSigNumerator) + "/" + juce::String (s.timeSigDenominator);
 
-        if (s.recordingTakeNumber > 0)
+        if (s.recordingTakeNumber > 0 && s.openTakeBars > 0 && s.openTakeBar > 0)
+        {
+            text << " " << enDash() << " take " << s.recordingTakeNumber << ", bar " << s.openTakeBar << "/"
+                 << s.openTakeBars;
+
+            if (s.recordingBar > 0)
+                text << " (bar " << (juce::int64) s.recordingBar << ")";
+        }
+        else if (s.recordingTakeNumber > 0 && s.takeMaxBars > 0 && s.openTakeStartBar == 0)
+        {
+            text << " " << enDash() << " take " << s.recordingTakeNumber << " waiting for a note";
+        }
+        else if (s.recordingTakeNumber > 0)
         {
             text << " " << enDash() << " recording take " << s.recordingTakeNumber;
 
@@ -290,7 +356,12 @@ juce::String CapturePanel::formatStatus (const CaptureStatus& s, bool captureEna
         }
     }
     else if (s.state == TakeSegmenter::State::freeRecording && s.recordingTakeNumber > 0)
+    {
         text = "Free " + enDash() + " recording take " + juce::String (s.recordingTakeNumber);
+
+        if (s.openTakeBars > 0)
+            text << " (max " << barsText (s.openTakeBars) << ")";
+    }
     else
         text = "Free " + enDash() + " waiting for a note";
 
@@ -330,6 +401,9 @@ juce::String CapturePanel::describeTake (const Take& take, const RenderedTake& r
     }
 
     text << dot() << rendered.noteCount << (rendered.noteCount == 1 ? " note" : " notes");
+
+    if (take.kind == TakeKind::record)
+        text << dot() << "Rec";
 
     if (take.kind == TakeKind::grab)
         text << dot() << "Grab";
@@ -387,10 +461,15 @@ void CapturePanel::update()
     const auto open = worker.getOpenTake();
     const auto state = vsProcessor.getCaptureState();
 
-    statusLabel.setText (formatStatus (status, vsProcessor.isCaptureEnabled(), open != nullptr ? open->noteCount : 0),
+    statusLabel.setText (formatStatus (status, vsProcessor.isCaptureEnabled(), open != nullptr ? open->noteCount : 0,
+                                       vsProcessor.getRecordBars()),
                          juce::dontSendNotification); // repaints only on a change
     statusLabel.setColour (juce::Label::textColourId,
-                           status.overflow.records > 0 || status.overflow.audioSamples > 0 ? warnColour : textColour);
+                           status.overflow.records > 0 || status.overflow.audioSamples > 0 ? warnColour
+                           : status.mode == CaptureMode::record && status.record.phase == RecordStatus::Phase::recording
+                               ? recordColour
+                               : textColour);
+    updateModeControls (status);
     memoryLabel.setText (formatMemory (status), juce::dontSendNotification);
 
     // Auto value of the capture offset, and the block FL actually sends
@@ -528,6 +607,45 @@ void CapturePanel::changeState (const std::function<void (CaptureState&)>& chang
 void CapturePanel::updateGrabButton()
 {
     grabButton.setButtonText (grabButtonText (shownSynced, shownState.grabBars, shownState.grabSeconds));
+}
+
+void CapturePanel::updateModeControls (const CaptureStatus& status)
+{
+    // Controls follow the parameter (what the user chose); the Record button follows the worker status
+    const auto recordMode = vsProcessor.getCaptureMode() == CaptureMode::record;
+
+    if (! hasShownMode || recordMode != shownRecordMode)
+    {
+        hasShownMode = true;
+        shownRecordMode = recordMode;
+        maxLengthLabel.setVisible (! recordMode);
+        maxLengthBox.setVisible (! recordMode);
+        recordLengthLabel.setVisible (recordMode);
+        recordLengthBox.setVisible (recordMode);
+        recordButton.setVisible (recordMode);
+        newTakeButton.setEnabled (! recordMode); // Record mode: no background takes to split
+    }
+
+    const auto armedOrRecording = status.mode == CaptureMode::record && status.record.phase != RecordStatus::Phase::idle;
+
+    // Pressed but not in the worker status yet (the audio thread and the worker take a few ms): the button
+    // shows what was pressed for up to a second
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+
+    if (armedOrRecording || now - recordRequestedMs > 1000.0)
+        recordRequestedMs = -1.0e9;
+
+    if (! armedOrRecording || now - cancelRequestedMs > 1000.0)
+        cancelRequestedMs = -1.0e9;
+
+    const auto active = recordMode && ((armedOrRecording && cancelRequestedMs < 0.0) || recordRequestedMs > 0.0);
+
+    if (active != recordActive)
+    {
+        recordActive = active;
+        recordButton.setButtonText (active ? "Cancel" : "Record");
+        recordButton.setColour (juce::TextButton::buttonColourId, active ? recordColour : panelColour);
+    }
 }
 
 void CapturePanel::updateDragHandles()
@@ -680,6 +798,32 @@ void CapturePanel::pressGrab()
 {
     const auto s = vsProcessor.getCaptureState();
     vsProcessor.getCaptureTap().requestGrab (s.grabBars, static_cast<double> (s.grabSeconds));
+}
+
+void CapturePanel::pressRecord()
+{
+    if (vsProcessor.getCaptureMode() != CaptureMode::record)
+        return;
+
+    auto& tap = vsProcessor.getCaptureTap();
+
+    if (recordActive)
+    {
+        tap.requestRecordCancel();
+        recordRequestedMs = -1.0e9;
+        cancelRequestedMs = juce::Time::getMillisecondCounterHiRes();
+    }
+    else
+    {
+        tap.requestRecord (vsProcessor.getRecordBars());
+        recordRequestedMs = juce::Time::getMillisecondCounterHiRes();
+        cancelRequestedMs = -1.0e9;
+    }
+
+    // Shown at once (also before the next timer tick); the next tick follows the worker status
+    recordActive = ! recordActive;
+    recordButton.setButtonText (recordActive ? "Cancel" : "Record");
+    recordButton.setColour (juce::TextButton::buttonColourId, recordActive ? recordColour : panelColour);
 }
 
 void CapturePanel::pressClear()
@@ -979,6 +1123,25 @@ void CapturePanel::resized()
     drags.removeFromLeft (gutter);
     saveAsButton.setBounds (drags.reduced (0, 10));
     right.removeFromTop (8);
+
+    // Mode row (M3.1): Background -> Max length; Record -> Length + Record / Cancel (same place)
+    {
+        auto row = right.removeFromTop (controlRowHeight);
+        modeLabel.setBounds (row.removeFromLeft (captionWidth));
+        row = row.reduced (0, 3);
+        modeBox.setBounds (row.removeFromLeft (110));
+        row.removeFromLeft (12);
+        auto variant = row;
+        maxLengthLabel.setBounds (variant.removeFromLeft (72));
+        maxLengthBox.setBounds (variant.removeFromLeft (100));
+        variant = row;
+        recordLengthLabel.setBounds (variant.removeFromLeft (48));
+        recordLengthBox.setBounds (variant.removeFromLeft (90));
+        variant.removeFromLeft (8);
+        recordButton.setBounds (variant.removeFromLeft (90));
+    }
+
+    right.removeFromTop (gutter);
 
     // Actions
     {

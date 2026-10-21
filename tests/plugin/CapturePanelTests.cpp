@@ -266,7 +266,9 @@ TEST_CASE ("CapturePanel buttons send the requests; Clear asks first", "[plugin]
         setPlain (rig.p, params::testPattern, (float) static_cast<int> (TestPattern::notes));
         rig.host->runTo (rig.host->position + (int64_t) (2.0 * rate), 512);
         panel.runTimerTickForTests();
-        CHECK (panel.getStatusText().startsWith ("Synced 120.0 BPM 4/4 " + enDash() + " recording take 1 (bar"));
+        // Default Max length 16 bars: the take is anchored at the bar of its first note
+        CHECK (panel.getStatusText().startsWith ("Synced 120.0 BPM 4/4 " + enDash() + " take 1, bar "));
+        CHECK (panel.getStatusText().contains ("/16 (bar "));
 
         panel.pressNewTake();
         rig.host->runTo (rig.host->position + (int64_t) (2.0 * rate), 512);

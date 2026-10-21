@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <memory>
 #include <numbers>
@@ -98,6 +99,10 @@ public:
         {
             const auto n = static_cast<int> (std::min<std::size_t> (static_cast<std::size_t> (blockSize), input.size() - pos));
             const auto clock = static_cast<int64_t> (pos);
+
+            if (beforeBlock != nullptr)
+                beforeBlock (clock, block.settings); // M3.1: mode / limit changes and Record requests
+
             tap.beginBlock (transport.at (clock, sr), block);
 
             for (int done = 0; done < n;)
@@ -140,6 +145,9 @@ public:
     }
 
     double sr;
+    /** Called before every block's beginBlock (clock = the block start), e.g. to change the capture mode or
+        press Record (M3.1). */
+    std::function<void (int64_t, CaptureSettingsInfo&)> beforeBlock;
     VoicePipeline pipeline;
     CaptureTap tap;
     std::unique_ptr<CaptureHistory> history = std::make_unique<CaptureHistory>();
@@ -530,5 +538,116 @@ TEST_CASE ("Compensation: byte-identical .mid and identical WAV audio for every 
             CHECK (run.files == reference.files);
             CHECK (run.audio == reference.audio);
         }
+    }
+}
+
+TEST_CASE ("Compensation M3.1: byte-identical .mid with a 4-bar take limit and a Record take for every block size",
+           "[capturecompensation][takelength][recordmode]")
+{
+    // 48 kHz, 120 BPM (96000 samples per bar), P = 430080 = lcm of the block sizes. Background with a 4-bar
+    // limit from 0: the melody in bars 1..4, a vibrato tone held across the cut at bar 5; at P (bar 5.48)
+    // Record mode and Record 2 bars: bars 6..7 with a second melody; Stop at 2P.
+    constexpr int64_t P = 430080;
+    const double sr = 48000.0;
+    VoiceSettings s;
+    s.range = VoiceRange::tenor;
+    s.bendMode = BendMode::trueBend;
+
+    auto input = onsetMelody (sr, VoiceRange::tenor, static_cast<int64_t> (0.2 * sr), 5).signal;
+    input.resize (static_cast<std::size_t> (4 * 96000 - 24000), 0.0f);
+    const auto held = test::vibrato (sr, 233.08, 40.0, 5.5, 1.0, 0.3f); // 7.5 s .. 8.5 s, across bar 5
+    input.insert (input.end(), held.begin(), held.end());
+    input.resize (static_cast<std::size_t> (5 * 96000 + 20000), 0.0f);
+    const auto second = onsetMelody (sr, VoiceRange::tenor, 0, 9).signal; // from 10.4 s
+    input.insert (input.end(), second.begin(), second.end());
+    input.resize (static_cast<std::size_t> (2 * P + 2 * 48000), 0.0f);
+
+    struct Result
+    {
+        std::vector<std::vector<uint8_t>> files;
+        std::vector<std::vector<float>> audio;
+        std::vector<Take> takes;
+    };
+
+    const auto runWith = [&] (int block)
+    {
+        Result result;
+        CaptureRig rig (sr, 4096);
+        rig.beforeBlock = [&rig] (int64_t clock, CaptureSettingsInfo& info)
+        {
+            if (clock == 0)
+                info.takeMaxBars = 4;
+
+            if (clock == P)
+            {
+                info.captureMode = CaptureMode::record;
+                rig.tap.requestRecord (2);
+            }
+        };
+        rig.run (input, s, block, { 0, 2 * P, true });
+
+        for (auto take : rig.closed)
+        {
+            rig.refine (take);
+
+            for (const auto version : { ExportVersion::raw, ExportVersion::clean })
+                for (const auto grid : { QuantizeGrid::off, QuantizeGrid::sixteenth })
+                {
+                    RenderOptions o;
+                    o.version = version;
+                    o.quantize = grid;
+                    o.roundTripSamples = TakeRenderer::roundTripFor (take, CaptureOffsetSettings {});
+                    const auto r = TakeRenderer::render (take, o);
+                    SmfOptions smf;
+                    smf.trackName = "VocalSynth Take " + std::to_string (take.number);
+                    result.files.push_back (SmfWriter::write (r, smf));
+
+                    if (version == ExportVersion::clean && grid == QuantizeGrid::off)
+                        result.audio.push_back (rig.readAudio (r.audio));
+                }
+
+            result.takes.push_back (std::move (take));
+        }
+
+        return result;
+    };
+
+    const auto reference = runWith (4096);
+    REQUIRE (reference.takes.size() == 3);
+    CHECK (reference.takes[0].kind == TakeKind::automatic);
+    CHECK (reference.takes[0].anchorBar == 1);
+    CHECK (reference.takes[0].endSample == 4 * 96000);
+    CHECK (reference.takes[1].kind == TakeKind::automatic);
+    CHECK (reference.takes[1].anchorBar == 5); // the held tone continues at the cut
+    CHECK (reference.takes[1].endSample == P);
+    CHECK (reference.takes[2].kind == TakeKind::record);
+    CHECK (reference.takes[2].startSample == 5 * 96000);
+    CHECK (reference.takes[2].endSample == 7 * 96000);
+
+    {
+        RenderOptions o;
+        o.roundTripSamples = TakeRenderer::roundTripFor (reference.takes[2], CaptureOffsetSettings {});
+        const auto r = TakeRenderer::render (reference.takes[2], o);
+        CHECK (r.originBar == 6);
+        CHECK (r.endTick == 2 * 3840);
+        CHECK (r.noteCount >= 8);
+    }
+
+    for (const auto block : { 1, 7, 64, 480, 512 })
+    {
+        CAPTURE (block);
+        const auto run = runWith (block);
+        REQUIRE (run.takes.size() == reference.takes.size());
+
+        for (std::size_t i = 0; i < run.takes.size(); ++i)
+        {
+            CAPTURE (i);
+            CHECK (run.takes[i].startSample == reference.takes[i].startSample);
+            CHECK (run.takes[i].endSample == reference.takes[i].endSample);
+            CHECK (run.takes[i].events == reference.takes[i].events);
+        }
+
+        CHECK (run.files == reference.files);
+        CHECK (run.audio == reference.audio);
     }
 }

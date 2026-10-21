@@ -92,6 +92,12 @@ void closeNotes (Take& take, std::array<std::bitset<128>, 16>& notes, int64_t sa
     }
 }
 
+/** First sample at or after a fractional sample (where the unwrapped beats reach a bar line). */
+int64_t ceilSample (double sample) noexcept
+{
+    return static_cast<int64_t> (std::ceil (sample - 1.0e-6));
+}
+
 int countNoteOns (const Take& take) noexcept
 {
     return static_cast<int> (std::count_if (take.events.begin(), take.events.end(),
@@ -125,6 +131,10 @@ void TakeSegmenter::reset()
     lastNoteOffSample = 0;
     gapEndSample = 0;
     newestSample = 0;
+    recordPhase = RecordPhase::idle;
+    recordBars = 0;
+    recordSearchFrom = 0;
+    recordStatus = {};
 }
 
 void TakeSegmenter::setTakeGapSeconds (double seconds) noexcept
@@ -145,6 +155,23 @@ int64_t TakeSegmenter::gapSamples() const noexcept
 const Take* TakeSegmenter::getOpenTake() const noexcept
 {
     return hasOpenTake ? &openTake.take : nullptr;
+}
+
+int TakeSegmenter::getOpenTakeBar() const noexcept
+{
+    if (! hasOpenTake || ! openTake.anchored || openTake.take.maxBars <= 0 || openTake.take.mode != TakeMode::synced)
+        return 0;
+
+    return std::min (openTake.barsDone + 1, openTake.take.maxBars);
+}
+
+int64_t TakeSegmenter::segmentRoundTrip (const Take& take) const noexcept
+{
+    // The test pattern is generated at the block's playhead: no input latency (docs/M3-DESIGN.md 19.1 F5)
+    if (take.settings.testPattern)
+        return 0;
+
+    return computeRoundTripSamples (offsetSettings, maxBlockSize, sampleRate);
 }
 
 //==============================================================================
@@ -168,7 +195,7 @@ void TakeSegmenter::process (const CaptureRecord& record, const CaptureHistory& 
     switch (record.type)
     {
         case CaptureRecordType::transport: handleTransport (sample, record.asTransport(), history, closedTakes); break;
-        case CaptureRecordType::settings: settings = record.asSettings(); break;
+        case CaptureRecordType::settings: handleSettings (sample, record.asSettings(), history, closedTakes); break;
         case CaptureRecordType::event: handleEvent (sample, record.asEvent(), history, closedTakes); break;
         case CaptureRecordType::marker: handleMarker (sample, record.asMarker(), history, closedTakes); break;
         case CaptureRecordType::gap: handleGap (sample); break;
@@ -177,6 +204,9 @@ void TakeSegmenter::process (const CaptureRecord& record, const CaptureHistory& 
     }
 
     updateOpenSpan();
+
+    if (record.type != CaptureRecordType::event)
+        updateRecordStatus (history);
 }
 
 void TakeSegmenter::advanceTo (int64_t sample, const CaptureHistory& history, std::vector<Take>& closedTakes)
@@ -184,6 +214,7 @@ void TakeSegmenter::advanceTo (int64_t sample, const CaptureHistory& history, st
     newestSample = std::max (newestSample, sample);
     advanceInternal (newestSample, history, closedTakes);
     updateOpenSpan();
+    updateRecordStatus (history);
 }
 
 void TakeSegmenter::closeIdle (const CaptureHistory&, std::vector<Take>& closedTakes)
@@ -212,11 +243,14 @@ void TakeSegmenter::advanceInternal (int64_t sample, const CaptureHistory& histo
 {
     for (;;)
     {
-        // The earliest item due at or before sample: a closing tail, a pending grab or the free gap
-        enum class Due { none, closing, grab, freeGap };
+        // The earliest item due at or before sample: a closing tail, a pending grab or the free gap; M3.1
+        // (taken only once the stream is past them, see class comment): the anchor timeout, a bar line of the
+        // open take (its cut), the free-take cut, the Record start
+        enum class Due { none, closing, grab, freeGap, anchor, barLine, freeCut, recordStart };
         Due due = Due::none;
         int64_t dueAt = noLimit;
         std::size_t index = 0;
+        double lineSample = 0.0;
 
         for (std::size_t i = 0; i < closingTakes.size(); ++i)
         {
@@ -243,6 +277,56 @@ void TakeSegmenter::advanceInternal (int64_t sample, const CaptureHistory& histo
         {
             due = Due::freeGap;
             dueAt = gapEndSample;
+        }
+
+        if (hasOpenTake && openTake.take.mode == TakeMode::synced)
+        {
+            const auto& b = openTake;
+
+            if (! b.anchored)
+            {
+                if (b.anchorDeadline <= sample && b.anchorDeadline < dueAt
+                    && std::any_of (b.anchorCandidates.begin(), b.anchorCandidates.end(), [] (const auto& c) { return c.any(); }))
+                {
+                    due = Due::anchor;
+                    dueAt = b.anchorDeadline;
+                }
+            }
+            else if (b.take.maxBars > 0)
+            {
+                if (const auto line = b.take.timeline.barLineAfter (b.lineSample))
+                {
+                    const auto at = ceilSample (line->sample);
+
+                    if (at < sample && at < dueAt)
+                    {
+                        due = Due::barLine;
+                        dueAt = at;
+                        lineSample = line->sample;
+                    }
+                }
+            }
+        }
+        else if (hasOpenTake && state == State::freeRecording && openTake.freeCutSample < sample
+                 && openTake.freeCutSample < dueAt)
+        {
+            due = Due::freeCut;
+            dueAt = openTake.freeCutSample;
+        }
+
+        if (recordPhase == RecordPhase::armed && playing && state != State::off)
+        {
+            if (const auto line = history.getTimeline().firstBarLineAtOrAfter (static_cast<double> (recordSearchFrom)))
+            {
+                const auto at = ceilSample (line->sample);
+
+                if (at < sample && at < dueAt)
+                {
+                    due = Due::recordStart;
+                    dueAt = at;
+                    lineSample = line->sample;
+                }
+            }
         }
 
         switch (due)
@@ -277,6 +361,55 @@ void TakeSegmenter::advanceInternal (int64_t sample, const CaptureHistory& histo
                 state = State::freeWaiting;
                 break;
             }
+
+            case Due::anchor: anchorOpenTake (openTake.take.startSample); break;
+
+            case Due::barLine:
+            {
+                openTake.lineSample = lineSample;
+
+                if (++openTake.barsDone < openTake.take.maxBars)
+                    break;
+
+                if (openTake.take.kind == TakeKind::record)
+                {
+                    // The Record take is complete: exactly bars X .. X + N; one shot
+                    endOpenTake (dueAt, true, closedTakes);
+                    recordPhase = RecordPhase::idle;
+                    state = State::syncedIdle;
+                }
+                else
+                {
+                    splitAt (dueAt, TakeKind::automatic, history, closedTakes); // the next take anchors anew
+                }
+                break;
+            }
+
+            case Due::freeCut:
+            {
+                const bool sounding = numSounding > 0;
+                endOpenTake (dueAt, false, closedTakes); // synthetic note-offs at the cut
+
+                if (sounding)
+                    openTakeAt (dueAt, TakeMode::free, TakeKind::automatic, history);
+                else
+                    state = State::freeWaiting;
+                break;
+            }
+
+            case Due::recordStart:
+            {
+                openTakeAt (dueAt, TakeMode::synced, TakeKind::record, history);
+                auto& b = openTake;
+                b.anchored = true;
+                b.anchorCandidates = {};
+                b.lineSample = lineSample;
+                b.barsDone = 0;
+                b.take.maxBars = std::max (1, recordBars);
+                b.take.anchorBar = b.take.timeline.barAt (static_cast<double> (dueAt)).number;
+                recordPhase = RecordPhase::recording;
+                break;
+            }
         }
     }
 }
@@ -286,6 +419,7 @@ void TakeSegmenter::handleReset (const CaptureRecord& record, const CaptureHisto
                                  std::vector<Take>& closedTakes)
 {
     const auto r = record.asReset();
+    recordPhase = RecordPhase::idle; // nothing is armed across a prepare
 
     // On the old clock nothing arrives after the newest sample seen: close everything there
     const auto at = r.clearsHistory ? newestSample : std::max (newestSample, record.sample);
@@ -365,17 +499,27 @@ void TakeSegmenter::handleTransport (int64_t sample, const TransportInfo& info, 
     {
         if (! playing && nowPlaying)
         {
-            // Transport start: a free take ends here, a synced one starts here
+            // Transport start: a free take ends here, a synced one starts here (Record mode: armed takes
+            // start at the bar line where playback starts)
             if (hasOpenTake)
                 endOpenTake (sample, false, closedTakes);
 
-            openTakeAt (sample, TakeMode::synced, TakeKind::automatic, history);
+            if (recordPhase == RecordPhase::armed)
+                recordSearchFrom = sample;
+
+            startSyncedState (sample, history);
         }
         else if (playing && ! nowPlaying)
         {
-            // Transport stop: the synced take ends here and keeps collecting its capture tail
+            // Transport stop: the synced take ends here and keeps collecting its capture tail. A Record take
+            // stopped early is kept (shorter); during the count-in the Record button stays armed.
             if (hasOpenTake)
                 endOpenTake (sample, true, closedTakes);
+
+            if (recordPhase == RecordPhase::recording)
+                recordPhase = RecordPhase::idle;
+            else if (recordPhase == RecordPhase::armed)
+                recordSearchFrom = sample;
 
             freeStartAllowedFrom = std::max (freeStartAllowedFrom, sample + tailSamples());
             state = State::freeWaiting;
@@ -395,7 +539,7 @@ void TakeSegmenter::handleEvent (int64_t sample, const EventRecord& record, cons
 
     if (isNoteOn (e))
     {
-        if (state == State::freeWaiting && sample >= freeStartAllowedFrom)
+        if (state == State::freeWaiting && sample >= freeStartAllowedFrom && backgroundMode())
         {
             openTakeAt (sample, TakeMode::free, TakeKind::automatic, history);
 
@@ -404,6 +548,7 @@ void TakeSegmenter::handleEvent (int64_t sample, const EventRecord& record, cons
         }
 
         appendEvent (captured, history, closedTakes);
+        trackAnchor (captured);
 
         if (! soundingNotes[ch][note])
         {
@@ -416,6 +561,7 @@ void TakeSegmenter::handleEvent (int64_t sample, const EventRecord& record, cons
     }
 
     appendEvent (captured, history, closedTakes); // unpaired note-offs too (the renderer drops them)
+    trackAnchor (captured);
 
     if (isNoteOff (e) && soundingNotes[ch][note])
     {
@@ -435,7 +581,7 @@ void TakeSegmenter::handleMarker (int64_t sample, const MarkerRecord& marker, co
     switch (marker.kind)
     {
         case CaptureMarkerKind::newTake:
-            if (state != State::off)
+            if (state != State::off && backgroundMode()) // Record mode: disabled (rule 9)
                 splitAt (sample, TakeKind::manual, history, closedTakes);
             break;
 
@@ -451,13 +597,14 @@ void TakeSegmenter::handleMarker (int64_t sample, const MarkerRecord& marker, co
             closingTakes.clear();
             pendingGrabs.clear();
             freeStartAllowedFrom = sample;
+            recordPhase = RecordPhase::idle;
 
             if (state != State::off)
             {
                 state = State::freeWaiting;
 
                 if (playing)
-                    openTakeAt (sample, TakeMode::synced, TakeKind::automatic, history);
+                    startSyncedState (sample, history);
             }
             break;
 
@@ -467,7 +614,7 @@ void TakeSegmenter::handleMarker (int64_t sample, const MarkerRecord& marker, co
                 state = State::freeWaiting;
 
                 if (playing)
-                    openTakeAt (sample, TakeMode::synced, TakeKind::automatic, history);
+                    startSyncedState (sample, history);
             }
             break;
 
@@ -476,11 +623,15 @@ void TakeSegmenter::handleMarker (int64_t sample, const MarkerRecord& marker, co
             if (hasOpenTake)
                 endOpenTake (sample, false, closedTakes);
 
+            recordPhase = RecordPhase::idle;
             endAllTailsAt (sample, history, closedTakes);
             soundingNotes = {};
             numSounding = 0;
             state = State::off;
             break;
+
+        case CaptureMarkerKind::recordArm:
+        case CaptureMarkerKind::recordCancel: handleRecordMarker (sample, marker); break;
 
         case CaptureMarkerKind::audioOn:
         case CaptureMarkerKind::audioOff:
@@ -493,6 +644,11 @@ void TakeSegmenter::handleGap (int64_t sample)
 {
     if (hasOpenTake)
         openTake.take.incomplete = true;
+
+    // A note that sounded at the take start may have lost its note-off: it anchors the take at its start
+    if (hasOpenTake && ! openTake.anchored
+        && std::any_of (openTake.anchorCandidates.begin(), openTake.anchorCandidates.end(), [] (const auto& c) { return c.any(); }))
+        anchorOpenTake (openTake.take.startSample);
 
     for (auto& builder : closingTakes)
         if (sample < builder.take.captureEndSample)
@@ -532,6 +688,21 @@ void TakeSegmenter::openTakeAt (int64_t sample, TakeMode mode, TakeKind kind, co
     take.settings = settings;
     take.freeBpm = hostBpm;
     take.clockEpoch = history.getClockEpoch();
+    builder.collectFrom = sample;
+
+    if (mode == TakeMode::synced && kind != TakeKind::record)
+    {
+        // Rule 7: anchored at its first note; notes sounding now are candidates for the start
+        builder.anchored = false;
+        builder.anchorCandidates = soundingNotes;
+        builder.anchorDeadline = sample + tailSamples();
+    }
+    else if (mode == TakeMode::free && backgroundMode() && settings.takeMaxBars > 0)
+    {
+        // Rule 8: free "bars" are 4/4 at the last host tempo (else 120 BPM)
+        take.maxBars = settings.takeMaxBars;
+        builder.freeCutSample = sample + std::max<int64_t> (1, freeModeBarsToSamples (take.maxBars, sampleRate, take.freeBpm));
+    }
 
     if (mode == TakeMode::synced)
         take.timeline = history.getTimeline().slice (sample, sample);
@@ -568,11 +739,25 @@ void TakeSegmenter::splitAt (int64_t sample, TakeKind kind, const CaptureHistory
                              std::vector<Take>& closedTakes)
 {
     const bool synced = state == State::synced;
+    const bool record = hasOpenTake && openTake.take.kind == TakeKind::record;
+    const auto recordTake = record ? openTake.take.maxBars : 0;
+    const auto recordBar = record ? openTake.take.anchorBar : 0;
+    const auto recordLine = openTake.lineSample;
+    const auto recordDone = openTake.barsDone;
 
     if (hasOpenTake)
         endOpenTake (sample, synced, closedTakes); // free: synthetic note-offs at the split
 
-    openTakeAt (sample, synced ? TakeMode::synced : TakeMode::free, kind, history);
+    openTakeAt (sample, synced ? TakeMode::synced : TakeMode::free, record ? TakeKind::record : kind, history);
+
+    if (record)
+    {
+        // A Record take split for the event limit continues to the same end bar line
+        openTake.take.maxBars = recordTake;
+        openTake.take.anchorBar = recordBar;
+        openTake.lineSample = recordLine;
+        openTake.barsDone = recordDone;
+    }
 }
 
 void TakeSegmenter::endOpenTake (int64_t endSample, bool withTail, std::vector<Take>& closedTakes)
@@ -644,7 +829,7 @@ void TakeSegmenter::releaseNumber (int number) noexcept
 void TakeSegmenter::appendEvent (const CapturedEvent& event, const CaptureHistory& history,
                                  std::vector<Take>& closedTakes)
 {
-    if (hasOpenTake && event.sample >= openTake.take.startSample)
+    if (hasOpenTake && event.sample >= openTake.collectFrom)
     {
         if (openTake.take.events.size() >= maxTakeEvents - splitReserveEvents)
             splitAt (event.sample, TakeKind::automatic, history, closedTakes);
@@ -665,6 +850,171 @@ void TakeSegmenter::appendEvent (const CapturedEvent& event, const CaptureHistor
 
         addToTake (builder.take, builder.notes, event);
     }
+}
+
+//==============================================================================
+void TakeSegmenter::startSyncedState (int64_t sample, const CaptureHistory& history)
+{
+    if (backgroundMode())
+        openTakeAt (sample, TakeMode::synced, TakeKind::automatic, history);
+    else
+        state = State::syncedIdle;
+}
+
+void TakeSegmenter::handleSettings (int64_t sample, const CaptureSettingsInfo& info, const CaptureHistory& history,
+                                    std::vector<Take>& closedTakes)
+{
+    const auto previousMode = settings.captureMode;
+    settings = info;
+
+    if (state == State::off || previousMode == info.captureMode)
+        return;
+
+    if (info.captureMode == CaptureMode::record)
+    {
+        // Background -> Record: the background take ends here (like newTake), no new one opens
+        if (hasOpenTake)
+            endOpenTake (sample, openTake.take.mode == TakeMode::synced, closedTakes);
+
+        recordPhase = RecordPhase::idle;
+        state = playing ? State::syncedIdle : State::freeWaiting;
+        return;
+    }
+
+    // Record -> Background: the arm is dropped, a Record take ends here (kept, shorter), the background
+    // rules resume at this sample
+    recordPhase = RecordPhase::idle;
+
+    if (hasOpenTake)
+        endOpenTake (sample, true, closedTakes);
+
+    state = State::freeWaiting;
+
+    if (playing)
+        openTakeAt (sample, TakeMode::synced, TakeKind::automatic, history);
+}
+
+void TakeSegmenter::handleRecordMarker (int64_t sample, const MarkerRecord& marker)
+{
+    if (marker.kind == CaptureMarkerKind::recordArm)
+    {
+        if (state == State::off || backgroundMode() || recordPhase != RecordPhase::idle)
+            return;
+
+        recordPhase = RecordPhase::armed;
+        recordBars = std::max (1, marker.grabBars);
+        recordSearchFrom = sample;
+        return;
+    }
+
+    // recordCancel
+    if (recordPhase == RecordPhase::recording && hasOpenTake && openTake.take.kind == TakeKind::record)
+    {
+        // Discarded: nothing is listed (the history still has it for a grab)
+        releaseNumber (openTake.take.number);
+        hasOpenTake = false;
+        openTake = {};
+        state = playing ? State::syncedIdle : State::freeWaiting;
+    }
+
+    recordPhase = RecordPhase::idle;
+}
+
+void TakeSegmenter::trackAnchor (const CapturedEvent& event)
+{
+    if (! hasOpenTake || openTake.anchored || openTake.take.mode != TakeMode::synced)
+        return;
+
+    auto& b = openTake;
+    const auto& e = event.event;
+    const auto h = event.estimatedSample - segmentRoundTrip (b.take);
+    const auto ch = channelIndex (e);
+    const auto note = noteIndex (e);
+    const auto start = b.take.startSample;
+    const auto pending = std::any_of (b.anchorCandidates.begin(), b.anchorCandidates.end(), [] (const auto& c) { return c.any(); });
+
+    if (isNoteOn (e))
+    {
+        if (h >= start)
+            anchorOpenTake (pending ? start : h); // a note still sounding from the start decides first
+        else
+            b.anchorCandidates[ch][note] = true;  // sung before the start: anchors only if held past it
+
+        return;
+    }
+
+    if (isNoteOff (e) && b.anchorCandidates[ch][note])
+    {
+        b.anchorCandidates[ch][note] = false;
+
+        if (h > start)
+            anchorOpenTake (start); // held across the start (a note held over the cut: bar X + N)
+    }
+}
+
+void TakeSegmenter::anchorOpenTake (int64_t at)
+{
+    auto& b = openTake;
+    auto& take = b.take;
+    b.anchored = true;
+    b.anchorCandidates = {};
+
+    // The limit in force now applies to this take; Off: nothing changes (0.3.0)
+    if (! backgroundMode() || settings.takeMaxBars <= 0)
+        return;
+
+    const auto bar = take.timeline.barAt (static_cast<double> (std::max (at, take.startSample)));
+    const auto barStart = take.timeline.sampleAtBeats (bar.startBeats);
+    take.maxBars = settings.takeMaxBars;
+    take.anchorBar = bar.number;
+    b.lineSample = barStart;
+    b.barsDone = 0;
+
+    // Pre-roll before bar X can never pull the origin earlier: the take is at most maxBars long
+    take.startSample = std::max (take.startSample, ceilSample (barStart));
+}
+
+void TakeSegmenter::updateRecordStatus (const CaptureHistory& history) noexcept
+{
+    RecordStatus r;
+
+    switch (recordPhase)
+    {
+        case RecordPhase::idle: break;
+
+        case RecordPhase::armed:
+        {
+            r.phase = RecordStatus::Phase::waitingForPlay;
+            r.bars = recordBars;
+
+            if (! playing)
+                break;
+
+            const auto& timeline = history.getTimeline();
+
+            if (const auto line = timeline.firstBarLineAtOrAfter (static_cast<double> (recordSearchFrom)))
+            {
+                r.phase = RecordStatus::Phase::countIn;
+                r.startBar = timeline.barAt (line->sample).number;
+                r.beatsToStart = std::max (0.0, line->beats - timeline.beatsAt (static_cast<double> (newestSample)));
+            }
+            break;
+        }
+
+        case RecordPhase::recording:
+            r.phase = RecordStatus::Phase::recording;
+
+            if (hasOpenTake)
+            {
+                r.bars = openTake.take.maxBars;
+                r.startBar = openTake.take.anchorBar;
+                r.barInTake = std::min (openTake.barsDone + 1, openTake.take.maxBars);
+                r.takeNumber = openTake.take.number;
+            }
+            break;
+    }
+
+    recordStatus = r;
 }
 
 //==============================================================================

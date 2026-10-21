@@ -3,6 +3,7 @@
 #include "vocalsynth/CaptureRecord.h"
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace vocalsynth
@@ -33,6 +34,13 @@ struct BarPosition
     double lengthBeats = 4.0;     ///< quarter notes per bar = numerator * 4 / denominator
     int timeSigNumerator = 4;
     int timeSigDenominator = 4;
+};
+
+/** A bar line as the transport plays it (TakeTimeline::firstBarLineAtOrAfter / barLineAfter). */
+struct BarLine
+{
+    double sample = 0.0;          ///< fractional capture-clock sample where the unwrapped beats reach the line
+    double beats = 0.0;           ///< unwrapped beats of the line
 };
 
 struct TempoPoint
@@ -117,6 +125,22 @@ public:
     /** The bar containing sample (with barSnapToleranceBeats), see class comment. */
     BarPosition barAt (double sample) const noexcept;
 
+    /** Bar lines as the transport plays them (docs/M3.1-DESIGN.md 3.1, 4.1: take length limit, Record mode).
+        Every playing segment has the bar lines of its own grid (barAnchorPpq + k * bar length) that fall into
+        [its start, the next segment's start) in unwrapped beats; a line up to barSnapToleranceBeats before a
+        segment's start counts as at that start (a transport start or loop wrap onto beat 1). Stopped segments
+        have none; the last segment is extrapolated (a later transport record may change lines after its
+        start, never lines before it). So a loop wrap or a jump counts the lines of the grid in force, and a
+        line where two segments meet is one line.
+
+        firstBarLineAtOrAfter: the first line whose beats >= beatsAt (sample) - barSnapToleranceBeats, searched
+        from the segment containing sample on (stopped: the first line where playback starts); a line just
+        before sample is returned at sample (never earlier). barLineAfter: the first line whose beats >
+        beatsAt (sample) + barSnapToleranceBeats (the next line after the line at sample). nullopt: no playing
+        segment from there on. Pure, no allocation. */
+    std::optional<BarLine> firstBarLineAtOrAfter (double sample) const noexcept;
+    std::optional<BarLine> barLineAfter (double sample) const noexcept;
+
     /** Tempo map from fromBeats to toBeats: the tempo at fromBeats first (at fromBeats), then every change. */
     std::vector<TempoPoint> tempoMap (double fromBeats, double toBeats) const;
 
@@ -124,6 +148,8 @@ public:
     std::vector<TimeSignaturePoint> timeSignatureMap (double fromBeats, double toBeats) const;
 
 private:
+    std::optional<BarLine> findBarLine (double sample, bool after) const noexcept;
+
     double sampleRate = 48000.0;
     std::vector<TimelineSegment> segments;
 };

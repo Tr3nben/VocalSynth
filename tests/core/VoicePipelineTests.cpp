@@ -1203,9 +1203,10 @@ TEST_CASE ("Pipeline: legato vs retrigger event order at a note change", "[pipel
                 CHECK (off < on); // note-off old, then note-on new
         }
 
-        // A note change is not instant: stickiness T_min (35 ms) + window transition, but well below 100 ms
+        // A note change is not instant: window transition + T_min (35 ms), or since v0.3.1 the arrival span
+        // (T_min / 2) for a clean step that lands on the new note; well below 100 ms
         const auto changeDelayMs = 1000.0 * static_cast<double> (notes[1].on - static_cast<int64_t> (0.5 * sr)) / sr;
-        CHECK (changeDelayMs > 35.0);
+        CHECK (changeDelayMs > NoteSegmenter::arrivalFraction * 35.0);
         CHECK (changeDelayMs < 100.0);
     }
 }
@@ -2134,7 +2135,8 @@ TEST_CASE ("Pipeline timing: onset, note change, release and bend estimates", "[
         CHECK ((run.timings[secondOn].flags & EventTimingFlags::noteChange) != 0);
         CHECK (run.timings[firstOff].estimate == run.timings[secondOn].estimate);
         CHECK (std::abs (run.timings[secondOn].estimate - change) <= 3 * hop);
-        CHECK (run.events[secondOn].position - change > static_cast<int64_t> (0.035 * sr)); // it was emitted late
+        CHECK (run.events[secondOn].position - change
+               > static_cast<int64_t> (NoteSegmenter::arrivalFraction * 0.035 * sr)); // it was emitted late (arrival span)
 
         // Release: the level crossing, within a hop of the end of the tone
         const auto secondOff = find (VsEventType::noteOff, 59);

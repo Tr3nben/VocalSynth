@@ -87,9 +87,9 @@ TEST_CASE ("The parameter layout has the M1, M2 and M3 parameters with unique ID
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter))
             ids.add (ranged->paramID);
 
-    // 7 M1 + 13 M2 + 5 M3, appended in that order (IDs are permanent)
-    CHECK (ids.size() == 25);
-    CHECK (parameters.size() == 25);
+    // 7 M1 + 13 M2 + 5 M3 + 3 M3.1 (RecordModeTests.cpp), appended in that order (IDs are permanent)
+    CHECK (ids.size() == 28);
+    CHECK (parameters.size() == 28);
     auto unique = ids;
     unique.removeDuplicates (false);
     CHECK (unique.size() == ids.size());
@@ -218,7 +218,7 @@ TEST_CASE ("State round trip: capture parameters and settings, one CAPTURE child
 
     const auto xml = juce::AudioProcessor::getXmlFromBinary (again.getData(), (int) again.getSize());
     REQUIRE (xml != nullptr);
-    CHECK (xml->getNumChildElements() == 26); // 25 PARAM + 1 CAPTURE
+    CHECK (xml->getNumChildElements() == 29); // 28 PARAM + 1 CAPTURE
     int captureChildren = 0;
 
     for (auto* child : xml->getChildIterator())

@@ -505,6 +505,59 @@ TEST_CASE ("CaptureTap: UI requests coalesce to one marker per kind per block", 
     CHECK (h.drain().markers (CaptureMarkerKind::newTake).size() == 1);
 }
 
+TEST_CASE ("CaptureTap: Record / Cancel requests become markers in the binding order", "[capturetap][recordmode]")
+{
+    Harness h;
+    h.block (32);
+    h.drain();
+
+    h.tap.requestRecord (4);
+    h.tap.requestRecord (8); // coalesces: the newest length
+    h.tap.requestRecordCancel();
+    h.tap.requestClear();
+    h.tap.requestGrab (2, 10.0);
+    h.tap.requestNewTake();
+    h.block (32);
+
+    auto out = h.drain();
+    REQUIRE (out.records.size() == 5);
+    CHECK (out.records[0].asMarker().kind == CaptureMarkerKind::newTake);
+    CHECK (out.records[1].asMarker().kind == CaptureMarkerKind::grab);
+    CHECK (out.records[2].asMarker().kind == CaptureMarkerKind::clear);
+    CHECK (out.records[3].asMarker().kind == CaptureMarkerKind::recordCancel);
+    CHECK (out.records[4].asMarker().kind == CaptureMarkerKind::recordArm);
+    CHECK (out.records[4].asMarker().grabBars == 8);
+
+    for (const auto& r : out.records)
+        CHECK (r.sample == 32);
+
+    h.block (32);
+    CHECK (h.drain().records.empty());
+
+    h.tap.requestRecord (0); // clamped to one bar
+    h.block (32);
+    const auto arms = h.drain().markers (CaptureMarkerKind::recordArm);
+    REQUIRE (arms.size() == 1);
+    CHECK (arms[0].asMarker().grabBars == 1);
+}
+
+TEST_CASE ("CaptureTap: mode and take limit travel in the settings record", "[capturetap][recordmode]")
+{
+    Harness h;
+    h.block (10);
+    h.bs.settings.takeMaxBars = 16;
+    h.block (10);
+    h.bs.settings.captureMode = CaptureMode::record;
+    h.block (10);
+    h.block (10);
+    const auto settings = h.drain().ofType (CaptureRecordType::settings);
+    REQUIRE (settings.size() == 3);
+    CHECK (settings[1].sample == 10);
+    CHECK (settings[1].asSettings().takeMaxBars == 16);
+    CHECK (settings[2].sample == 20);
+    CHECK (settings[2].asSettings().captureMode == CaptureMode::record);
+}
+
 TEST_CASE ("CaptureTap: flushNotes records the output's note-offs and bend centres", "[capturetap]")
 {
     Harness h;

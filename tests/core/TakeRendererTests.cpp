@@ -348,8 +348,9 @@ TEST_CASE ("TakeRenderer: free takes: seconds at the host bpm or 120, from the f
         CHECK (r.originBar == 0);
         CHECK (r.tempos == std::vector<TickTempo> { { 0, bpm } });
         CHECK (r.timeSignatures == std::vector<TickTimeSignature> { { 0, 4, 4 } });
-        CHECK (r.endTick == notes[1].end); // free: the last event tick
-        CHECK (r.audio == AudioSpan { 50000, take.endSample - 50000 });
+        CHECK (r.endTick == notes[1].end); // free: the last note-off tick
+        // M3.1: the WAV ends at Clean's last note-off + freeTailSeconds (at most endSample)
+        CHECK (r.audio == AudioSpan { 50000, 96000 + 24000 });
 
         // The round trip never applies to free takes; pre-roll moves tick 0 earlier
         auto options = raw();
@@ -766,7 +767,8 @@ TEST_CASE ("TakeRenderer: audio span = WAV sample 0 at tick 0, shifted by the ro
     options.roundTripSamples = rt;
     const auto r = TakeRenderer::render (take, options);
     CHECK (r.originBar == 2);
-    CHECK (r.audio == AudioSpan { 30000 + 96000 + rt, 480000 - 96000 });
+    // M3.1: the WAV ends at the bar line where Clean ends (after the note: beat 8 = bar 3), not at endSample
+    CHECK (r.audio == AudioSpan { 30000 + 96000 + rt, 96000 });
     CHECK (TakeRenderer::computeAudioSpan (take, options) == r.audio);
 
     // The note's tick equals its position in the WAV (at the tempo): 4000 samples after WAV sample 0
@@ -1152,4 +1154,141 @@ TEST_CASE ("TakeRenderer: a free grab ends at the grab moment", "[takerenderer]"
     CHECK (pairedNotes (r) == std::vector<SimpleNote> { { 0, 4000, 60 }, { 12000, 15200, 62 } });
     CHECK (r.endTick == 15200);
     CHECK (r.audio == AudioSpan { 100000, 380000 }); // the WAV ends at the grab moment as well
+}
+
+//==============================================================================
+// M3.1 export end (docs/M3.1-DESIGN.md 3.4, 4.3)
+
+TEST_CASE ("TakeRenderer M3.1: synced takes end at the bar line after the version's last note", "[takerenderer][takelength]")
+{
+    constexpr int64_t bar = 96000;
+    auto take = syncedTake (sr48, 120.0, 4, 4, 0, 0.0, 8 * bar);
+    take.settings.bendMode = BendMode::trueBend;
+    addNote (take, 60, 1000, bar + 54000);                                  // ends in bar 2
+    addEvent (take, 3 * bar, 0, VsEvent::makePitchBend (0, 1, 1200));       // after the note: does not extend
+    addEvent (take, 3 * bar + 10, 0, VsEvent::makeControlChange (0, 1, 1, 64));
+    addNote (take, 72, 4 * bar + 1000, 4 * bar + 2000);                     // a click in bar 5: 21 ms
+    sortEvents (take);
+
+    const auto rawRender = TakeRenderer::render (take, raw());
+    checkInvariants (rawRender);
+    CHECK (rawRender.endTick == 5 * 3840); // Raw keeps the click
+
+    RenderOptions cleanOptions;
+    const auto cleanRender = TakeRenderer::render (take, cleanOptions);
+    checkInvariants (cleanRender);
+    CHECK (cleanRender.noteCount == 1);
+    CHECK (cleanRender.endTick == 2 * 3840); // trailing noise-only bars are gone
+
+    for (const auto& e : cleanRender.events)
+        CHECK (e.tick <= 2 * 3840);
+
+    // The WAV follows Clean's end in both versions (one cached file per take)
+    CHECK (cleanRender.audio == AudioSpan { 0, 2 * bar });
+    CHECK (rawRender.audio == cleanRender.audio);
+    CHECK (TakeRenderer::computeAudioSpan (take, raw()) == cleanRender.audio);
+
+    // Quantize does not change the WAV: it follows Clean without quantize
+    auto quantized = cleanOptions;
+    quantized.quantize = QuantizeGrid::quarter;
+    CHECK (TakeRenderer::render (take, quantized).audio == cleanRender.audio);
+}
+
+TEST_CASE ("TakeRenderer M3.1: a cut take ends at the cut; quantize never moves a start onto the end",
+           "[takerenderer][takelength]")
+{
+    constexpr int64_t bar = 96000;
+
+    // Cut after 4 bars with a note held across it (its note-off came in the capture tail)
+    auto cut = syncedTake (sr48, 120.0, 4, 4, 0, 0.0, 4 * bar);
+    cut.maxBars = 4;
+    cut.anchorBar = 1;
+    addNote (cut, 60, 1000, 4 * bar + 10000);
+    sortEvents (cut);
+    const auto r = TakeRenderer::render (cut, raw());
+    checkInvariants (r);
+    CHECK (r.endTick == 4 * 3840);
+    CHECK (pairedNotes (r) == std::vector<SimpleNote> { { 40, 4 * 3840, 60 } });
+
+    // A note starting just before the cut: the 1/16 grid line nearest to it is the end of the take
+    auto late = syncedTake (sr48, 120.0, 4, 4, 0, 0.0, 2 * bar);
+    addNote (late, 62, 1000, 30000);
+    addNote (late, 64, 2 * bar - 1000, 2 * bar + 5000);
+    sortEvents (late);
+    auto q = raw();
+    q.quantize = QuantizeGrid::sixteenth;
+    q.quantizeStrengthPercent = 100.0;
+
+    for (const auto ends : { false, true })
+    {
+        q.quantizeEnds = ends;
+        const auto rq = TakeRenderer::render (late, q);
+        checkInvariants (rq);
+        CHECK (rq.endTick == 2 * 3840);
+        const auto notes = pairedNotes (rq);
+        REQUIRE (notes.size() == 2);
+        CHECK (notes[0].start == 0);
+        CHECK (notes[1].start == 2 * 3840 - 40); // stays unquantized: >= 1 tick inside the take
+        CHECK (notes[1].end == 2 * 3840);
+    }
+}
+
+TEST_CASE ("TakeRenderer M3.1: free takes end at the last note-off; the WAV at Clean's last note-off + 0.5 s",
+           "[takerenderer][takelength]")
+{
+    auto take = freeTake (sr48, 120.0);
+    take.settings.bendMode = BendMode::trueBend;
+    addNote (take, 60, 48000, 96000);                                  // 1 s .. 2 s
+    addEvent (take, 120000, 0, VsEvent::makePitchBend (0, 1, 800));     // after it
+    addNote (take, 70, 200000, 201000);                                // a click
+    take.endSample = 201000 + 24000;
+    sortEvents (take);
+
+    const auto rawRender = TakeRenderer::render (take, raw());
+    checkInvariants (rawRender);
+    CHECK (rawRender.endTick == std::llround ((201000.0 - 48000.0) / 48000.0 * 2.0 * 960.0));
+
+    const auto cleanRender = TakeRenderer::render (take, RenderOptions {});
+    checkInvariants (cleanRender);
+    CHECK (cleanRender.endTick == 1920); // the note-off, not the bend after it
+    CHECK (cleanRender.audio == AudioSpan { 48000, 48000 + 24000 });
+    CHECK (rawRender.audio == cleanRender.audio);
+}
+
+TEST_CASE ("TakeRenderer M3.1: Record takes are exactly N bars from their first bar", "[takerenderer][recordmode]")
+{
+    constexpr int64_t bar = 96000;
+    const int64_t rt = 4096;
+    auto take = syncedTake (sr48, 120.0, 4, 4, 0, 0.0);
+    take.kind = TakeKind::record;
+    take.maxBars = 4;
+    take.anchorBar = 3;
+    take.startSample = 2 * bar;
+    take.endSample = 6 * bar;
+    take.captureEndSample = take.endSample + 26400;
+    addNote (take, 60, 4 * bar + 10000 + rt, 4 * bar + 30000 + rt); // the first note comes in bar 5
+    addNote (take, 61, 5 * bar + 10000 + rt, 5 * bar + 12000 + rt); // a click
+    sortEvents (take);
+
+    for (const auto version : { ExportVersion::raw, ExportVersion::clean })
+    {
+        auto o = raw();
+        o.version = version;
+        o.roundTripSamples = rt;
+        const auto r = TakeRenderer::render (take, o);
+        checkInvariants (r);
+        CHECK (r.originBar == 3);                // tick 0 = bar 3, not the bar of the first note
+        CHECK (r.endTick == 4 * 3840);           // never trimmed
+        CHECK (pairedNotes (r).at (0).start == 2 * 3840 + 400);
+        CHECK (r.audio == AudioSpan { 2 * bar + rt, 4 * bar });
+        CHECK (TakeRenderer::computeAudioSpan (take, o) == r.audio);
+    }
+
+    // Stopped early: whole bars, the WAV up to the stop
+    take.endSample = 4 * bar + 50000;
+    auto o = raw();
+    o.roundTripSamples = rt;
+    const auto shortened = TakeRenderer::render (take, o);
+    CHECK (shortened.endTick == 3 * 3840);
+    CHECK (shortened.audio == AudioSpan { 2 * bar + rt, 2 * bar + 50000 });
 }

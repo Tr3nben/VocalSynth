@@ -8,6 +8,7 @@
 #include "vocalsynth/VoiceSettings.h"
 #include "vocalsynth/VsEvent.h"
 
+#include <array>
 #include <cstdint>
 
 namespace vocalsynth
@@ -49,6 +50,18 @@ struct StickinessParams
         fails; n may differ between those frames), AND the current note must have lasted
         >= minNoteLength. Then change to quantizer.quantize (p, q) of this frame. A frame whose candidate
         wins but whose shifted output note would be outside 0..127 counts as not weak-voiced.
+        v0.3.1 (docs/M2-DESIGN.md 12), on the pitch history = the consecutive frames of the note with
+        confidence >= confidenceOn (any other frame and every note start clear it):
+        * arrival: the change also happens once the condition has held for arrivalFraction * T_min if every
+          history frame of that span lies within arrivalMaxDistanceSemitones of this frame's candidate and
+          their spread is <= arrivalMaxSpreadSemitones (the voice has landed on the new note; a vibrato
+          peak only gets there beyond about +-85 cents, where T_min alone flips as well);
+        * glide hold: no change (by T_min or arrival) on a frame whose pitch slope (least squares over the
+          history of the last glideWindowMs) exceeds glideHoldSemitonesPerSecond, or, within
+          onsetGlideHoldMs of a note start from rest (a provisional correction keeps that start),
+          onsetGlideHoldSemitonesPerSecond over onsetGlideWindowMs (a scoop into the note). The timer keeps
+          running, so the change goes straight to the note where the glide ends instead of stepping
+          through the notes it passes (each held for minNoteLength). A slow glissando still steps.
       * otherwise bend.update (100 * (p - q)) if the frame's pitch is reliable: confidence >= confidenceOn
         and rmsDb >= noteLevelDb - bendHoldDropDb, where noteLevelDb follows the note's level (set at
         the note start, rises at once, falls by levelFallDbPerSecond on absolute samples). Weak or
@@ -145,6 +158,19 @@ public:
     /** Correction margin of the first strong frame after the settle time (see class comment). */
     static constexpr double provisionalSettleMarginSemitones = 0.02;
     static constexpr int maxEventsPerOnsetFrame = 2;       ///< bend + note-on
+
+    // Note changes on real singing (v0.3.1, see class comment and docs/M2-DESIGN.md 12)
+    static constexpr double arrivalFraction = 0.5;                ///< of T_min
+    static constexpr double arrivalMaxDistanceSemitones = 0.2;    ///< every frame of the span from the candidate
+    static constexpr double arrivalMaxSpreadSemitones = 0.3;      ///< max - min of the span
+    static constexpr double glideHoldSemitonesPerSecond = 35.0;
+    static constexpr double glideWindowMs = 8.0;
+    static constexpr double onsetGlideHoldMs = 120.0;             ///< after a note start from rest
+    static constexpr double onsetGlideHoldSemitonesPerSecond = 8.0;
+    static constexpr double onsetGlideWindowMs = 16.0;
+    /** Pitch history length in frames: covers the longest span (arrival at T_min 60 ms, onset glide window)
+        at the pipeline's 2 ms hop twice over. */
+    static constexpr int pitchHistoryFrames = 32;
 
     /** Timing of the events emitted by the most recent processFrame / processOnsetFrame / flush call
         (M3, see class comment): noteOn = a note-on of this call and a bend sent right before it (note
@@ -267,6 +293,16 @@ private:
     void endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out,
                   const VsEventTiming& timing) noexcept;
 
+    // Pitch history of the active note (v0.3.1 change rules)
+    void pushPitchHistory (double p, int64_t absoluteSample) noexcept;
+    /** Least-squares slope in semitones per second of the history frames within windowSamples of
+        absoluteSample (inclusive), 0 with fewer than 3 such frames. */
+    double pitchSlope (int64_t absoluteSample, int64_t windowSamples) const noexcept;
+    /** True if the history covers windowSamples before absoluteSample and every frame of that span is
+        within arrivalMaxDistanceSemitones of candidate with a spread <= arrivalMaxSpreadSemitones. */
+    bool hasArrived (int64_t absoluteSample, int64_t windowSamples, int candidate) const noexcept;
+    bool isGliding (int64_t absoluteSample) const noexcept;
+
     // Detection-delay estimates (see class comment)
     static VsEventTiming timingFor (int64_t emitSample, int64_t estimate, EventTimingKind kind, uint8_t flags) noexcept;
     VsEventTiming onsetTiming (int64_t absoluteSample, bool provisionalPath, double p) const noexcept;
@@ -278,9 +314,13 @@ private:
     ScaleQuantizer quantizer;
 
     // From setSettings()
-    float gateThresholdDb = -40.0f;  ///< VoiceSettings default
+    float gateThresholdDb = -35.0f;  ///< VoiceSettings default
     double hysteresisSemitones = 0.2;
     int64_t minChangeSamples = 0;
+    int64_t arrivalSamples = 0;      ///< arrivalFraction * T_min
+    int64_t glideWindowSamples = 0;
+    int64_t onsetGlideHoldSamples = 0;
+    int64_t onsetGlideWindowSamples = 0;
     int64_t minNoteSamples = 0;
     int octaveShift = 0;
     double velocitySensitivityPercent = 70.0;
@@ -300,6 +340,12 @@ private:
     bool lastFrameVoiced = false;
     float noteLevelDb = PitchFrame::silenceDb;  ///< level follower of the active note (bend hold)
     int64_t noteLevelSample = 0;                ///< absolute sample of the last follower update
+    std::array<double, pitchHistoryFrames> historyPitch {};
+    std::array<int64_t, pitchHistoryFrames> historySample {};
+    int historyCount = 0;
+    int historyNext = 0;                        ///< ring index of the next push
+    bool noteFromRest = false;                  ///< the active note started from rest (not by a change)
+    int64_t restStartSample = 0;                ///< its start (a provisional correction keeps it)
 
     // Provisional onsets
     int64_t provisionalIgnoreSamples = 0;
