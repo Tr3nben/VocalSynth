@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CapturePanel.h"
+#include "FileDragSource.h"
 #include "PluginProcessor.h"
 #include "TunerDisplayModel.h"
 
@@ -14,7 +16,8 @@
 namespace vocalsynth
 {
 
-/** M2 UI (docs/M2-DESIGN.md 4.3), for FX and Instrument alike. Two pages:
+/** M2 UI (docs/M2-DESIGN.md 4.3) + M3 Capture tab (docs/M3-DESIGN.md 14), for FX and Instrument alike.
+    Three pages:
 
     - "Voice" (default): tuner (note name in FL convention C5 = 60, cents needle, Hz, confidence bar +
       voiced LED; calmed by TunerDisplayModel), sounding note, the voice settings (Source, Voice Range,
@@ -24,6 +27,7 @@ namespace vocalsynth
     - "Test & Routing": the M1 routing test build controls and diagnostics (docs/M1-DESIGN.md 4.6):
       test pattern, MIDI channel, tempo, CC, monitor tone, virtual MIDI, mute dry, sent counters,
       DSP load, block-size histogram, drag sources for the test clips.
+    - "Capture" (M3): the CapturePanel (take list, drag handles for MIDI / WAV, export options).
 
     Runs on the message thread; reads the processor only through atomics/accessors from a Timer. */
 class VocalSynthEditor final : public juce::AudioProcessorEditor,
@@ -43,10 +47,11 @@ public:
     enum class Page
     {
         voice,
-        testAndRouting
+        testAndRouting,
+        capture
     };
 
-    /** Shows one page and hides the other's controls (also used by the tests). */
+    /** Shows one page and hides the others' controls (also used by the tests). */
     void showPage (Page page);
     Page getPage() const noexcept { return currentPage; }
 
@@ -94,28 +99,13 @@ public:
     /** Runs one display update tick now, as the timer does (for the tests). */
     void runTimerTickForTests() { timerCallback(); }
 
+    /** The Capture tab (for the tests). */
+    CapturePanel& getCapturePanel() noexcept { return capturePanel; }
+
+    /** Header line under the plugin name: "Version 0.3.0 - M3 capture   |   Format: VST3" (en dash). */
+    juce::String getVersionText() const;
+
 private:
-    /** A labelled box that, when dragged, exports a file and starts an external file drag
-        (drop it into an FL pattern or the playlist). */
-    class FileDragSource final : public juce::Component,
-                                 public juce::SettableTooltipClient
-    {
-    public:
-        FileDragSource (juce::String text, std::function<juce::File()> exportFile);
-
-        void paint (juce::Graphics& g) override;
-        void mouseDown (const juce::MouseEvent& e) override;
-        void mouseDrag (const juce::MouseEvent& e) override;
-        void mouseUp (const juce::MouseEvent& e) override;
-
-    private:
-        juce::String text;
-        std::function<juce::File()> exportFile;
-        juce::String statusText;
-        bool dragStartedThisGesture = false;
-        bool isPressed = false;
-    };
-
     /** Tuner: note name, Hz, cents needle (-50..+50), confidence bar and voiced LED. Painted from the
         TunerDisplayModel state the editor's timer hands it; repaints only the parts whose pixels change. */
     class TunerDisplay final : public juce::Component
@@ -188,6 +178,7 @@ private:
     // Page switch
     juce::TextButton voicePageButton { "Voice" };
     juce::TextButton testPageButton { "Test & Routing" };
+    juce::TextButton capturePageButton { "Capture" };
 
     //==============================================================================
     // Voice page
@@ -256,6 +247,10 @@ private:
 
     FileDragSource midiDragSource;
     FileDragSource wavDragSource;
+
+    //==============================================================================
+    // Capture page (M3)
+    CapturePanel capturePanel;
 
     /** Components of each page (shown/hidden by showPage()). */
     std::vector<juce::Component*> voicePageComponents;

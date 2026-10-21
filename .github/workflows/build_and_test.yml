@@ -205,7 +205,7 @@ jobs:
           cp "$CLAP_FX" "$CLAP_Instrument" "dist/$pkg/CLAP/"
           cp "$STANDALONE_DIR"/*.exe "dist/$pkg/Standalone/"
           cp packaging/windows/Install-VocalSynth.bat packaging/windows/Uninstall-VocalSynth.bat \
-             packaging/windows/LIESMICH.txt docs/FL-ROUTING.md docs/M2-TESTING.md "dist/$pkg/"
+             packaging/windows/LIESMICH.txt docs/FL-ROUTING.md docs/M2-TESTING.md docs/M3-TESTING.md "dist/$pkg/"
           (cd dist && 7z a -tzip "$pkg.zip" "$pkg" > /dev/null)
           7z l "dist/$pkg.zip"
           echo "PACKAGE_ZIP=dist/$pkg.zip" >> "$GITHUB_ENV"

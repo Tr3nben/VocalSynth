@@ -1,3 +1,5 @@
+#include "CaptureExporter.h"
+#include "CaptureTestUtils.h"
 #include "Parameters.h"
 #include "PluginProcessor.h"
 
@@ -7,8 +9,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -1707,6 +1712,25 @@ TEST_CASE ("DspLoadMeter averages over time and lets the peak decay", "[plugin][
     CHECK (meter.getReading().peakProportion == Catch::Approx (1.0f));
     CHECK (meter.getReading().averageProportion < 0.1f);
 
+    // The peak never falls below the average, also with a fluctuating load (seen on a CI runner):
+    // a slowly decaying high load followed by blocks just below the decayed peak
+    {
+        vocalsynth::DspLoadMeter m;
+        m.prepare (48000.0);
+        m.addBlock (0.005, 480); // 50 %
+        bool peakBelowAverage = false;
+
+        for (int i = 0; i < 2000; ++i)
+        {
+            const auto r = m.getReading();
+            m.addBlock (0.0099 * (double) r.peakProportion, 480); // load = 99 % of the current peak
+            const auto after = m.getReading();
+            peakBelowAverage = peakBelowAverage || after.peakProportion < after.averageProportion;
+        }
+
+        CHECK_FALSE (peakBelowAverage);
+    }
+
     // The averaging does not depend on the block size: 1 s of 1-sample blocks equals 1 s of 4800-sample blocks
     vocalsynth::DspLoadMeter tiny, large;
     tiny.prepare (48000.0);
@@ -1781,4 +1805,697 @@ TEST_CASE ("The processor reports its DSP load and recent block size", "[plugin]
     p.prepareToPlay (44100.0, 2048);
     CHECK (p.getRecentMaxBlockSize() == 0);
     p.releaseResources();
+}
+
+//==============================================================================
+// M3 capture in the processor (docs/M3-DESIGN.md 2, 4, 15, 16). The worker is stepped manually
+// (setManualSteppingForTests), so nothing races the test thread.
+//==============================================================================
+
+namespace
+{
+namespace captureE2E
+{
+constexpr double rate = 48000.0;
+constexpr int preparedBlock = 2048;
+constexpr int64_t transportStart = 61440;          // multiple of lcm (480, 2048): same blocks for both sizes
+constexpr int64_t transportStop = 61440 + 122880;  // 5.12 beats at 120 BPM
+constexpr int64_t samplesPerBeat = 24000;           // 120 BPM at 48 kHz
+constexpr int64_t roundTrip = 2 * preparedBlock;    // what the sound card adds (Auto = 2 x the prepared block)
+
+std::vector<vocalsynth::test::SungNote> phrase()
+{
+    // Quarter notes A3 (220 Hz = MIDI 57) on beats 1-4 of the bar where the transport starts
+    std::vector<vocalsynth::test::SungNote> notes;
+
+    for (int beat = 0; beat < 4; ++beat)
+        notes.push_back ({ transportStart + beat * samplesPerBeat, 16800, 220.0 });
+
+    return notes;
+}
+
+struct Result
+{
+    std::vector<std::shared_ptr<const vocalsynth::Take>> takes;
+    juce::MemoryBlock midiBytes;
+    juce::File midiFile;
+};
+
+/** Sings the phrase with the transport playing from bar 5 (ppq 16), voice arriving roundTrip late. */
+Result singPhrase (Variant variant, int blockSize, params::Source source = params::Source::voice)
+{
+    VocalSynthProcessor p (variant);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlainValue (p, params::source, (float) static_cast<int> (source));
+    setPlainValue (p, params::voiceRange, (float) static_cast<int> (vocalsynth::VoiceRange::tenor));
+
+    vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, preparedBlock);
+    host.playHead.bpm = 120.0;
+    host.playHead.playStartSample = transportStart;
+    host.playHead.playStopSample = transportStop;
+    host.playHead.playStartPpq = 16.0; // bar 5 in 4/4
+
+    const auto notes = phrase();
+    host.input = [notes] (int64_t pos) { return vocalsynth::test::sungPhrase (notes, pos, rate, roundTrip); };
+    host.runTo (transportStop + (int64_t) rate, blockSize); // 1 s after Stop: the capture tail (0.55 s) is over
+    host.steps (4);
+
+    Result r;
+    r.takes = p.getCaptureWorker().getTakes();
+
+    if (! r.takes.empty())
+    {
+        const auto folder = juce::File::createTempFile ("vs-capture-e2e");
+        r.midiFile = vocalsynth::CaptureExporter::writeMidi (*r.takes.front(), p.getRenderOptionsFor (*r.takes.front()),
+                                                             vocalsynth::SmfFormat::type1, folder);
+        r.midiFile.loadFileAsData (r.midiBytes);
+    }
+
+    return r;
+}
+} // namespace captureE2E
+} // namespace
+
+TEST_CASE ("Capture end to end: a sung phrase with the transport playing gives one take at the right bar",
+           "[plugin][capture][voice]")
+{
+    using namespace captureE2E;
+    const auto variant = GENERATE (Variant::fx, Variant::instrument);
+    CAPTURE (variant == Variant::fx ? "fx" : "instrument");
+
+    const auto r = singPhrase (variant, preparedBlock);
+    REQUIRE (r.takes.size() == 1);
+    const auto& take = *r.takes.front();
+    CHECK (take.mode == vocalsynth::TakeMode::synced);
+    CHECK (take.kind == vocalsynth::TakeKind::automatic);
+    CHECK (take.number == 1);
+    CHECK (take.maxBlockSize == preparedBlock);
+    CHECK (take.sampleRate == Catch::Approx (rate));
+    CHECK (take.observedBlockSize == preparedBlock);
+    CHECK (take.startSample == transportStart);
+    CHECK (take.endSample == transportStop);
+    CHECK_FALSE (take.incomplete);
+    CHECK (take.audio == vocalsynth::TakeAudio::full);
+    CHECK (take.noteCount == 4);
+    CHECK (take.wallClockStartMs > 0);
+
+    // The file: bar number in the name (decision 1), Clean by default, readable by juce::MidiFile
+    REQUIRE (r.midiFile.existsAsFile());
+    CHECK (r.midiFile.getFileName().contains ("_Take01_Bar005_Clean.mid"));
+    juce::MidiFile midiFile;
+    REQUIRE (vocalsynth::test::readMidiFile (r.midiFile, midiFile));
+    CHECK (midiFile.getTimeFormat() == 960);
+
+    // Notes on the beats: the sound card's round trip (Auto, 2 x 2048) and the detection delay are removed
+    const auto notes = vocalsynth::test::notesOf (midiFile);
+    REQUIRE (notes.size() == 4);
+
+    for (std::size_t i = 0; i < notes.size(); ++i)
+    {
+        CAPTURE (i, notes[i].onTick, notes[i].offTick);
+        CHECK (notes[i].note == 57);
+        CHECK (notes[i].channel == 1);
+        CHECK (notes[i].onTick == Catch::Approx (960.0 * (double) i).margin (12.0)); // 6 ms at 120 BPM
+        CHECK (notes[i].offTick > notes[i].onTick + 500.0);
+        CHECK (notes[i].offTick < notes[i].onTick + 960.0);
+    }
+
+    r.midiFile.getParentDirectory().deleteRecursively();
+}
+
+TEST_CASE ("Capture end to end: the exported .mid does not depend on the host block size", "[plugin][capture][realtime]")
+{
+    using namespace captureE2E;
+    const auto reference = singPhrase (Variant::fx, preparedBlock);
+    REQUIRE (reference.takes.size() == 1);
+
+    for (const auto blockSize : { 480, 64 })
+    {
+        CAPTURE (blockSize);
+        const auto r = singPhrase (Variant::fx, blockSize);
+        REQUIRE (r.takes.size() == 1);
+        CHECK (r.midiBytes.getSize() > 0);
+        CHECK (r.midiBytes == reference.midiBytes);
+        r.midiFile.getParentDirectory().deleteRecursively();
+    }
+
+    reference.midiFile.getParentDirectory().deleteRecursively();
+}
+
+TEST_CASE ("Capture end to end: the WAV starts at tick 0 and is kept in the takes folder", "[plugin][capture][audio]")
+{
+    using namespace captureE2E;
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+
+    const auto takesFolder = juce::File::createTempFile ("vs-takes");
+    auto state = p.getCaptureState();
+    state.takesFolder = takesFolder.getFullPathName();
+    p.setCaptureState (state);
+
+    vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, preparedBlock);
+    host.playHead.playStartSample = transportStart;
+    host.playHead.playStopSample = transportStop;
+    host.playHead.playStartPpq = 16.0;
+    const auto notes = phrase();
+    host.input = [notes] (int64_t pos) { return vocalsynth::test::sungPhrase (notes, pos, rate, roundTrip); };
+    host.runTo (transportStop + (int64_t) rate, preparedBlock);
+
+    auto& worker = p.getCaptureWorker();
+    const auto takes = worker.getTakes();
+    REQUIRE (takes.size() == 1);
+    const auto number = takes.front()->number;
+
+    // The worker writes the cache in slices of CaptureWorker::wavFramesPerStep
+    for (int i = 0; i < 20 && worker.getWavState (number).kind == vocalsynth::TakeWavState::Kind::preparing; ++i)
+        worker.runStepForTests();
+
+    const auto cached = worker.getWavState (number);
+    REQUIRE (cached.kind == vocalsynth::TakeWavState::Kind::ready);
+    CHECK (cached.file.getParentDirectory() == worker.getInstanceFolder());
+    CHECK (cached.file.getFileName().endsWith ("_Take01_Bar005_Voice.wav"));
+    CHECK (worker.getInstanceFolder().getChildFile (vocalsynth::CaptureExporter::heartbeatFileName).existsAsFile());
+
+    double wavRate = 0.0;
+    int bits = 0;
+    const auto audio = vocalsynth::test::readWav (cached.file, wavRate, bits);
+    CHECK (wavRate == Catch::Approx (rate));
+    CHECK (bits == 24);
+    REQUIRE (audio.getNumChannels() == 1);
+
+    const auto span = vocalsynth::TakeRenderer::computeAudioSpan (*takes.front(), p.getRenderOptionsFor (*takes.front()));
+    CHECK (audio.getNumSamples() == span.numSamples);
+
+    // WAV sample 0 = tick 0 = beat 1 of bar 5: the first sung note starts there, the second one beat later
+    const auto firstLoud = [&audio] (int from)
+    {
+        for (int i = from; i < audio.getNumSamples(); ++i)
+            if (std::abs (audio.getSample (0, i)) > 1.0e-3f)
+                return i;
+
+        return -1;
+    };
+
+    CHECK (firstLoud (0) >= 0);
+    CHECK (firstLoud (0) < 100);
+    CHECK (std::abs (firstLoud (20000) - (int) samplesPerBeat) < 100);
+
+    // Dragging moves it into the takes folder (FL references dropped WAVs); a second drag reuses it
+    const auto persisted = worker.persistWav (number, takesFolder);
+    REQUIRE (persisted.existsAsFile());
+    CHECK (persisted.getParentDirectory() == takesFolder);
+    CHECK_FALSE (cached.file.exists());
+    CHECK (worker.getWavState (number).kind == vocalsynth::TakeWavState::Kind::persisted);
+    CHECK (worker.persistWav (number, takesFolder) == persisted);
+
+    host.p.releaseResources();
+    takesFolder.deleteRecursively();
+}
+
+namespace
+{
+namespace captureMelody
+{
+// Integration test of M3 0.3.0: FX, Voice mode (Tenor), a sung melody A3 C4 E4 A3 at 120 BPM with the host
+// playhead starting at bar 3, the voice arriving 2 x 2048 samples late (Auto offset from the prepared block),
+// host blocks 2048 / 480 / 64. Everything is real code: VoicePipeline, CaptureTap, worker, renderer, exporter.
+constexpr double rate = 48000.0;
+constexpr int preparedBlock = 2048;
+constexpr int64_t samplesPerBeat = 24000;            // 120 BPM at 48 kHz
+constexpr double samplesPerTick = 24000.0 / 960.0;   // 25 samples per tick at 960 PPQ
+constexpr int64_t transportStart = 61440;            // multiple of lcm (64, 480, 2048): same transport per block size
+constexpr int64_t transportStop = transportStart + 245760; // 10.24 beats
+constexpr int64_t roundTrip = 2 * preparedBlock;
+constexpr double sixtyFourthTicks = 960.0 / 16.0;   // a 1/64 note = 1/16 beat
+
+struct Intended
+{
+    double beat; // beats after the start of bar 3
+    int note;
+    double frequencyHz;
+    int64_t lengthSamples;
+};
+
+// Beat 2, 3 and 4 of bar 3 and beat 1 of bar 4: the take starts at the bar line (bar 3), the first note one beat in
+constexpr std::array<Intended, 4> melody { { { 1.0, 57, 220.0, 18000 },
+                                             { 2.0, 60, 261.6255653005986, 18000 },
+                                             { 3.0, 64, 329.6275569128699, 18000 },
+                                             { 4.0, 57, 220.0, 36000 } } };
+
+struct Result
+{
+    std::size_t numTakes = 0;
+    juce::String midiName, wavName;
+    juce::MemoryBlock midiBytes;
+    std::vector<vocalsynth::test::FileNote> notes;
+    juce::AudioBuffer<float> wav;
+    int64_t spanSamples = -1;
+    double wavRate = 0.0;
+};
+
+Result sing (int blockSize)
+{
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlainValue (p, vocalsynth::params::source, (float) static_cast<int> (vocalsynth::params::Source::voice));
+    setPlainValue (p, vocalsynth::params::voiceRange, (float) static_cast<int> (vocalsynth::VoiceRange::tenor));
+    REQUIRE (p.getCaptureState() == vocalsynth::CaptureState {}); // defaults: Clean, no quantize, Auto offset
+
+    vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, preparedBlock);
+    host.playHead.bpm = 120.0;
+    host.playHead.playStartSample = transportStart;
+    host.playHead.playStopSample = transportStop;
+    host.playHead.playStartPpq = 8.0; // bar 3 in 4/4
+
+    std::vector<vocalsynth::test::SungNote> sung;
+    for (const auto& n : melody)
+        sung.push_back ({ transportStart + (int64_t) (n.beat * (double) samplesPerBeat), n.lengthSamples, n.frequencyHz });
+
+    host.input = [sung] (int64_t pos) { return vocalsynth::test::sungPhrase (sung, pos, rate, roundTrip); };
+    host.runTo (transportStop + (int64_t) rate, blockSize);
+    host.steps (4);
+
+    auto& worker = p.getCaptureWorker();
+    const auto takes = worker.getTakes();
+    Result r;
+    r.numTakes = takes.size();
+
+    if (takes.size() != 1)
+        return r;
+
+    const auto& take = *takes.front();
+    const auto folder = juce::File::createTempFile ("vs-capture-melody");
+    const auto midiFile = vocalsynth::CaptureExporter::writeMidi (take, p.getRenderOptionsFor (take),
+                                                                  vocalsynth::SmfFormat::type1, folder);
+    r.midiName = midiFile.getFileName();
+    midiFile.loadFileAsData (r.midiBytes);
+    juce::MidiFile parsed;
+
+    if (vocalsynth::test::readMidiFile (midiFile, parsed) && parsed.getTimeFormat() == 960)
+        r.notes = vocalsynth::test::notesOf (parsed);
+
+    folder.deleteRecursively();
+
+    for (int i = 0; i < 40 && worker.getWavState (take.number).kind == vocalsynth::TakeWavState::Kind::preparing; ++i)
+        worker.runStepForTests();
+
+    const auto wavState = worker.getWavState (take.number);
+
+    if (wavState.kind == vocalsynth::TakeWavState::Kind::ready)
+    {
+        r.wavName = wavState.file.getFileName();
+        int bits = 0;
+        r.wav = vocalsynth::test::readWav (wavState.file, r.wavRate, bits);
+        r.spanSamples = vocalsynth::TakeRenderer::computeAudioSpan (take, p.getRenderOptionsFor (take)).numSamples;
+    }
+
+    p.releaseResources();
+    return r;
+}
+
+/** First sample at or after from whose magnitude exceeds the threshold (-1: none). */
+int firstLoud (const juce::AudioBuffer<float>& audio, int from)
+{
+    for (int i = juce::jmax (0, from); i < audio.getNumSamples(); ++i)
+        if (std::abs (audio.getSample (0, i)) > 1.0e-3f)
+            return i;
+
+    return -1;
+}
+} // namespace captureMelody
+} // namespace
+
+TEST_CASE ("Capture end to end: a sung melody from bar 3 exports in order, on the beats, block-size invariant",
+           "[plugin][capture][voice][e2e]")
+{
+    using namespace captureMelody;
+    const auto reference = sing (preparedBlock);
+    REQUIRE (reference.numTakes == 1);
+    CHECK (reference.midiName.contains ("_Take01_Bar003_Clean.mid"));
+    CHECK (reference.wavName.contains ("_Take01_Bar003_Voice.wav"));
+
+    // The notes in order, at the intended beats after removing the round trip and the detection delay
+    REQUIRE (reference.notes.size() == melody.size());
+
+    for (std::size_t i = 0; i < melody.size(); ++i)
+    {
+        const auto& n = reference.notes[i];
+        const auto intendedTick = melody[i].beat * 960.0;
+        CAPTURE (i, n.note, n.onTick, n.offTick, intendedTick);
+        CHECK (n.note == melody[i].note);
+        CHECK (n.channel == 1);
+        CHECK (std::abs (n.onTick - intendedTick) <= sixtyFourthTicks);
+        CHECK (n.offTick > n.onTick);
+
+        if (i > 0)
+            CHECK (n.onTick > reference.notes[i - 1].onTick);
+    }
+
+    // The WAV: same origin (sample 0 = tick 0 = bar 3 beat 1), length = audio span, each sung note where the
+    // MIDI note is (within a 1/64 note)
+    REQUIRE (reference.wav.getNumChannels() == 1);
+    CHECK (reference.wavRate == Catch::Approx (rate));
+    CHECK ((int64_t) reference.wav.getNumSamples() == reference.spanSamples);
+
+    int searchFrom = 0;
+
+    for (std::size_t i = 0; i < melody.size(); ++i)
+    {
+        const auto onset = firstLoud (reference.wav, searchFrom);
+        const auto intended = melody[i].beat * (double) samplesPerBeat;
+        CAPTURE (i, onset, intended, reference.notes[i].onTick * samplesPerTick);
+        REQUIRE (onset >= 0);
+        CHECK (std::abs ((double) onset - intended) < 100.0); // the dry voice is only shifted by the round trip
+        CHECK (std::abs ((double) onset - reference.notes[i].onTick * samplesPerTick) <= sixtyFourthTicks * samplesPerTick);
+        searchFrom = onset + (int) melody[i].lengthSamples + 100;
+    }
+
+    // Byte-identical .mid and identical WAV audio for host blocks 480 and 64
+    for (const auto blockSize : { 480, 64 })
+    {
+        CAPTURE (blockSize);
+        const auto r = sing (blockSize);
+        REQUIRE (r.numTakes == 1);
+        CHECK (r.midiBytes.getSize() > 0);
+        CHECK (r.midiBytes == reference.midiBytes);
+        REQUIRE (r.wav.getNumSamples() == reference.wav.getNumSamples());
+
+        CHECK (std::memcmp (r.wav.getReadPointer (0), reference.wav.getReadPointer (0),
+                            sizeof (float) * (std::size_t) r.wav.getNumSamples())
+               == 0);
+    }
+}
+
+TEST_CASE ("Capture in Test Pattern mode records the pattern MIDI as sent", "[plugin][capture][midi]")
+{
+    using namespace captureE2E;
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPattern (p, vocalsynth::TestPattern::notes);
+    setPlainValue (p, params::captureAudio, 0.0f);
+
+    vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, 512);
+    host.playHead.playStartSample = 0;
+    host.playHead.playStopSample = 4 * 4 * samplesPerBeat; // 4 bars
+    host.runTo (host.playHead.playStopSample + (int64_t) rate, 512);
+
+    const auto takes = p.getCaptureWorker().getTakes();
+    REQUIRE (takes.size() == 1);
+    const auto& take = *takes.front();
+    CHECK (take.settings.testPattern);
+    CHECK (take.settings.bendMode == vocalsynth::BendMode::trueBend);
+    CHECK (take.audio == vocalsynth::TakeAudio::none);
+    CHECK (p.getCaptureWorker().getWavState (take.number).kind == vocalsynth::TakeWavState::Kind::unavailable);
+
+    // Every note-on the output sent while the transport played is in the take (Raw = what was sent)
+    int capturedOns = 0;
+
+    for (const auto& e : take.events)
+        if (e.event.type == vocalsynth::VsEventType::noteOn && ! e.synthetic)
+            ++capturedOns;
+
+    CHECK (capturedOns > 0);
+    CHECK (capturedOns <= host.noteOns);
+
+    auto options = p.getRenderOptionsFor (take);
+    options.version = vocalsynth::ExportVersion::raw;
+    const auto rendered = vocalsynth::TakeRenderer::render (take, options);
+    CHECK (rendered.originBar == 1);
+
+    // Notes sent in the capture tail after Stop (and so after the take's end in host time) are not exported
+    CHECK (rendered.noteCount <= capturedOns);
+    CHECK (rendered.noteCount >= capturedOns - 3);
+
+    // The pattern is generated at the block's playhead (no input latency): every note-on sent while the
+    // transport played sits exactly where FL played it, not a round trip (2 x 512) earlier
+    REQUIRE (options.roundTripSamples == 1024);
+    std::vector<int64_t> expected;
+
+    for (const auto& e : take.events)
+        if (e.event.type == vocalsynth::VsEventType::noteOn && e.event.data2 > 0 && ! e.synthetic && e.sample < take.endSample)
+            expected.push_back (std::llround ((double) (e.sample - take.startSample) / (double) samplesPerBeat * 960.0));
+
+    std::vector<int64_t> exported;
+
+    for (const auto& e : rendered.events)
+        if (e.type == vocalsynth::TickEventType::noteOn)
+            exported.push_back (e.tick);
+
+    std::sort (expected.begin(), expected.end());
+    CHECK (exported == expected);
+}
+
+TEST_CASE ("Capture off records nothing; capture on again starts recording", "[plugin][capture]")
+{
+    using namespace captureE2E;
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPattern (p, vocalsynth::TestPattern::notes);
+    setPlainValue (p, params::captureEnabled, 0.0f);
+
+    vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, 512);
+    host.runTo ((int64_t) (6.0 * rate), 512); // free mode: notes, then nothing
+
+    CHECK (host.noteOns > 0);
+    CHECK (p.getCaptureWorker().getTakes().empty());
+    CHECK (p.getCaptureWorker().getStatus().state == vocalsynth::TakeSegmenter::State::off);
+
+    setPlainValue (p, params::captureEnabled, 1.0f);
+    host.runTo (host.position + (int64_t) (2.0 * rate), 512);
+    CHECK (p.getCaptureWorker().getStatus().state == vocalsynth::TakeSegmenter::State::freeRecording);
+
+    // Pattern off: the gap (3 s) closes the free take
+    setPattern (p, vocalsynth::TestPattern::off);
+    host.runTo (host.position + (int64_t) (5.0 * rate), 512);
+    const auto takes = p.getCaptureWorker().getTakes();
+    REQUIRE (takes.size() == 1);
+    CHECK (takes.front()->mode == vocalsynth::TakeMode::free);
+}
+
+TEST_CASE ("Capture: bypassed blocks are silence in the take, the flush note-offs are recorded", "[plugin][capture]")
+{
+    using namespace captureE2E;
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPattern (p, vocalsynth::TestPattern::notes);
+
+    vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, 512);
+    host.playHead.playStartSample = 0;
+    host.playHead.playStopSample = (int64_t) (4.0 * rate);
+    host.runTo ((int64_t) (1.0 * rate), 512);
+
+    // Bypass for half a second, then on again
+    for (int i = 0; i < 47; ++i)
+        host.block (512, true);
+
+    host.runTo (host.playHead.playStopSample + (int64_t) rate, 512);
+
+    const auto takes = p.getCaptureWorker().getTakes();
+    REQUIRE (takes.size() == 1);
+    const auto& take = *takes.front();
+    CHECK_FALSE (take.incomplete); // a bypass is no data loss
+    CHECK (take.audio == vocalsynth::TakeAudio::full);
+
+    // Paired: every note-on of the take has its note-off (the bypass flush ended the held note)
+    std::array<int, 128> open {};
+    for (const auto& e : take.events)
+    {
+        if (e.event.type == vocalsynth::VsEventType::noteOn && e.event.data2 > 0)
+            ++open[e.event.data1];
+        else if (e.event.type == vocalsynth::VsEventType::noteOff || e.event.type == vocalsynth::VsEventType::noteOn)
+            open[e.event.data1] = juce::jmax (0, open[e.event.data1] - 1);
+    }
+
+    CHECK (std::all_of (open.begin(), open.end(), [] (int n) { return n == 0; }));
+}
+
+TEST_CASE ("Capture: prepareToPlay at the same rate keeps the history, a new rate clears it", "[plugin][capture]")
+{
+    using namespace captureE2E;
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPattern (p, vocalsynth::TestPattern::notes);
+
+    {
+        vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, 512);
+        host.playHead.playStartSample = 0;
+        host.playHead.playStopSample = (int64_t) (2.0 * rate);
+        host.runTo ((int64_t) (3.0 * rate), 512);
+    }
+
+    REQUIRE (p.getCaptureWorker().getTakes().size() == 1);
+
+    // FL restarts its engine (same rate, new buffer): takes stay
+    p.releaseResources();
+    p.prepareToPlay (rate, 1024);
+    p.getCaptureWorker().runStepForTests();
+    CHECK (p.getCaptureWorker().getTakes().size() == 1);
+
+    // A new sample rate restarts the clock; listed takes stay (they own their data)
+    p.prepareToPlay (44100.0, 1024);
+    p.getCaptureWorker().runStepForTests();
+    CHECK (p.getCaptureWorker().getTakes().size() == 1);
+}
+
+TEST_CASE ("Capture: 10 minutes of capture keep the overflow counters at 0", "[plugin][capture][long]")
+{
+    using namespace captureE2E;
+    const auto source = GENERATE (params::Source::testPattern, params::Source::voice);
+    CAPTURE ((int) source);
+
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+
+    if (source == params::Source::testPattern)
+        setPattern (p, vocalsynth::TestPattern::all); // notes, bends and CCs
+    else
+        setPlainValue (p, params::bendMode, (float) static_cast<int> (vocalsynth::BendMode::trueBend));
+
+    vocalsynth::test::CaptureHost host (p, p.getCaptureWorker(), rate, 512);
+    host.stepEverySamples = 480; // the worker drains every 10 ms
+    host.playHead.playStartSample = 0;
+    host.playHead.playStopSample = (int64_t) (600.0 * rate);
+
+    // Voice: a slow vibrato tone, sung in 2 s phrases (bends all the time in True mode)
+    host.input = [] (int64_t pos)
+    {
+        const auto t = (double) pos / rate;
+
+        if (std::fmod (t, 2.0) > 1.6)
+            return 0.0f;
+
+        const auto f = 220.0 * std::exp2 (0.3 * std::sin (juce::MathConstants<double>::twoPi * 0.7 * t) / 12.0);
+        return (float) (0.2 * std::sin (juce::MathConstants<double>::twoPi * f * t));
+    };
+
+    host.runTo (host.playHead.playStopSample + (int64_t) rate, 512);
+
+    const auto status = p.getCaptureWorker().getStatus();
+    CHECK (status.overflow.records == 0);
+    CHECK (status.overflow.audioSamples == 0);
+
+    const auto takes = p.getCaptureWorker().getTakes();
+    REQUIRE (takes.size() == 1);
+    CHECK (takes.front()->mode == vocalsynth::TakeMode::synced);
+    CHECK_FALSE (takes.front()->incomplete);
+    CHECK (takes.front()->noteCount > 100);
+    CHECK (takes.front()->audio == vocalsynth::TakeAudio::full);
+    CHECK (status.audioHistoryBytes <= vocalsynth::CaptureHistory::maxAudioBytes);
+    CHECK (status.audioHistoryBytes >= (std::size_t) (590.0 * rate) * sizeof (float));
+}
+
+TEST_CASE ("Processor CPU sanity check with capture on: worst 128-sample block at 48 kHz", "[plugin][capture][cpu]")
+{
+    // Spec (docs/M3-SPEC.md, Tests): with the capture tap running (Voice, Wide, True bends, audio on,
+    // transport playing) the worst block stays < 20 % of a 128-sample block at 48 kHz (Release). Per block
+    // the minimum over 3 runs (a preemption hits one run, not all); Debug builds only report.
+    constexpr double sr = 48000.0;
+    constexpr int blockSize = 128;
+    constexpr int numBlocks = (int) (4.0 * sr) / blockSize;
+    std::vector<double> best ((std::size_t) numBlocks, 1.0e9);
+    juce::Random noise (11);
+
+    for (int run = 0; run < 3; ++run)
+    {
+        VocalSynthProcessor p (Variant::fx);
+        p.getCaptureWorker().setManualSteppingForTests (true);
+        setPlainValue (p, params::source, (float) static_cast<int> (params::Source::voice));
+        setPlainValue (p, params::voiceRange, (float) static_cast<int> (vocalsynth::VoiceRange::wide));
+        setPlainValue (p, params::bendMode, (float) static_cast<int> (vocalsynth::BendMode::trueBend));
+        REQUIRE (p.isCaptureEnabled());
+        REQUIRE (p.isCaptureAudioEnabled());
+
+        vocalsynth::test::FakePlayHead head;
+        head.sampleRate = sr;
+        head.playStartSample = 0;
+        p.setPlayHead (&head);
+        p.setRateAndBufferSizeDetails (sr, blockSize);
+        p.prepareToPlay (sr, blockSize);
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            const auto pos = (int64_t) b * blockSize;
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                // 65 Hz saw (longest window, every frame voiced) + a little noise, as the pipeline check
+                const auto phase = std::fmod ((double) (pos + i) * 65.0 / sr, 1.0);
+                const auto x = (float) (0.3 * (2.0 * phase - 1.0)) + 0.01f * (noise.nextFloat() * 2.0f - 1.0f);
+                buffer.setSample (0, i, x);
+                buffer.setSample (1, i, x);
+            }
+
+            head.blockStart = pos;
+            midi.clear();
+            const auto t0 = std::chrono::steady_clock::now();
+            p.processBlock (buffer, midi);
+            const auto t1 = std::chrono::steady_clock::now();
+            best[(std::size_t) b] = juce::jmin (best[(std::size_t) b], std::chrono::duration<double> (t1 - t0).count());
+
+            if (b % 4 == 3) // the worker drains every ~10 ms (outside the measured block)
+                p.getCaptureWorker().runStepForTests();
+        }
+
+        p.setPlayHead (nullptr);
+        CHECK (p.getCaptureWorker().getStatus().overflow.records == 0);
+        CHECK (p.getCaptureWorker().getStatus().overflow.audioSamples == 0);
+    }
+
+    const auto blockSeconds = blockSize / sr;
+    double worst = 0.0, mean = 0.0;
+
+    for (const auto t : best)
+    {
+        worst = juce::jmax (worst, t / blockSeconds);
+        mean += t / blockSeconds;
+    }
+
+    mean /= (double) numBlocks;
+    std::printf ("[processor][cpu] Voice Wide True bends + capture, 48 kHz, 128-sample blocks: worst %.2f %%, mean %.2f %% of the block\n",
+                 100.0 * worst, 100.0 * mean);
+
+#ifdef NDEBUG
+    CHECK (worst < 0.20);
+    CHECK (mean < 0.10);
+#endif
+}
+
+TEST_CASE ("Capture worker: many instances start and stop quickly and leave no files (pluginval-like)",
+           "[plugin][capture][lifecycle]")
+{
+    const auto start = juce::Time::getMillisecondCounterHiRes();
+    juce::StringArray folders;
+
+    for (int i = 0; i < 40; ++i)
+    {
+        VocalSynthProcessor p (i % 2 == 0 ? Variant::fx : Variant::instrument);
+        CHECK_FALSE (p.getCaptureWorker().isRunning()); // no thread before prepareToPlay
+        const auto sampleRate = i % 3 == 0 ? 44100.0 : 48000.0;
+        p.prepareToPlay (sampleRate, 512);
+        CHECK (p.getCaptureWorker().isRunning());
+
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        buffer.clear();
+
+        for (int b = 0; b < 8; ++b)
+            p.processBlock (buffer, midi);
+
+        p.releaseResources();
+        CHECK (p.getCaptureWorker().isRunning()); // survives FL's engine stop
+        p.prepareToPlay (96000.0, 256);           // new rate: suspend, reallocate, resume
+        p.processBlock (buffer, midi);
+        p.releaseResources();
+        folders.add (p.getCaptureWorker().getInstanceFolder().getFullPathName());
+    }
+
+    const auto elapsedMs = juce::Time::getMillisecondCounterHiRes() - start;
+    CAPTURE (elapsedMs);
+    CHECK (elapsedMs < 20000.0);
+
+    for (const auto& f : folders)
+        CHECK_FALSE (juce::File (f).exists());
 }

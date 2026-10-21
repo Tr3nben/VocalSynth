@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace vocalsynth
 {
@@ -53,6 +54,83 @@ void NoteSegmenter::reset() noexcept
     fastFrames = 0;
     fastLastPitch = 0.0;
     fastMaxRmsDb = PitchFrame::silenceDb;
+
+    lastTiming = {};
+    hasLevelOnset = false;
+    levelOnsetSample = 0;
+    hasLevelRelease = false;
+    levelReleaseSample = 0;
+    noteOnTiming = {};
+    noteEstimatedStart = 0;
+    hasPreviousNoteEnd = false;
+    previousNoteEnd = 0;
+    releaseRunStart = 0;
+}
+
+void NoteSegmenter::setDetectionDelayModel (const DetectionDelayModel& model) noexcept
+{
+    delayModel = model;
+    delayModel.onsetSearchSamples = std::max<int64_t> (0, model.onsetSearchSamples);
+    delayModel.confirmedOnsetDelaySamples = std::max<int64_t> (0, model.confirmedOnsetDelaySamples);
+    delayModel.frameDelaySamples = std::isfinite (model.frameDelaySamples) ? std::max (0.0, model.frameDelaySamples) : 0.0;
+}
+
+void NoteSegmenter::setLevelOnsetSample (int64_t absoluteSample) noexcept
+{
+    hasLevelOnset = true;
+    levelOnsetSample = absoluteSample;
+}
+
+void NoteSegmenter::setLevelReleaseSample (int64_t absoluteSample) noexcept
+{
+    hasLevelRelease = true;
+    levelReleaseSample = absoluteSample;
+}
+
+VsEventTiming NoteSegmenter::timingFor (int64_t emitSample, int64_t estimate, EventTimingKind kind, uint8_t flags) noexcept
+{
+    const auto delay = std::clamp<int64_t> (emitSample - estimate, 0, std::numeric_limits<int32_t>::max());
+    return { static_cast<int32_t> (delay), kind, flags };
+}
+
+int64_t NoteSegmenter::frameDelay() const noexcept
+{
+    return static_cast<int64_t> (std::llround (delayModel.frameDelaySamples));
+}
+
+VsEventTiming NoteSegmenter::onsetTiming (int64_t absoluteSample, bool provisionalPath, double p) const noexcept
+{
+    // The newest upward level crossing, if it belongs to this note: not too long before the emit sample
+    // and after the previous note ended (a level that never fell between two notes is no onset)
+    if (hasLevelOnset && levelOnsetSample <= absoluteSample
+        && absoluteSample - levelOnsetSample <= delayModel.onsetSearchSamples
+        && (! hasPreviousNoteEnd || levelOnsetSample >= previousNoteEnd))
+        return timingFor (absoluteSample, levelOnsetSample, EventTimingKind::measured, 0);
+
+    auto delay = delayModel.confirmedOnsetDelaySamples;
+
+    if (provisionalPath && delayModel.fastOnsetDelay != nullptr)
+        delay = delayModel.fastOnsetDelay (delayModel.fastOnsetDelayContext, midiNoteToFrequency (p));
+
+    return timingFor (absoluteSample, absoluteSample - delay, EventTimingKind::model, 0);
+}
+
+VsEventTiming NoteSegmenter::changeTiming (int64_t absoluteSample) const noexcept
+{
+    const auto estimate = std::max (changeTimerStart - frameDelay(), noteEstimatedStart + 1);
+    return timingFor (absoluteSample, std::min (estimate, absoluteSample), EventTimingKind::measured,
+                      EventTimingFlags::noteChange);
+}
+
+VsEventTiming NoteSegmenter::releaseTiming (int64_t absoluteSample) const noexcept
+{
+    auto estimate = releaseRunStart - frameDelay();
+
+    if (hasLevelRelease && levelReleaseSample > noteEstimatedStart && levelReleaseSample <= absoluteSample)
+        estimate = levelReleaseSample;
+
+    estimate = std::clamp (estimate, noteEstimatedStart + 1, absoluteSample);
+    return timingFor (absoluteSample, estimate, EventTimingKind::measured, 0);
 }
 
 void NoteSegmenter::setOnsetTiming (int64_t ignoreSamples, int64_t timeoutSamples, int64_t settleSamples) noexcept
@@ -65,6 +143,8 @@ void NoteSegmenter::setOnsetTiming (int64_t ignoreSamples, int64_t timeoutSample
 void NoteSegmenter::processOnsetFrame (const PitchFrame& frame, int64_t absoluteSample, int sampleOffset,
                                        BendGenerator& bend, VsEventSink out) noexcept
 {
+    lastTiming = {};
+
     if (activeOutputNote >= 0)
         return;
 
@@ -121,7 +201,8 @@ void NoteSegmenter::processOnsetFrame (const PitchFrame& frame, int64_t absolute
 
     const auto velocity = velocityFor (static_cast<double> (fastMaxRmsDb), static_cast<double> (gateThresholdDb),
                                        velocitySensitivityPercent);
-    startNote (q, outputNote, velocity, fastMaxRmsDb, p, absoluteSample, sampleOffset, bend, out);
+    startNote (q, outputNote, velocity, fastMaxRmsDb, p, absoluteSample, sampleOffset, bend, out,
+               onsetTiming (absoluteSample, true, p));
     provisional = true;
     provisionalStartSample = absoluteSample;
     provisionalSeenStrong = false;
@@ -157,6 +238,7 @@ void NoteSegmenter::processFrame (const PitchFrame& frame, int64_t absoluteSampl
     const auto weak = hasPitch && frame.confidence >= confidenceOff
                       && frame.rmsDb >= gateThresholdDb - gateHysteresisDb;
     const auto p = hasPitch ? frequencyToMidiNote (static_cast<double> (frame.frequencyHz)) : 0.0;
+    lastTiming = {};
 
     if (activeOutputNote < 0)
         processIdleFrame (frame, strong, p, absoluteSample, sampleOffset, bend, out);
@@ -206,7 +288,12 @@ bool NoteSegmenter::processProvisionalFrame (const PitchFrame& frame, bool stron
             && isPlayable (candidate + 12 * octaveShift))
         {
             unvoicedFrames = 0;
-            changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out);
+            auto correction = noteOnTiming;
+            correction.flags = static_cast<uint8_t> (correction.flags | EventTimingFlags::correction);
+            const auto provisionalStart = noteEstimatedStart;
+            changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out,
+                        correction);
+            noteEstimatedStart = provisionalStart; // the corrected note is the provisional one
             return true; // a normal note from now on (startNote() cleared provisional)
         }
 
@@ -222,7 +309,7 @@ bool NoteSegmenter::processProvisionalFrame (const PitchFrame& frame, bool stron
     if (weak || provisionalSeenStrong)
         return false;
 
-    endNote (absoluteSample, sampleOffset, bend, out); // false start
+    endNote (absoluteSample, sampleOffset, bend, out, noteOnTiming); // false start
     fastBlocked = true;
     return true;
 }
@@ -250,7 +337,8 @@ void NoteSegmenter::processIdleFrame (const PitchFrame& frame, bool strong, doub
 
     const auto velocity = velocityFor (static_cast<double> (onsetMaxRmsDb), static_cast<double> (gateThresholdDb),
                                        velocitySensitivityPercent);
-    startNote (q, outputNote, velocity, onsetMaxRmsDb, p, absoluteSample, sampleOffset, bend, out);
+    startNote (q, outputNote, velocity, onsetMaxRmsDb, p, absoluteSample, sampleOffset, bend, out,
+               onsetTiming (absoluteSample, false, p));
     fastBlocked = false; // the full window agrees with a voice again: the false start was a one-off
 }
 
@@ -271,7 +359,7 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
     // Octave shift changed so that the held note is no longer playable: end it at once, on any frame.
     if (! isPlayable (shiftedNote))
     {
-        endNote (absoluteSample, sampleOffset, bend, out);
+        endNote (absoluteSample, sampleOffset, bend, out, {});
         return;
     }
 
@@ -302,9 +390,12 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
         lastFrameVoiced = false;
         changeTimerRunning = false;
 
+        if (unvoicedFrames == 0)
+            releaseRunStart = absoluteSample;
+
         // The note is held (no bend updates) until releaseFrames unvoiced frames AND minNoteLength.
         if (++unvoicedFrames >= releaseFrames && absoluteSample - noteStartSample >= minNoteSamples)
-            endNote (absoluteSample, sampleOffset, bend, out);
+            endNote (absoluteSample, sampleOffset, bend, out, releaseTiming (absoluteSample));
 
         return;
     }
@@ -318,9 +409,11 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
     // minNoteLength), with the usual legato/retrigger order.
     if (shiftedNote != activeOutputNote)
     {
-        changeNote (activeQuantisedNote, shiftedNote, frame, p, absoluteSample, sampleOffset, bend, out);
+        changeNote (activeQuantisedNote, shiftedNote, frame, p, absoluteSample, sampleOffset, bend, out, {});
         return;
     }
+
+    lastTiming.update = timingFor (absoluteSample, absoluteSample - frameDelay(), EventTimingKind::measured, 0);
 
     if (! changeWanted)
     {
@@ -340,7 +433,9 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
 
     if (absoluteSample - changeTimerStart >= minChangeSamples && absoluteSample - noteStartSample >= minNoteSamples)
     {
-        changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out);
+        lastTiming.update = {};
+        changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out,
+                    changeTiming (absoluteSample));
         return;
     }
 
@@ -349,8 +444,13 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
 }
 
 void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float levelDb, double p,
-                               int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept
+                               int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out,
+                               const VsEventTiming& timing) noexcept
 {
+    lastTiming.noteOn = timing;
+    noteOnTiming = timing;
+    noteEstimatedStart = absoluteSample - timing.delaySamples;
+
     noteLevelDb = levelDb;
     noteLevelSample = absoluteSample;
     activeQuantisedNote = q;
@@ -370,8 +470,13 @@ void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float le
 }
 
 void NoteSegmenter::changeNote (int q, int outputNote, const PitchFrame& frame, double p, int64_t absoluteSample,
-                                int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept
+                                int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing) noexcept
 {
+    // The old note ends where the new one starts (same estimate)
+    lastTiming.noteOff = timing;
+    hasPreviousNoteEnd = true;
+    previousNoteEnd = absoluteSample - timing.delaySamples;
+
     const auto oldNote = static_cast<uint8_t> (activeOutputNote);
     const auto oldChannel = activeChannel;
     const auto velocity = velocityFor (static_cast<double> (frame.rmsDb), static_cast<double> (gateThresholdDb),
@@ -380,7 +485,7 @@ void NoteSegmenter::changeNote (int q, int outputNote, const PitchFrame& frame, 
     if (! legato)
         out.push (VsEvent::makeNoteOff (sampleOffset, oldChannel, oldNote));
 
-    startNote (q, outputNote, velocity, frame.rmsDb, p, absoluteSample, sampleOffset, bend, out);
+    startNote (q, outputNote, velocity, frame.rmsDb, p, absoluteSample, sampleOffset, bend, out, timing);
 
     if (legato)
         out.push (VsEvent::makeNoteOff (sampleOffset, oldChannel, oldNote));
@@ -388,8 +493,13 @@ void NoteSegmenter::changeNote (int q, int outputNote, const PitchFrame& frame, 
     lastFrameVoiced = true;
 }
 
-void NoteSegmenter::endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept
+void NoteSegmenter::endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out,
+                             const VsEventTiming& timing) noexcept
 {
+    lastTiming.noteOff = timing;
+    hasPreviousNoteEnd = true;
+    previousNoteEnd = absoluteSample - timing.delaySamples;
+
     out.push (VsEvent::makeNoteOff (sampleOffset, activeChannel, static_cast<uint8_t> (activeOutputNote)));
     bend.noteEnded (absoluteSample, sampleOffset, activeChannel, out);
 
@@ -406,9 +516,9 @@ void NoteSegmenter::endNote (int64_t absoluteSample, int sampleOffset, BendGener
 void NoteSegmenter::flush (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept
 {
     if (activeOutputNote >= 0)
-        endNote (absoluteSample, sampleOffset, bend, out);
+        endNote (absoluteSample, sampleOffset, bend, out, {});
 
-    reset();
+    reset(); // also lastTiming = {}: a flush happens when it is sent (kind none)
 }
 
 } // namespace vocalsynth

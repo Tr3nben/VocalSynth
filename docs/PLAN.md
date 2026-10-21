@@ -291,13 +291,16 @@ Umgesetzt in Version 0.2.0, Feinschliff nach dem Nutzertest in 0.2.1 (Vorgabe `d
 
 ### M3 – Capture und Drag & Drop (3–4 Wochen)
 
-Entwurf der Vorgabe: `docs/M3-SPEC.md` (Ziel 0.3.0), wartet auf die Antworten des Nutzers zu den offenen Fragen am Ende und auf seine Freigabe.
+Umgesetzt in Version 0.3.0 (Vorgabe `docs/M3-SPEC.md` mit den am 2026-10-16 bestätigten Entscheidungen, Design `docs/M3-DESIGN.md`, Testanleitung `docs/M3-TESTING.md`).
 
-- [ ] `CaptureRecorder` mit SPSC-FIFO zum Writer-Thread, BPM und Position aus der Playhead. Aufnahme läuft bei laufendem Transport oder manuell.
-- [ ] `CaptureExporter` erzeugt `.mid` (Raw/Clean) und `.wav`. Die bekannte Detektionsverzögerung wird herausgerechnet.
-- [ ] Erste Stufe von `CleanMidi`: Ghost-Noten unter Mindestlänge entfernen, Übergangsnoten zusammenfassen.
-- [ ] CapturePanel mit Drag-Quelle (`performExternalDragDropOfFiles`), „Speichern unter“ und Aufräumen der Temp-Dateien.
-- [ ] Optional nach T7: `VirtualMidiPort` als Ausgabeweg mit eigenem FIFO und Thread.
+- [x] `CaptureTap` (Audio-Thread) mit zwei SPSC-Ringen (Records + Audio) zum Capture-Worker-Thread, BPM, Position und Taktart aus der Playhead. Die Aufnahme läuft immer: synchron zum Transport (Play bis Stop, Loops werden nicht geteilt) oder frei (neuer Take nach 3 s Pause), dazu „New take“ und rückwirkend „Grab last N bars / N s“. Blockgrößen-invariant, Overflow-Zähler mit Lückenmarkierung.
+- [x] `CaptureHistory` (10 Minuten Rückblick, Stimme im RAM) und `TakeSegmenter`, `TakeTimeline` (Tempo-Map, Taktgitter, ausgerollte Loops).
+- [x] `CaptureExporter` erzeugt `.mid` (Raw/Clean, optional quantisiert) und `.wav` (24 Bit, im Hintergrund in den Instanz-Cache geschrieben). Die Detektionsverzögerung und der Soundkarten-Umweg (Auto = 2 × Puffer + Feinregler, Manual, Off) werden herausgerechnet; die Datei beginnt am Takt des Takes (Taktnummer im Dateinamen).
+- [x] Erste Stufe von `CleanMidi` (im `TakeRenderer`): Ghost-Noten unter Mindestlänge entfernen, Übergangsnoten zusammenfassen, Oktav-Ausreißer entfernen, vorläufige Noten zusammenführen.
+- [x] CapturePanel (Reiter „Capture“) mit Take-Liste, Mini-Piano-Roll, Drag-Quellen für MIDI und WAV (`performExternalDragDropOfFiles`), „Save as…“ und Aufräumen der Temp-Dateien (Instanz-Ordner beim Schließen, verwaiste nach 24 h). Gezogene WAVs werden nach `Dokumente\VocalSynth\Takes` verschoben.
+- [x] Takes werden nicht im Projekt gespeichert, nur die Einstellungen (fünf neue Parameter mit Version-Hint 2, Exportoptionen als eigener State-Zweig).
+- [ ] Test durch den Nutzer in FL Studio 2026 (Checkliste in `docs/M3-TESTING.md`).
+- [ ] Optional nach T7: `VirtualMidiPort` als Ausgabeweg mit eigenem FIFO und Thread (nicht Teil von M3, siehe `docs/M3-SPEC.md` „Out“).
 
 **Abnahme:**
 - Drag & Drop nach FL funktioniert für Pattern und Playlist.

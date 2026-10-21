@@ -26,7 +26,6 @@ constexpr float meterDecayPerTick = 0.85f;
 constexpr float meterFloorDb = -60.0f;
 constexpr float voiceMeterFloorDb = -70.0f; // lowest gate threshold
 constexpr int histogramRowHeight = 12;
-constexpr int dragThresholdPixels = 4;
 constexpr int pageRadioGroup = 4711;
 
 const juce::Colour backgroundColour { 0xff15171c };
@@ -88,86 +87,6 @@ float proportionOf (float db, float floorDb)
 }
 } // namespace
 
-//==============================================================================
-VocalSynthEditor::FileDragSource::FileDragSource (juce::String t, std::function<juce::File()> exporter)
-    : text (std::move (t)),
-      exportFile (std::move (exporter))
-{
-    setMouseCursor (juce::MouseCursor::DraggingHandCursor);
-    setTooltip ("Drag into FL Studio (pattern / playlist)");
-}
-
-void VocalSynthEditor::FileDragSource::paint (juce::Graphics& g)
-{
-    const auto bounds = getLocalBounds().toFloat().reduced (1.0f);
-
-    g.setColour (isPressed ? panelColour.brighter (0.2f) : panelColour);
-    g.fillRoundedRectangle (bounds, 6.0f);
-
-    g.setColour (accentColour);
-    g.drawRoundedRectangle (bounds, 6.0f, 1.5f);
-
-    auto area = getLocalBounds().reduced (8, 2);
-
-    g.setColour (textColour);
-    g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
-    g.drawText (text, area.removeFromTop (area.getHeight() / 2 + 4), juce::Justification::centredBottom);
-
-    g.setColour (dimTextColour);
-    g.setFont (juce::FontOptions (12.0f));
-    g.drawFittedText (statusText.isNotEmpty() ? statusText : juce::String ("drag me into FL Studio"), area,
-                      juce::Justification::centredTop, 1, 0.8f);
-}
-
-void VocalSynthEditor::FileDragSource::mouseDown (const juce::MouseEvent&)
-{
-    dragStartedThisGesture = false;
-    isPressed = true;
-    repaint();
-}
-
-void VocalSynthEditor::FileDragSource::mouseDrag (const juce::MouseEvent& e)
-{
-    if (dragStartedThisGesture || e.getDistanceFromDragStart() < dragThresholdPixels)
-        return;
-
-    // Only once per gesture: exporting does file I/O, and a second external drag must not start
-    dragStartedThisGesture = true;
-
-    const auto file = exportFile != nullptr ? exportFile() : juce::File();
-
-    if (! file.existsAsFile())
-    {
-        statusText = "export failed";
-        repaint();
-        return;
-    }
-
-    statusText = file.getFileName();
-    repaint();
-
-    juce::Component::SafePointer<FileDragSource> safeThis (this);
-
-    if (! juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this,
-                                                                      [safeThis]
-                                                                      {
-                                                                          if (safeThis != nullptr)
-                                                                          {
-                                                                              safeThis->isPressed = false;
-                                                                              safeThis->repaint();
-                                                                          }
-                                                                      }))
-    {
-        statusText = "drag failed: " + file.getFileName();
-        repaint();
-    }
-}
-
-void VocalSynthEditor::FileDragSource::mouseUp (const juce::MouseEvent&)
-{
-    isPressed = false;
-    repaint();
-}
 //==============================================================================
 void VocalSynthEditor::TunerDisplay::setState (const TunerDisplayModel::State& state, bool active)
 {
@@ -413,12 +332,13 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
       formatName (getFormatName (p.wrapperType)),
       midiDragSource ("Drag test MIDI",
                       [&p] { return TestClipExporter::exportMidi (p.getTestPatternSettings()); }),
-      wavDragSource ("Drag test WAV", [] { return TestClipExporter::exportWav(); })
+      wavDragSource ("Drag test WAV", [] { return TestClipExporter::exportWav(); }),
+      capturePanel (p)
 {
     auto& apvts = p.getParameters();
 
     // --- Page switch ---
-    for (auto* button : { &voicePageButton, &testPageButton })
+    for (auto* button : { &voicePageButton, &testPageButton, &capturePageButton })
     {
         button->setClickingTogglesState (false);
         button->setRadioGroupId (pageRadioGroup, juce::dontSendNotification);
@@ -428,8 +348,13 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
 
     voicePageButton.setTooltip ("Tuner and the voice -> MIDI settings");
     testPageButton.setTooltip ("M1 test pattern, MIDI channel, Monitor Tone, virtual port, diagnostics");
+    capturePageButton.setTooltip ("Takes of what you sang: drag them into FL Studio as MIDI or WAV");
     voicePageButton.onClick = [this] { showPage (Page::voice); };
     testPageButton.onClick = [this] { showPage (Page::testAndRouting); };
+    capturePageButton.onClick = [this] { showPage (Page::capture); };
+
+    // --- Capture page (M3) ---
+    addChildComponent (capturePanel);
 
     const auto addCombo = [this] (juce::ComboBox& box, const juce::StringArray& items, const juce::String& tooltip)
     {
@@ -633,8 +558,11 @@ void VocalSynthEditor::showPage (Page page)
     for (auto* c : testPageComponents)
         c->setVisible (page == Page::testAndRouting);
 
+    capturePanel.setVisible (page == Page::capture);
+
     voicePageButton.setToggleState (page == Page::voice, juce::dontSendNotification);
     testPageButton.setToggleState (page == Page::testAndRouting, juce::dontSendNotification);
+    capturePageButton.setToggleState (page == Page::capture, juce::dontSendNotification);
     repaint();
 }
 
@@ -650,8 +578,7 @@ void VocalSynthEditor::paint (juce::Graphics& g)
 
     g.setColour (dimTextColour);
     g.setFont (juce::FontOptions (13.0f));
-    g.drawText ("Version " VOCALSYNTH_VERSION_STRING " " + enDash() + " M2 pitch to MIDI   |   Format: " + formatName,
-                header.removeFromTop (18), juce::Justification::centredLeft);
+    g.drawText (getVersionText(), header.removeFromTop (18), juce::Justification::centredLeft);
 
     if (currentPage == Page::voice)
     {
@@ -659,10 +586,15 @@ void VocalSynthEditor::paint (juce::Graphics& g)
         g.fillRoundedRectangle (infoPanelBounds.toFloat(), 6.0f);
         paintInputMeter (g);
     }
-    else
+    else if (currentPage == Page::testAndRouting)
     {
         paintHistogram (g);
     }
+}
+
+juce::String VocalSynthEditor::getVersionText() const
+{
+    return "Version " VOCALSYNTH_VERSION_STRING " " + enDash() + " M3 capture   |   Format: " + formatName;
 }
 
 void VocalSynthEditor::paintInputMeter (juce::Graphics& g)
@@ -755,12 +687,15 @@ void VocalSynthEditor::resized()
     voicePageButton.setBounds (tabs.removeFromLeft (pageButtonWidth));
     tabs.removeFromLeft (6);
     testPageButton.setBounds (tabs.removeFromLeft (pageButtonWidth));
+    tabs.removeFromLeft (6);
+    capturePageButton.setBounds (tabs.removeFromLeft (pageButtonWidth));
     area.removeFromTop (12);
     area.removeFromBottom (margin);
 
-    // Both pages are laid out; only one is visible (showPage)
+    // All pages are laid out; only one is visible (showPage)
     layoutVoicePage (area);
     layoutTestPage (area);
+    capturePanel.setBounds (area);
 }
 
 void VocalSynthEditor::layoutVoicePage (juce::Rectangle<int> area)
@@ -1021,6 +956,10 @@ void VocalSynthEditor::timerCallback()
 
         return;
     }
+
+    // The Capture tab updates itself (CapturePanel's own 10 Hz timer)
+    if (currentPage == Page::capture)
+        return;
 
     repaint (testMeterBounds);
 

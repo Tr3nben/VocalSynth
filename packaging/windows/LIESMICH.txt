@@ -8,6 +8,7 @@ Inhalt dieses Pakets
   VST3\                      VocalSynth FX.vst3, VocalSynth Instrument.vst3
   CLAP\                      VocalSynth FX.clap, VocalSynth Instrument.clap
   Standalone\                VocalSynth FX.exe (zum Testen ohne DAW)
+  M3-TESTING.md              Anleitung: Aufnahme und Drag & Drop testen (0.3.0)
   M2-TESTING.md              Anleitung: Singen -> MIDI in FL Studio testen
   FL-ROUTING.md              Anleitung zum MIDI-Routing-Test (Version 0.1.0)
 
@@ -28,32 +29,43 @@ Installation
    FL Studio durchsucht auch Unterordner, der Ordner "VocalSynth" wird also
    gefunden.
 
-Was ist das für eine Version? (0.2.1, Meilenstein 2)
+Was ist das für eine Version? (0.3.0, Meilenstein 3)
 ----------------------------------------------------
-Ab dieser Version wird deine Stimme zu MIDI: Du singst oder summst ins
-Mikrofon, VocalSynth erkennt die Tonhöhe und schickt Noten (und auf Wunsch
+Deine Stimme wird zu MIDI (seit 0.2): Du singst oder summst ins Mikrofon,
+VocalSynth erkennt die Tonhöhe und schickt Noten (und auf Wunsch
 Pitchbend) über den MIDI-Port von FL Studio an einen Synth.
 
-Die Anleitung zum Testen mit allen Klickwegen, der Erklärung jedes
-Reglers und einer Checkliste liegt als M2-TESTING.md in diesem ZIP (mit
-dem Editor öffnen) und steht auch auf GitHub:
-  https://github.com/Tr3nben/VocalSynth/blob/master/docs/M2-TESTING.md
+Neu in 0.3.0: VocalSynth nimmt selbst auf, was du singst (FL Studio nimmt
+das MIDI eines Plugins nicht in die Piano Roll auf). Jeder Take landet im
+neuen Reiter "Capture". Von dort ziehst du ihn als .mid auf einen Kanal
+im Channel Rack oder in die Piano Roll und die Stimme als .wav in die
+Playlist. Die Verzögerung der Soundkarte und der Tonhöhen-Erkennung wird
+dabei herausgerechnet, die Noten liegen dort, wo du gesungen hast.
+  - Transport läuft (Synced): ein Take von Play bis Stop; die .mid beginnt
+    am Takt deiner ersten Note, die Taktnummer steht im Dateinamen. Das
+    Pattern an diesen Takt legen.
+  - Transport gestoppt (Free): ein Take endet nach 3 s Pause.
+  - "Grab last 8 bars / 30 s" holt nachträglich, was du gerade gesungen
+    hast.
+  - Takes werden NICHT im Projekt gespeichert: ziehen oder "Save as...".
+    Gezogene WAVs liegen dauerhaft in Dokumente\VocalSynth\Takes.
+
+Die Anleitung zum Testen mit Checkliste liegt als M3-TESTING.md in
+diesem ZIP (mit dem Editor öffnen) und steht auch auf GitHub:
+  https://github.com/Tr3nben/VocalSynth/blob/master/docs/M3-TESTING.md
+Einrichtung des Routings und jedes Reglers im Reiter "Voice":
+M2-TESTING.md (ebenfalls im ZIP).
 
 Kurz: VocalSynth FX auf den Mixer-Insert mit deinem Mikrofon legen, im
 Zahnrad-Menü (VST wrapper settings > MIDI) "Output port" z. B. auf 1
 stellen, beim Synth (z. B. Vital) "Input port" ebenfalls auf 1. Im
 Plugin-Reiter "Voice": Source = Voice, Voice Range = Tenor (oder deine
-Stimmlage), dann singen.
+Stimmlage), dann singen. Tipp: ASIO-Puffer zum Live-Spielen auf 128 oder
+256 Samples stellen (Options > Audio settings > Buffer length); 2048
+Samples kosten allein ca. 46 ms pro Puffer, und der Puffer zählt doppelt
+(Ein- und Ausgang). In der Aufnahme wird diese Verzögerung ausgeglichen.
 
-Neu in 0.2.1: ruhigeres Stimmgerät, schnellere Notenanfänge, Gate-Standard
--40 dB, Anzeige von Puffer, Gesamt-Latenz und eigener DSP-Last. Tipp: ASIO-Puffer auf 128 oder 256 Samples stellen
-(Options > Audio settings > Buffer length); 2048 Samples kosten allein
-ca. 46 ms pro Puffer, und der Puffer zählt doppelt (Ein- und Ausgang).
-
-Hinweis: FL Studio nimmt das MIDI eines Plugins nicht in die Piano Roll
-auf. Die eigene Aufnahme mit Drag & Drop kommt in Meilenstein 3.
-
-Das Plugin-Fenster hat zwei Reiter (englisch beschriftet):
+Das Plugin-Fenster hat drei Reiter (englisch beschriftet):
   Voice              Stimmgerät (Notenname wie in FL: C5 = Note 60),
                      gesendete Note, Latenz in ms, Eingangspegel mit
                      Gate-Linie und die Einstellungen: Source, Voice
@@ -70,6 +82,12 @@ Das Plugin-Fenster hat zwei Reiter (englisch beschriftet):
                      Drag test MIDI/WAV, Zähler der gesendeten MIDI-
                      Nachrichten und die Blockgrößen, die FL schickt.
                      Anleitung dazu: FL-ROUTING.md (liegt im ZIP).
+  Capture            Aufnahme (neu in 0.3.0): Take-Liste, Vorschau,
+                     Ziehflächen MIDI und WAV, Save as..., New take,
+                     Grab last ..., Clear, Exportoptionen (Version
+                     Clean/Raw, Bends, Quantize), Offset (Auto/Manual/
+                     Off + Fine), Capture / Capture audio, Free gap.
+                     Anleitung dazu: M3-TESTING.md (liegt im ZIP).
 
 Ausprobieren
 ------------

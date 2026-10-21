@@ -24,7 +24,20 @@ add_executable(VocalSynthCoreTests
     core/ScaleQuantizerTests.cpp
     core/NoteSegmenterTests.cpp
     core/BendGeneratorTests.cpp
-    core/VoicePipelineTests.cpp)
+    core/VoicePipelineTests.cpp
+    # M3 capture (docs/M3-DESIGN.md 16)
+    core/CaptureRecordTests.cpp
+    core/CaptureOptionsTests.cpp
+    core/SpscRingTests.cpp
+    core/CaptureTapTests.cpp
+    core/CaptureHistoryTests.cpp
+    core/TakeTimelineTests.cpp
+    core/TakeSegmenterTests.cpp
+    core/CaptureDrainTests.cpp
+    core/TakeRendererTests.cpp
+    core/SmfWriterTests.cpp
+    core/WavWriterTests.cpp
+    core/CaptureCompensationTests.cpp)
 target_link_libraries(VocalSynthCoreTests PRIVATE VocalSynthCore Catch2::Catch2WithMain)
 set_target_properties(VocalSynthCoreTests PROPERTIES FOLDER "Tests")
 catch_discover_tests(VocalSynthCoreTests DISCOVERY_MODE PRE_TEST)
@@ -38,7 +51,12 @@ add_executable(VocalSynthPluginTests
     plugin/ParameterTests.cpp
     plugin/PluginEditorTests.cpp
     plugin/ProcessorTests.cpp
-    plugin/TestClipExporterTests.cpp)
+    plugin/TestClipExporterTests.cpp
+    # M3 capture (docs/M3-DESIGN.md 16)
+    plugin/CaptureParameterTests.cpp
+    plugin/CaptureWorkerTests.cpp
+    plugin/CaptureExporterTests.cpp
+    plugin/CapturePanelTests.cpp)
 target_link_libraries(VocalSynthPluginTests PRIVATE VocalSynthPluginCode Catch2::Catch2)
 target_compile_definitions(VocalSynthPluginTests PRIVATE
     $<TARGET_PROPERTY:VocalSynthFX,COMPILE_DEFINITIONS>

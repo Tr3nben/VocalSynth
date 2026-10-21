@@ -50,6 +50,10 @@ void DspLoadMeter::addBlock (double processingSeconds, int numSamples) noexcept
         peak = juce::jmax (load, peak * std::exp (-blockSeconds / peakDecayTimeConstantSeconds));
     }
 
+    // The two smoothings decay at different rates, so with a fluctuating load the average can drift
+    // slightly above the decayed peak; a peak below the average makes no sense on screen.
+    peak = juce::jmax (peak, average);
+
     publishedAverage.store (static_cast<float> (average), std::memory_order_relaxed);
     publishedPeak.store (static_cast<float> (peak), std::memory_order_relaxed);
     publishedValid.store (true, std::memory_order_relaxed);
@@ -182,7 +186,13 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
       variant (v),
       apvts (*this, nullptr, "PARAMS", params::createLayout()),
       virtualMidiPort (v == Variant::instrument ? "VocalSynth Instrument" : "VocalSynth FX"),
-      secondsPerTick (1.0 / static_cast<double> (juce::jmax ((juce::int64) 1, juce::Time::getHighResolutionTicksPerSecond())))
+      secondsPerTick (1.0 / static_cast<double> (juce::jmax ((juce::int64) 1, juce::Time::getHighResolutionTicksPerSecond()))),
+      instanceId (CaptureExporter::makeInstanceId()),
+      captureWorker (captureTap, CaptureExporter::getInstanceFolder (instanceId),
+                     CaptureWorkerSources { apvts.getRawParameterValue (params::captureOffsetMode.getParamID()),
+                                            apvts.getRawParameterValue (params::captureOffsetMs.getParamID()),
+                                            apvts.getRawParameterValue (params::captureFineOffsetMs.getParamID()),
+                                            [this] { return recentBlockSize.get(); } })
 {
     static_assert (static_cast<int> (TestPattern::all) == 4, "testPattern choice index == TestPattern");
 
@@ -218,11 +228,30 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
              && bendModeParam != nullptr && bendRangeParam != nullptr && velocitySensitivityParam != nullptr
              && legatoParam != nullptr);
 
+    captureEnabledParam = apvts.getRawParameterValue (params::captureEnabled.getParamID());
+    captureAudioParam = apvts.getRawParameterValue (params::captureAudio.getParamID());
+    captureOffsetModeParam = apvts.getRawParameterValue (params::captureOffsetMode.getParamID());
+    captureOffsetMsParam = apvts.getRawParameterValue (params::captureOffsetMs.getParamID());
+    captureFineOffsetMsParam = apvts.getRawParameterValue (params::captureFineOffsetMs.getParamID());
+
+    jassert (captureEnabledParam != nullptr && captureAudioParam != nullptr && captureOffsetModeParam != nullptr
+             && captureOffsetMsParam != nullptr && captureFineOffsetMsParam != nullptr);
+
+    captureWorker.setOptions (toWorkerOptions (captureState));
+
     // Never resized: processBlock downmixes chunks of at most maxChunkSamples
     monoBuffer.assign ((size_t) maxChunkSamples, 0.0f);
     lastSource = getSource();
 
     midiOutput.setVirtualPort (&virtualMidiPort);
+}
+
+VocalSynthProcessor::~VocalSynthProcessor()
+{
+    // The worker joins within one bounded step (an unfinished WAV job is aborted), then the instance
+    // folder (MIDI exports, WAV cache) goes; WAVs moved to the takes folder stay (docs/M3-DESIGN.md 12, 15)
+    captureWorker.stop();
+    CaptureExporter::deleteInstanceFolder (captureWorker.getInstanceFolder());
 }
 
 const juce::String VocalSynthProcessor::getName() const
@@ -244,6 +273,18 @@ void VocalSynthProcessor::prepareToPlay (double sampleRate, int maximumExpectedS
     currentTestNote.store (-1, std::memory_order_relaxed);
     recentBlockSize.prepare (sampleRate);
     dspLoad.prepare (sampleRate);
+
+    // Capture (docs/M3-DESIGN.md 15): the worker drains and parks while the tap's rings are (re)allocated;
+    // the first call starts the worker thread. The history survives a prepare at the same rate.
+    captureWorker.suspend();
+    captureTap.prepare (sampleRate, maximumExpectedSamplesPerBlock); // allocates (allowed here)
+    preparedMaxBlockSize.store (maximumExpectedSamplesPerBlock, std::memory_order_relaxed);
+
+    if (captureWorker.isStarted())
+        captureWorker.resume();
+    else
+        captureWorker.start();
+
     reset();
 }
 
@@ -312,11 +353,19 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const bool sourceChanged = source != lastSource;
     lastSource = source;
 
+    // Capture (docs/M3-DESIGN.md 4): reset / transport / settings / markers at the block start
+    // One load of captureEnabled / captureAudio per block: the tap's audio state and the mono pointer
+    // below must agree (the host or the UI may change the parameters at any time)
+    const auto captureBlock = makeCaptureBlockSettings (source, voiceSettings, settings, false);
+    captureTap.beginBlock (makeTransportInfo (getPlayHead()), captureBlock);
+    const bool captureAudio = captureBlock.captureEnabled && captureBlock.captureAudio;
+
     if (flushPending.exchange (false, std::memory_order_relaxed) || sourceChanged)
     {
         // Before anything of this block is generated, so the restarted pattern's first note-on at
         // offset 0 comes after these note-offs (docs/M1-DESIGN.md 4.4)
         midiOutput.flushAllNotes (0, midi);
+        captureTap.flushNotes(); // the same note-offs, recorded
         generator.reset();
         voicePipeline.reset(); // silent; the note-offs came from midiOutput
 
@@ -357,22 +406,25 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         const auto length = juce::jmin (maxChunkSamples, numSamples - start);
 
         events.clear();
+        eventTimings.clear();
+
+        // FX: main input bus. Instrument: its only input bus is the sidechain (M1, T3). Also downmixed in
+        // Test Pattern mode while the capture records the voice.
+        const float* mono = voiceMode || captureAudio ? downmixInput (buffer, numInputChannels, start, length) : nullptr;
 
         if (voiceMode)
-        {
-            // FX: main input bus. Instrument: its only input bus is the sidechain (M1, T3).
-            const auto* mono = downmixInput (buffer, numInputChannels, start, length);
-            voicePipeline.process (mono, length, voiceSettings, events);
-        }
+            voicePipeline.process (mono, length, voiceSettings, events, eventTimings);
         else
-        {
             generator.process (length, settings, events);
-        }
 
         if (clearAudio)
             buffer.clear (start, length);
 
         midiOutput.write (events, length, midi, start);
+
+        // After the chunk's events are final: exactly what the output stage was given
+        captureTap.processChunk (captureAudio ? mono : nullptr, length, events.view(),
+                                 voiceMode ? eventTimings.view() : std::span<const VsEventTiming> {});
 
         for (int ch = 0; ch < numToneChannels; ++ch)
             channels[(size_t) ch] = buffer.getWritePointer (ch, start);
@@ -439,9 +491,15 @@ void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer
 
     if (numSamples >= 1)
     {
+        // Capture: a bypassed block is recorded as silence (markers bypassOn / bypassOff), no events
+        captureTap.beginBlock (makeTransportInfo (getPlayHead()),
+                               makeCaptureBlockSettings (getSource(), getVoiceSettings(), getTestPatternSettings(), true));
+
         // Nothing may hang while bypassed. Repeated bypassed blocks emit nothing (nothing is active
         // any more), and the pattern restarts from its beginning after un-bypass.
         midiOutput.flushAllNotes (0, midi);
+        captureTap.flushNotes();
+        captureTap.processBypassed (numSamples);
         generator.reset();
         voicePipeline.reset();
         monitorSynth.setOutputEnabled (monitorToneParam->load (std::memory_order_relaxed) >= 0.5f);
@@ -542,6 +600,116 @@ juce::String VocalSynthProcessor::getVirtualMidiDeviceName() const
 }
 
 //==============================================================================
+CaptureBlockSettings VocalSynthProcessor::makeCaptureBlockSettings (params::Source source,
+                                                                    const VoiceSettings& voiceSettings,
+                                                                    const TestPatternSettings& patternSettings,
+                                                                    bool bypassed) const noexcept
+{
+    CaptureBlockSettings b;
+    b.captureEnabled = isCaptureEnabled();
+    b.captureAudio = isCaptureAudioEnabled();
+    b.bypassed = bypassed;
+
+    if (source == params::Source::voice)
+    {
+        b.settings.bendMode = voiceSettings.bendMode;
+        b.settings.bendRangeSemitones = bendRangeSemitones (voiceSettings.bendRange);
+        b.settings.channel = voiceSettings.channel;
+        b.settings.minNoteLengthMs = voiceSettings.minNoteLengthMs;
+        b.settings.testPattern = false;
+    }
+    else
+    {
+        // The test pattern sends bends with the +-2 range of the pattern and MonitorSynth (docs/M3-DESIGN.md 4)
+        b.settings.bendMode = BendMode::trueBend;
+        b.settings.bendRangeSemitones = 2;
+        b.settings.channel = patternSettings.channel;
+        b.settings.minNoteLengthMs = 0.0f;
+        b.settings.testPattern = true;
+    }
+
+    return b;
+}
+
+CaptureWorkerOptions VocalSynthProcessor::toWorkerOptions (const CaptureState& state) noexcept
+{
+    CaptureWorkerOptions o;
+    o.takeGapSeconds = state.takeGapSeconds;
+    o.audioHistoryMinutes = state.audioHistoryMinutes;
+    o.freePreRollMs = state.render.freePreRollMs;
+    o.wavFormat = state.wavFormat;
+    return o;
+}
+
+CaptureState VocalSynthProcessor::getCaptureState() const
+{
+    const std::scoped_lock lock (captureStateMutex);
+    return captureState;
+}
+
+void VocalSynthProcessor::setCaptureState (const CaptureState& state)
+{
+    // Through the tree so every value is clamped like a loaded state
+    const auto sanitised = CaptureState::fromValueTree (state.toValueTree());
+
+    {
+        const std::scoped_lock lock (captureStateMutex);
+        captureState = sanitised;
+    }
+
+    captureWorker.setOptions (toWorkerOptions (sanitised));
+}
+
+CaptureOffsetSettings VocalSynthProcessor::getCaptureOffsetSettings() const noexcept
+{
+    CaptureOffsetSettings o;
+    o.mode = static_cast<CaptureOffsetMode> (juce::jlimit (
+        0, numCaptureOffsetModes - 1, juce::roundToInt (captureOffsetModeParam->load (std::memory_order_relaxed))));
+    o.offsetMs = static_cast<double> (captureOffsetMsParam->load (std::memory_order_relaxed));
+    o.fineOffsetMs = static_cast<double> (captureFineOffsetMsParam->load (std::memory_order_relaxed));
+    return o;
+}
+
+RenderOptions VocalSynthProcessor::getRenderOptionsFor (const Take& take) const
+{
+    auto options = getCaptureState().render;
+    options.roundTripSamples = TakeRenderer::roundTripFor (take, getCaptureOffsetSettings());
+    return options;
+}
+
+juce::File VocalSynthProcessor::getTakesFolder() const
+{
+    const auto folder = getCaptureState().takesFolder;
+
+    if (folder.isNotEmpty() && juce::File::isAbsolutePath (folder))
+        return juce::File (folder);
+
+    return CaptureExporter::getDefaultTakesFolder();
+}
+
+double VocalSynthProcessor::getAutoCaptureOffsetMs() const noexcept
+{
+    const auto rate = getCurrentSampleRate();
+    const auto block = getPreparedMaxBlockSize();
+
+    if (rate <= 0.0 || block <= 0)
+        return 0.0;
+
+    return 1000.0 * static_cast<double> (computeRoundTripSamples (CaptureOffsetMode::automatic, 0.0, 0.0, block, rate))
+           / rate;
+}
+
+bool VocalSynthProcessor::isCaptureEnabled() const noexcept
+{
+    return captureEnabledParam->load (std::memory_order_relaxed) >= 0.5f;
+}
+
+bool VocalSynthProcessor::isCaptureAudioEnabled() const noexcept
+{
+    return captureAudioParam->load (std::memory_order_relaxed) >= 0.5f;
+}
+
+//==============================================================================
 juce::AudioProcessorEditor* VocalSynthProcessor::createEditor()
 {
     return new VocalSynthEditor (*this);
@@ -549,7 +717,12 @@ juce::AudioProcessorEditor* VocalSynthProcessor::createEditor()
 
 void VocalSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = apvts.copyState().createXml())
+    // Parameters + the non-parameter capture settings as child CAPTURE; takes are never saved (decision 4)
+    auto state = apvts.copyState();
+    state.removeChild (state.getChildWithName (CaptureState::treeType), nullptr);
+    state.appendChild (getCaptureState().toValueTree(), nullptr);
+
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
@@ -560,8 +733,19 @@ void VocalSynthProcessor::setStateInformation (const void* data, int sizeInBytes
         if (xml->hasTagName (apvts.state.getType()))
         {
             auto state = juce::ValueTree::fromXml (*xml);
+
+            // The capture settings are not parameters: read them, then take the child out of the tree, or
+            // the APVTS state would keep it and every save would append one more (docs/M3-DESIGN.md 13).
+            // Old projects have none: defaults.
+            const auto capture = CaptureState::fromValueTree (state.getChildWithName (CaptureState::treeType));
+
+            for (auto child = state.getChildWithName (CaptureState::treeType); child.isValid();
+                 child = state.getChildWithName (CaptureState::treeType))
+                state.removeChild (child, nullptr);
+
             migrateState (state, AudioProcessor::getParameters());
             apvts.replaceState (state);
+            setCaptureState (capture);
 
             // The values changed outside any host automation: tell the host to re-read them.
             // CLAP maps this to params->rescan (CLAP_PARAM_RESCAN_VALUES), which the CLAP spec

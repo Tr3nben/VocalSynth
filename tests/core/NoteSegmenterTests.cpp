@@ -1761,3 +1761,200 @@ TEST_CASE ("NoteSegmenter provisional state is cleared by flush and reset", "[no
     rig.flush();
     checkMidiInvariants (rig.events);
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// M3 detection-delay side output (docs/M3-DESIGN.md 7): getLastEventTiming() of every call, never a change
+// of the events.
+
+namespace
+{
+int64_t fixedFastDelay (const void*, double) noexcept { return 1500; }
+
+NoteSegmenter::DetectionDelayModel testDelayModel()
+{
+    NoteSegmenter::DetectionDelayModel m;
+    m.frameDelaySamples = 500.0;
+    m.confirmedOnsetDelaySamples = 2000;
+    m.fastOnsetDelay = &fixedFastDelay;
+    m.onsetSearchSamples = 3000;
+    return m;
+}
+
+/** Estimated sample of a timing for an event emitted at position. */
+int64_t estimateOf (int64_t position, const VsEventTiming& t) { return position - t.delaySamples; }
+} // namespace
+
+TEST_CASE ("NoteSegmenter timing: onset from the level crossing or the model, release, change, bends, flush",
+           "[notesegmenter][timing]")
+{
+    VoiceSettings s;
+    s.bendMode = BendMode::trueBend;
+    s.stickinessPercent = 0.0f;
+    SegmenterRig rig (s);
+    rig.segmenter.setDetectionDelayModel (testDelayModel());
+    const auto& t = rig.segmenter.getLastEventTiming();
+
+    SECTION ("full-window start: level onset within the search span, else the confirmed model")
+    {
+        rig.frames (unvoiced(), 50);
+        auto onsetAt = rig.now() - 1000;
+        rig.segmenter.setLevelOnsetSample (onsetAt);
+        auto position = rig.now();
+        rig.frame (voicedAt (60.0));
+        REQUIRE (rig.noteOns().size() == 1);
+        CHECK (t.noteOn == VsEventTiming { 1000, EventTimingKind::measured, 0 });
+        CHECK (t.noteOff == VsEventTiming {});
+
+        // Unvoiced frames: the release run starts at the first one; minus the frame delay
+        rig.frames (voicedAt (60.0), 100);
+        const auto releaseRun = rig.now();
+        rig.frames (unvoiced(), NoteSegmenter::releaseFrames - 1);
+        position = rig.now();
+        rig.frame (unvoiced());
+        REQUIRE (rig.noteOffs().size() == 1);
+        CHECK (t.noteOff.kind == EventTimingKind::measured);
+        CHECK (estimateOf (position, t.noteOff) == releaseRun - 500);
+
+        // The old onset lies before the previous note's end: no longer used -> model
+        rig.frames (unvoiced(), 20);
+        position = rig.now();
+        rig.frame (voicedAt (62.0));
+        REQUIRE (rig.noteOns().size() == 2);
+        CHECK (t.noteOn == VsEventTiming { 2000, EventTimingKind::model, 0 });
+
+        // A level release after the note start wins over the frame estimate
+        rig.frames (voicedAt (62.0), 100);
+        const auto releaseAt = rig.now() + 7;
+        rig.segmenter.setLevelReleaseSample (releaseAt);
+        rig.frames (unvoiced(), NoteSegmenter::releaseFrames - 1);
+        position = rig.now();
+        rig.frame (unvoiced());
+        REQUIRE (rig.noteOffs().size() == 2);
+        CHECK (estimateOf (position, t.noteOff) == releaseAt);
+
+        // A level onset too long before the note-on: model
+        rig.frames (unvoiced(), 50);
+        onsetAt = rig.now() - 3001;
+        rig.segmenter.setLevelOnsetSample (onsetAt);
+        rig.frame (voicedAt (64.0));
+        CHECK (t.noteOn == VsEventTiming { 2000, EventTimingKind::model, 0 });
+    }
+
+    SECTION ("note change: change-timer start minus the frame delay, flag noteChange, old note ends there")
+    {
+        rig.frames (unvoiced(), 10);
+        rig.frame (voicedAt (60.0));
+        rig.framesFor (voicedAt (60.0), 300.0);
+        const auto changeStart = rig.now();
+        std::vector<VsEvent> produced;
+        int64_t position = 0;
+
+        for (int i = 0; i < 100 && produced.empty(); ++i)
+        {
+            position = rig.now();
+            for (const auto& e : rig.frame (voicedAt (62.0)))
+                if (e.type == VsEventType::noteOn)
+                    produced.push_back (e);
+        }
+
+        REQUIRE (produced.size() == 1);
+        CHECK (t.noteOn.kind == EventTimingKind::measured);
+        CHECK (t.noteOn.flags == EventTimingFlags::noteChange);
+        CHECK (estimateOf (position, t.noteOn) == changeStart - 500);
+        CHECK (t.noteOff == t.noteOn);
+        CHECK (t.update == VsEventTiming {}); // the change's bends belong to the note start / end
+    }
+
+    SECTION ("held-note bend updates: emit minus the frame delay; flush: kind none")
+    {
+        rig.frames (unvoiced(), 10);
+        rig.frame (voicedAt (60.0));
+        auto sawUpdate = false;
+
+        for (int i = 0; i < 50; ++i)
+        {
+            const auto produced = rig.frame (voicedAt (60.0 + 0.2 * std::sin (i * 0.5)));
+
+            if (! produced.empty() && produced[0].type == VsEventType::pitchBend)
+            {
+                CHECK (t.update == VsEventTiming { 500, EventTimingKind::measured, 0 });
+                CHECK (t.noteOn == VsEventTiming {});
+                sawUpdate = true;
+            }
+        }
+
+        CHECK (sawUpdate);
+        rig.flush();
+        CHECK (rig.noteOffs().size() == 1);
+        CHECK (t.noteOff == VsEventTiming {});
+        CHECK (t.noteOn == VsEventTiming {});
+        CHECK (t.update == VsEventTiming {});
+    }
+}
+
+TEST_CASE ("NoteSegmenter timing: provisional start (fast model), correction and false start", "[notesegmenter][timing]")
+{
+    VoiceSettings s;
+    s.minNoteLengthMs = 250.0f;
+    s.stickinessPercent = 100.0f;
+
+    SECTION ("provisional start without a level onset: the fast model at the note's pitch")
+    {
+        SegmenterRig rig (s);
+        rig.segmenter.setDetectionDelayModel (testDelayModel());
+        const auto& t = rig.segmenter.getLastEventTiming();
+        rig.onsetFrame (voicedAt (64.0));
+        rig.frame (unvoiced (-20.0f));
+        rig.onsetFrame (voicedAt (64.0));
+        REQUIRE (rig.segmenter.isProvisional());
+        CHECK (t.noteOn == VsEventTiming { 1500, EventTimingKind::model, 0 });
+
+        // The full window corrects it: both events of the correction carry the provisional delay + flag
+        rig.frame (voicedAt (52.0));
+        const auto produced = rig.frame (voicedAt (52.0));
+        REQUIRE (produced.size() == 2);
+        CHECK (t.noteOn == VsEventTiming { 1500, EventTimingKind::model, EventTimingFlags::correction });
+        CHECK (t.noteOff == t.noteOn);
+    }
+
+    SECTION ("provisional start with a level onset; a false start's note-off gets the note-on's delay")
+    {
+        SegmenterRig rig (s);
+        rig.segmenter.setDetectionDelayModel (testDelayModel());
+        const auto& t = rig.segmenter.getLastEventTiming();
+        rig.onsetFrame (voicedAt (64.0));
+        rig.frame (unvoiced (-20.0f));
+        rig.segmenter.setLevelOnsetSample (rig.now() - rig.hop / 2 - 300);
+        rig.onsetFrame (voicedAt (64.0));
+        REQUIRE (rig.segmenter.isProvisional());
+        CHECK (t.noteOn == VsEventTiming { 300, EventTimingKind::measured, 0 });
+
+        // Nothing confirms it: the false start ends at the timeout
+        for (int i = 0; i < 2 * SegmenterRig::provisionalTimeoutHops && rig.noteOffs().empty(); ++i)
+            rig.frame (unvoiced (-120.0f));
+
+        REQUIRE (rig.noteOffs().size() == 1);
+        CHECK (t.noteOff == VsEventTiming { 300, EventTimingKind::measured, 0 });
+    }
+
+    SECTION ("the timing never changes the events")
+    {
+        SegmenterRig a (s);
+        SegmenterRig b (s);
+        b.segmenter.setDetectionDelayModel (testDelayModel());
+
+        for (auto* rig : { &a, &b })
+        {
+            rig->onsetFrame (voicedAt (64.0));
+            rig->frame (unvoiced (-20.0f));
+            rig->segmenter.setLevelOnsetSample (rig->now() - 50);
+            rig->hops (voicedAt (64.0), voicedAt (52.0), 40);
+            rig->segmenter.setLevelReleaseSample (rig->now());
+            rig->frames (unvoiced(), 40);
+            rig->flush();
+        }
+
+        CHECK (a.events == b.events);
+        CHECK (! a.events.empty());
+    }
+}
