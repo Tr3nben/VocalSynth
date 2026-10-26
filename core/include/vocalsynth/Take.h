@@ -92,8 +92,9 @@ struct Take
     /** M3.1 take length (docs/M3.1-DESIGN.md 3, 4): the limit in bars in force for this take (background:
         takeMaxBars when the take was anchored / opened; Record: N), 0 = none. */
     int maxBars = 0;
-    /** M3.1: FL bar number X the take is anchored at (synced background: the bar of its first note, set once
-        it is known; Record: the first recorded bar), 0 = not anchored (free takes, grabs, limit Off). */
+    /** M3.1: FL bar number X the take is anchored at (synced background: the bar of its first note that lasts
+        the ghost threshold, set once it is known, also with limit Off where only the status line uses it;
+        Record: the first recorded bar), 0 = not anchored (yet), free takes, grabs. */
     int64_t anchorBar = 0;
 
     int noteCount = 0;              ///< note-ons (incl. synthetic ones at the take start); kept up to date

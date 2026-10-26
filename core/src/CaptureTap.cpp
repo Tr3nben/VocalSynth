@@ -191,16 +191,22 @@ void CaptureTap::beginBlock (const TransportInfo& transport, const CaptureBlockS
         pushMarker (CaptureMarkerKind::clear);
     }
 
-    if (const auto n = recordCancelRequests.load (std::memory_order_acquire); n != handledRecordCancel)
+    // Record / Cancel: one word, so presses between two blocks keep their order (the last one wins: a
+    // Cancel after Record is not lost; Cancel then Record discards / disarms and arms again)
+    const auto record = recordRequestState.load (std::memory_order_acquire);
+
+    if (const auto n = static_cast<uint32_t> ((record >> recordCancelShift) & recordCountMask); n != handledRecordCancel)
     {
         handledRecordCancel = n;
         pushMarker (CaptureMarkerKind::recordCancel);
     }
 
-    if (const auto n = recordRequests.load (std::memory_order_acquire); n != handledRecord)
+    if (const auto n = static_cast<uint32_t> ((record >> recordArmShift) & recordCountMask); n != handledRecord)
     {
         handledRecord = n;
-        pushMarker (CaptureMarkerKind::recordArm, recordBars.load (std::memory_order_relaxed));
+
+        if ((record & recordLastIsArm) != 0)
+            pushMarker (CaptureMarkerKind::recordArm, static_cast<int> (record & recordBarsMask));
     }
 }
 
@@ -282,13 +288,27 @@ void CaptureTap::requestClear() noexcept
 
 void CaptureTap::requestRecord (int bars) noexcept
 {
-    recordBars.store (std::max (1, bars), std::memory_order_relaxed);
-    recordRequests.fetch_add (1, std::memory_order_release);
+    const auto clamped = static_cast<uint64_t> (std::clamp (bars, 1, static_cast<int> (recordBarsMask)));
+    auto old = recordRequestState.load (std::memory_order_relaxed);
+    uint64_t next = 0;
+
+    do
+    {
+        const auto arms = (((old >> recordArmShift) & recordCountMask) + 1) & recordCountMask;
+        next = (old & (recordCountMask << recordCancelShift)) | (arms << recordArmShift) | recordLastIsArm | clamped;
+    } while (! recordRequestState.compare_exchange_weak (old, next, std::memory_order_release, std::memory_order_relaxed));
 }
 
 void CaptureTap::requestRecordCancel() noexcept
 {
-    recordCancelRequests.fetch_add (1, std::memory_order_release);
+    auto old = recordRequestState.load (std::memory_order_relaxed);
+    uint64_t next = 0;
+
+    do
+    {
+        const auto cancels = (((old >> recordCancelShift) & recordCountMask) + 1) & recordCountMask;
+        next = (old & ((recordCountMask << recordArmShift) | recordBarsMask)) | (cancels << recordCancelShift);
+    } while (! recordRequestState.compare_exchange_weak (old, next, std::memory_order_release, std::memory_order_relaxed));
 }
 
 CaptureTap::OverflowCounts CaptureTap::getOverflowCounts() const noexcept

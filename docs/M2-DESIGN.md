@@ -969,3 +969,161 @@ confirmation case now runs with a settle time (the note stays provisional).
   new pitch at once (the lagged smoothed pitch showed "A4, 260 Hz" for 200 ms after A3 -> A4); the Voice
   page meter compares the pixel key from before the tick's update (a moving peak bar alone did not
   repaint).
+
+## 12. v0.3.1 segmentation (core: extra notes inside held notes)
+
+Corpus finding after v0.3.0 (docs/CORPUS.md, docs/STATUS.md): on real singing note F1 was only ~0.3 and
+precision ~0.25, because held notes came out as several notes. The headers (`NoteSegmenter.h`) are
+authoritative; this section records the evidence, what changed and what did not. Public API unchanged
+(only new constants); the capture interfaces (`VsEventTiming`, the `VoicePipeline` timing overloads) are
+untouched. All numbers at the new gate default -35 dB, stickiness 50 %, minNoteLength 60 ms.
+
+### 12.1 Evidence: why held notes split
+
+Inputs: vocadito_1 (bass range, 31 s, 59 notes, scored against annotator A1, annotator A2 and notes segmented
+from the manual f0) and a semi-synthetic sung set (10 phrases, 5 min, 494 notes; scratch tool modelled on
+vocadito_1: scoops, glides with overshoot, intonation offsets, drift, vibrato, consonant gaps between
+repeated notes, breath noise, level variation; not in the repository). The Dagstuhl excerpts in the local
+corpus are 1 s and have no note labels. `vs-eval --frames <prefix>` (new, single file) writes every
+analysis frame (raw / processed f0, confidence, RMS, active note) and the notes as CSV for this.
+
+Every detected note that matches no reference note, vocadito_1 A1, v0.3.0 core (MPM / YIN):
+
+| Class | MPM | YIN |
+|---|---|---|
+| right pitch, onset > 50 ms after the reference (late change, or a scoop note before it) | 30 | 31 |
+| short wrong-pitch note < 100 ms inside or at the edge of a reference note (passing note of a glide, scoop) | 29 | 27 |
+| provisional start corrected within 35 ms (onset scoop read by the fast path) | 12 | 10 |
+| wrong pitch >= 100 ms (intonation between two notes, sub-octave onset) | 14 | 12 |
+| same-pitch re-attack after a gap < 80 ms (voicing dropout) | 1 | 1 |
+| matched | 24 / 110 | 26 / 107 |
+
+So on real singing the extra notes are pitch-driven, not voicing-driven: glides and scoops are stepped
+through note by note (each passing note held for minNoteLength = 62 ms, then the next), and the changes
+come late. Dropouts are rare (one same-pitch re-attack, after a 23 ms gap that is a new syllable). The
+reference itself has same-pitch repeats after gaps of 12-104 ms (re-sung syllables), so bridging gaps of
+60-80 ms (the original idea) would have merged real notes and delayed every release; it was not done.
+Detected gaps between notes are 80-150 ms (real rests). The sung set shows the same picture (late changes
+266 / 280, passing notes 167 / 167, re-attacks 2 / 2 of ~480 extra notes).
+
+Synthetic audio does show a dropout mechanism that the corpus did not: an abrupt level drop of more than
+`PitchDetector::maxLevelStepDb` within a window (a sudden decrescendo, a voiced consonant) makes both
+detectors report frequency 0 for several frames (the level-step rule against release bend spikes), and the
+rise after the dip gives a few frames with confidence 0.3-0.6. A held tone with an 80 ms -12 dB or a
+60 ms -20 dB dip (0, 10, 20 ms ramps; Bass, Tenor, Soprano; MPM and YIN) gave 2-3 notes of the same pitch
+in 22 of 36 runs.
+
+### 12.2 Changes (NoteSegmenter)
+
+- **Arrival** (`arrivalFraction` 0.5, `arrivalMaxDistanceSemitones` 0.2, `arrivalMaxSpreadSemitones` 0.3):
+  a change also happens after T_min / 2 once every frame of that span lies within 0.2 st of the new note
+  and their spread is <= 0.3 st (the voice has landed). A vibrato peak only gets there beyond about
+  +-85 cents, where T_min alone flips as well. Pitch history = the consecutive frames of the note with
+  confidence >= confidenceOn (32 frames).
+- **Glide hold** (`glideHoldSemitonesPerSecond` 35 over `glideWindowMs` 8; within `onsetGlideHoldMs`
+  120 of a start from rest `onsetGlideHoldSemitonesPerSecond` 8 over `onsetGlideWindowMs` 16): no change
+  while the pitch slope (least squares over the history since the change timer started) is above the
+  limit. The timer keeps running, so the change goes straight to the note where the glide ends instead
+  of stepping through the notes it passes. A slow glissando still steps; after the onset window only fast
+  glides are held.
+- **Dropout hold** (`dropoutHoldMs` 60, `dropoutMaxDropDb` 24, `dropoutLevelWindowMs` 25,
+  `dropoutMinLevelStepDb` = maxLevelStepDb 6, `dropoutPitchConfidence` 0.3): a frame without a
+  weak-voiced pitch (frequency 0, confidence < 0.3, or confidence < 0.6 with a pitch that still reads the
+  held note) whose level is >= the gate and >= the note level - 24 dB, while the frame levels of the last
+  25 ms span >= 6 dB (a level step), does not count towards releaseFrames, for at most 60 ms from the start
+  of the run. At a steady level the same frames are a pitch transition (big legato leaps: the octave guard
+  holds the old octave, and release + new onset is the fast way there) or noise, and count as before.
+  **Re-entry:** if the voice comes back after a held dropout at another note, the first strong frame
+  whose candidate wins by 2 h changes the note at once (as the release + new onset did before), not
+  after T_min.
+- Unchanged on purpose: the onset paths (idle, provisional, settle and correction), the release rule at
+  steady levels, the octave guard, the detectors, the post-processor. Note-on latency from rest is
+  therefore unchanged (12.4).
+
+### 12.3 Before / after
+
+vs-eval, block 512, before = v0.3.0 core (3e1de2c NoteSegmenter, same vs-eval), after = v0.3.1. P / R / F1 =
+note precision / recall / F1 (same MIDI note, onset within +-50 ms); rest / change = F1 of notes after a
+rest / legato changes; delay = mean change delay (nearest same note 0-150 ms after a reference change;
+vocadito A1/A2 have only 3 such changes, f0-segmented notes 20-21); onset = mean onset latency of the
+matched notes (changes with the matched set); rest latency = first note-on of any pitch near a reference
+note that does not abut the previous one, mean / p95.
+
+| Input | Algo | P | R | F1 | F1 rest | F1 change | change delay ms | onset ms | rest latency ms |
+|---|---|---|---|---|---|---|---|---|---|
+| vocadito_1 A1 | MPM | 0.218 -> **0.248** | 0.407 -> 0.441 | 0.284 -> **0.317** | 0.445 -> 0.464 | 0.116 -> 0.139 | 88.1 -> 82.1 | 23.2 -> 21.8 | 20.7 / 53.8 -> 19.2 / 59.1 |
+| vocadito_1 A2 | MPM | 0.245 -> 0.286 | 0.422 -> 0.469 | 0.310 -> **0.355** | 0.460 -> 0.484 | 0.123 -> 0.141 | 45.4 -> 39.4 | 23.1 -> 20.0 | 18.0 / 51.8 -> 16.6 / 51.8 |
+| vocadito_1 f0 notes | MPM | 0.282 -> 0.343 | 0.477 -> 0.554 | 0.354 -> **0.423** | 0.575 -> 0.575 | 0.188 -> 0.308 | 63.7 -> 59.4 | 26.2 -> 28.2 | 12.6 / 29.6 -> 12.6 / 29.6 |
+| vocadito_1 A1 | YIN | 0.243 -> 0.238 | 0.441 -> 0.424 | 0.313 -> 0.305 | 0.484 -> 0.468 | 0.127 -> 0.121 | 92.8 -> 89.5 | 18.8 -> 18.1 | 19.0 / 73.6 -> 21.7 / 73.6 |
+| vocadito_1 A2 | YIN | 0.271 -> 0.276 | 0.453 -> 0.453 | 0.339 -> 0.343 | 0.497 -> 0.504 | 0.130 -> 0.127 | 50.0 -> 46.7 | 18.7 -> 19.3 | 15.1 / 44.0 -> 17.8 / 65.8 |
+| vocadito_1 f0 notes | YIN | 0.262 -> 0.324 | 0.431 -> 0.523 | 0.326 -> **0.400** | 0.601 -> 0.592 | 0.111 -> 0.253 | 63.4 -> 59.4 | 22.5 -> 26.6 | 13.5 / 40.8 -> 13.1 / 40.8 |
+| sung set (494 notes) | MPM | 0.314 -> **0.435** | 0.449 -> 0.581 | 0.370 -> **0.497** | 0.493 -> 0.493 | 0.307 -> 0.501 | 59.2 -> 52.7 | 30.6 -> 33.9 | 18.9 / 33.5 -> 18.9 / 33.5 |
+| sung set (494 notes) | YIN | 0.297 -> 0.387 | 0.421 -> 0.514 | 0.348 -> **0.442** | 0.479 -> 0.479 | 0.279 -> 0.421 | 60.7 -> 54.5 | 31.2 -> 33.8 | 19.6 / 35.9 -> 19.6 / 35.9 |
+| self-test (43 files) | MPM | 0.806 -> 0.829 | 0.811 -> 0.834 | 0.808 -> **0.832** | 0.996 -> 0.996 | 0.161 -> 0.269 | 58.1 -> 52.8 | 17.2 -> 17.4 | 15.4 / 30.9 -> 15.4 / 30.9 |
+| self-test (43 files) | YIN | 0.776 -> 0.824 | 0.781 -> 0.828 | 0.779 -> **0.826** | 0.996 -> 1.000 | 0.000 -> 0.238 | 60.6 -> 56.3 | 15.8 -> 17.2 | 15.4 / 30.9 -> 15.4 / 30.9 |
+
+For reference, v0.3.0 at its gate default -40 dB: vocadito_1 A1 F1 0.278 (MPM) / 0.304 (YIN); the gate
+change alone gives 0.284 / 0.313. Extra-note classes after (vocadito_1 A1, MPM / YIN, cf. 12.1): late
+right pitch 30 / 31, passing notes 22 / 23 (was 29 / 27), provisional corrections 12 / 10, wrong pitch
+>= 100 ms 14 / 15, re-attacks 1 / 1; sung set (MPM): matched 222 -> 286, late 266 -> 202, passing notes
+167 -> 103, wrong pitch >= 100 ms 20 -> 39 (a note held through a glide can sit on a neighbour longer),
+detected notes 706 -> 660.
+
+Dips and gaps (synthetic, 12.1): dips split 22 of 36 runs before, 0 after. Repeated notes after complete
+silence: 20 and 40 ms gaps give two notes before and after in every range; 15 ms: one note in Bass with YIN;
+10 ms: one note in Bass and Tenor (before two): the newest period of f0 min never falls below the gate.
+
+YIN on vocadito_1 A1 is the one row that got worse (0.313 -> 0.305): a single note. At 5.87 s the voice falls
+49 -> 46 st and the glide hold keeps 50 while it falls; v0.3.0 changed to 47 46 ms after the reference, now
+four frames without pitch (steady level: no dropout) end the note and 47 starts again 71 ms after it, outside
+the 50 ms tolerance. A2 and the f0 notes improve. The rest latency
+of vocadito A1/A2 moves because that metric also counts notes that the annotators separate by 6 ms but that
+are one legato change for the segmenter (their "first note-on" is a change, which now comes at other times).
+
+### 12.4 Guarantees checked
+
+- Note-on from rest: identical note-on positions of every note that starts from rest on vocadito_1 (MPM
+  38 of 38; YIN 37 of 37 plus one former legato change that now starts after a release); self-test rest
+  latency identical (15.4 / 30.9 ms both algorithms).
+- Noise, breath, silence: 0 notes (self-test). Vibrato: one note (self-test vibrato files, unit tests up
+  to +-80 cents). Octave errors: raw / processed rate unchanged (0 / 0.0003 YIN, 0 / 0.0008 MPM).
+- Block-size invariance: unit and pipeline tests (incl. a new scoop + glide phrase with variable host
+  blocks); vocadito_1 at blocks 32 / 100 / 512 / 2048 gives byte-identical note lists (both algorithms).
+- Release cost of the dropout hold (with vs without, 108 runs over self-test, sung set and vocadito_1,
+  1909 notes): note-offs later by mean 0.3 ms, p95 2 ms, max 20 ms (a tenor file at 10 dB SNR whose
+  noise floor is above the gate); no note-on or pitch changed except one YIN transition note that got
+  32 ms shorter.
+- Real-time: fixed-size `std::array` histories (32 pitch, 16 level frames), no allocation, loops bounded
+  by those sizes; per-frame state only, so the behaviour does not depend on the block size.
+
+### 12.5 Tried and rejected (sweeps on the same inputs; avg = mean F1 of MPM/YIN x A1/A2/f0 notes)
+
+| Variant | avg F1 | Note |
+|---|---|---|
+| v0.3.0 core at -35 dB | 0.321 | baseline |
+| arrival only | 0.347 | sung change F1 0.39 / 0.43 |
+| glide hold only | 0.329 | passing notes go, changes too late without arrival |
+| arrival + glide hold (v0.3.1) | **0.357** | |
+| T_min x 1.5 / 2 / 3 ("hover") | 0.358 / 0.351 / 0.348 | fewer notes, slower changes |
+| longer T_min for young notes (150 ms) | 0.319 | |
+| restart the timer when the candidate changes | 0.305 | |
+| onset glide hold 200 ms instead of 120 | 0.353-0.359 | no gain, longer wrong-note holds |
+| gap bridging 60-80 ms | not built | merges the reference's re-sung syllables, delays every release (12.1) |
+
+### 12.6 Tests
+
+`NoteSegmenterTests.cpp` (`[segmentation]`): arrival span vs T_min (on the note, beyond the distance, an
+unsteady pitch, weak frames clear the history; 3 rates x 3 stickiness values), wide vibrato one note, a fast
+glide goes straight to its end note, a scoop from rest goes straight to its target while the same glide later
+in a note still steps, a clean step after the onset is not held, dropouts / confidence dips / level dips hold
+one note and a clear gap re-attacks, and the dropout hold (no pitch, low confidence on the note and noise
+pitch after a level drop hold the note; the same frames at a steady level, low-confidence frames on another
+note, frames below the gate and frames more than 24 dB below the note release after releaseFrames as before;
+the hold is bounded by dropoutHoldMs; re-entry at another note changes at the first strong frame, legato and
+retrigger; re-entry at the same note continues). `VoicePipelineTests.cpp` (`[pipeline][segmentation]`, audio):
+held notes through -12 / -20 dB dips, +-3 dB tremolo and breath noise at 6 / 0 dB SNR stay one note (Bass,
+Tenor, Soprano, YIN and MPM, 3 rates); repeated notes after 20 / 40 / 120 ms of silence give two notes; a scoop
+from rest plus a fast glide gives no passing notes and is block-size invariant (512, 37, variable blocks).
+Changed on purpose: two change-delay checks in `VoicePipelineTests.cpp` (a clean step now waits the arrival
+span T_min / 2, not T_min), the arrival/T_min expectations of two older change tests, and the default-gate
+lines (-35).

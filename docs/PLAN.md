@@ -275,7 +275,7 @@ Umgesetzt in Version 0.2.0, Feinschliff nach dem Nutzertest in 0.2.1 (Vorgabe `d
   - [x] Gate-Standard −40 dB (vorher −45), alle Regler bleiben einstellbar.
   - [x] Auswertung mit öffentlichen Gesangs-Datensätzen vorbereitet (`docs/CORPUS.md`, manueller Workflow `corpus-eval.yml`: vocadito, Dagstuhl ChoirSet, VocalSet).
 - [x] Test von 0.2.1 durch den Nutzer (Kurztest in `docs/M2-TESTING.md`, Abschnitt 0): am 2026-10-16 in FL Studio 2026 „funktioniert alles super“.
-- [ ] Abnahme der Korpus-Kriterien unten auf echten Gesangsaufnahmen: öffentliche Datensätze per `corpus-eval.yml` (erster Lauf steht aus), optional Aufnahmen des Nutzers.
+- [ ] Abnahme der Korpus-Kriterien unten auf echten Gesangsaufnahmen: öffentliche Datensätze per `corpus-eval.yml`, optional Aufnahmen des Nutzers. Stand nach 0.3.0: Note-F1 ca. 0,33 (Präzision 0,26, gehaltene Noten zerfallen), Sweep: Gate −35 dB am besten. 0.3.1 verbessert die Segmentierung (vocadito_1 MPM 0,284 → 0,317 lokal, `docs/M2-DESIGN.md` Abschnitt 12); Workflow auf `m3.1-takes` neu laufen lassen. Ziel F1 ≥ 0,85 noch weit entfernt.
 - [x] Stretch: Note-On beim Onset mit vorläufiger Tonhöhe (0.2.1). Korrigiert wird nicht per Bend, sondern durch sofortigen Notenwechsel, wenn das volle Fenster eine andere Note findet.
 
 **Abnahme** (gesetzte Projektziele, keine gemessenen Fakten):
@@ -291,7 +291,7 @@ Umgesetzt in Version 0.2.0, Feinschliff nach dem Nutzertest in 0.2.1 (Vorgabe `d
 
 ### M3 – Capture und Drag & Drop (3–4 Wochen)
 
-Umgesetzt in Version 0.3.0 (Vorgabe `docs/M3-SPEC.md` mit den am 2026-10-16 bestätigten Entscheidungen, Design `docs/M3-DESIGN.md`, Testanleitung `docs/M3-TESTING.md`).
+Umgesetzt in Version 0.3.0 (Vorgabe `docs/M3-SPEC.md` mit den am 2026-10-16 bestätigten Entscheidungen, Design `docs/M3-DESIGN.md`, Testanleitung `docs/M3-TESTING.md`), Nachbesserung 0.3.1 (Design `docs/M3.1-DESIGN.md`).
 
 - [x] `CaptureTap` (Audio-Thread) mit zwei SPSC-Ringen (Records + Audio) zum Capture-Worker-Thread, BPM, Position und Taktart aus der Playhead. Die Aufnahme läuft immer: synchron zum Transport (Play bis Stop, Loops werden nicht geteilt) oder frei (neuer Take nach 3 s Pause), dazu „New take“ und rückwirkend „Grab last N bars / N s“. Blockgrößen-invariant, Overflow-Zähler mit Lückenmarkierung.
 - [x] `CaptureHistory` (10 Minuten Rückblick, Stimme im RAM) und `TakeSegmenter`, `TakeTimeline` (Tempo-Map, Taktgitter, ausgerollte Loops).
@@ -299,7 +299,14 @@ Umgesetzt in Version 0.3.0 (Vorgabe `docs/M3-SPEC.md` mit den am 2026-10-16 best
 - [x] Erste Stufe von `CleanMidi` (im `TakeRenderer`): Ghost-Noten unter Mindestlänge entfernen, Übergangsnoten zusammenfassen, Oktav-Ausreißer entfernen, vorläufige Noten zusammenführen.
 - [x] CapturePanel (Reiter „Capture“) mit Take-Liste, Mini-Piano-Roll, Drag-Quellen für MIDI und WAV (`performExternalDragDropOfFiles`), „Save as…“ und Aufräumen der Temp-Dateien (Instanz-Ordner beim Schließen, verwaiste nach 24 h). Gezogene WAVs werden nach `Dokumente\VocalSynth\Takes` verschoben.
 - [x] Takes werden nicht im Projekt gespeichert, nur die Einstellungen (fünf neue Parameter mit Version-Hint 2, Exportoptionen als eigener State-Zweig).
-- [ ] Test durch den Nutzer in FL Studio 2026 (Checkliste in `docs/M3-TESTING.md`).
+- [x] Test von 0.3.0 durch den Nutzer in FL Studio 2026 (2026-10-21): Timing, Drag & Drop, Tempowechsel, „Grab last 8 bars“ und CPU o.k., Clean etwas besser als Raw. Problem: Takes im Hintergrund liefen viel zu lang (Klicks und Geräusche nach dem Singen hielten sie offen).
+- [x] v0.3.1 Take-Länge und Record-Modus (`docs/M3.1-DESIGN.md`):
+  - [x] *Max length* (Off/4/8/16/32 Takte, Standard 16): Hintergrund-Takes beginnen am Takt der ersten Note und werden nach N Takten abgeschnitten, gehaltene Noten laufen im nächsten Take weiter; Free-Takes nach N 4/4-Takten beim Host-Tempo.
+  - [x] Export-Ende am Taktstrich nach der letzten Note der Version (Bends/CCs verlängern nicht, Clean schneidet Geräusch-Takte ab), WAV-Ende wie Clean.
+  - [x] Record-Modus mit Knopf *Record*/*Cancel*: ab dem nächsten Taktstrich (gestoppt: ab dem Start von FL) genau N Takte (1–32, Standard 8), Herunterzählen und „Recording bar k/N“; keine Hintergrund-Takes, Grab geht weiter. Blockgrößen-invariant.
+  - [x] Gate-Standard −35 dB.
+  - [x] Segmentierung (`NoteSegmenter`, `docs/M2-DESIGN.md` Abschnitt 12): schnellerer Wechsel nach dem Ankommen auf dem neuen Ton, kein Wechsel während eines Glissandos (Schleifer gehen direkt auf den Zielton), Aussetzer nach einem Pegelsprung teilen die Note nicht mehr. vocadito_1 Note-F1 MPM 0,284 → 0,317, Selbsttest-Korpus 0,808 → 0,832; Latenz aus der Stille unverändert.
+- [ ] Test von 0.3.1 durch den Nutzer in FL Studio 2026 (Kurztest in `docs/M3-TESTING.md`, Abschnitt 0).
 - [ ] Optional nach T7: `VirtualMidiPort` als Ausgabeweg mit eigenem FIFO und Thread (nicht Teil von M3, siehe `docs/M3-SPEC.md` „Out“).
 
 **Abnahme:**

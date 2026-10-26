@@ -986,15 +986,18 @@ TEST_CASE ("TakeSegmenter M3.1: a background take is anchored at its first note 
     f.noteOff (900, 59);
     CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
 
-    // The first note sung in bar 3 anchors the take there
+    // The first note sung in bar 3 anchors the take there, once it lasts the ghost threshold (80 ms)
     f.noteOn (2 * bar + 10000 + rt, 60);
     const auto* open = f.segmenter.getOpenTake();
+    REQUIRE (open != nullptr);
+    CHECK (open->anchorBar == 0);
+    f.noteOff (2 * bar + 40000 + rt, 60);
+    open = f.segmenter.getOpenTake();
     REQUIRE (open != nullptr);
     CHECK (open->anchorBar == 3);
     CHECK (open->maxBars == 4);
     CHECK (open->startSample == 2 * bar);
     CHECK (f.segmenter.getOpenTakeBar() == 1);
-    f.noteOff (2 * bar + 40000 + rt, 60);
     sing (f, 4 * bar + 1000, 5 * bar + 90000, 62); // ends in the 4th bar of the take (bar 6)
 
     f.advance (5 * bar + 1);
@@ -1117,9 +1120,11 @@ TEST_CASE ("TakeSegmenter M3.1: anchor candidates at the start of a take", "[tak
         REQUIRE (f.closed.size() == 1);
         CHECK (f.closed[0].mode == TakeMode::free);
         REQUIRE (f.segmenter.getOpenTake() != nullptr);
-        f.advance (100000 + tail - 1);
+        const auto minLength = TakeSegmenter::anchorMinNoteSamples (*f.segmenter.getOpenTake());
+        CHECK (minLength == 3840); // 80 ms
+        f.advance (100000 + tail + minLength - 1);
         CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
-        f.advance (100000 + tail);
+        f.advance (100000 + tail + minLength);
         CHECK (f.segmenter.getOpenTake()->anchorBar == 1);
         CHECK (f.segmenter.getOpenTake()->startSample == 100000);
         f.noteOff (100000 + 2 * bar, 60);
@@ -1146,6 +1151,229 @@ TEST_CASE ("TakeSegmenter M3.1: anchor candidates at the start of a take", "[tak
     }
 }
 
+TEST_CASE ("TakeSegmenter M3.1: a downbeat sung a little early anchors at its own bar; the export matches the cut",
+           "[takesegmenter][takelength]")
+{
+    SECTION ("25 ms before bar 3 (within 1/8 beat): bar 3, the 8-bar phrase stays in one take")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (8));
+        f.transport (0, true, 0.0);
+        sing (f, 2 * bar - 1200, 2 * bar + 40000, 60);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 3);
+        CHECK (f.segmenter.getOpenTake()->startSample == 2 * bar);
+
+        for (int64_t k = 1; k < 8; ++k)
+            sing (f, 2 * bar + k * bar, 2 * bar + k * bar + 60000, 62); // one note in each of bars 4 .. 10
+
+        f.advance (10 * bar);
+        CHECK (f.segmenter.getOpenTake()->number == 1); // the phrase's 8th bar (bar 10) is still in take 1
+        f.advance (10 * bar + tail + 1);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].startSample == 2 * bar);
+        CHECK (f.closed[0].endSample == 10 * bar); // cut at bar 11
+        const auto r = TakeRenderer::render (f.closed[0], rawWithRoundTrip());
+        CHECK (r.originBar == 3);
+        CHECK (r.endTick == 8 * barTicks);
+        REQUIRE (tickNotes (r).size() == 8);
+        CHECK (tickNotes (r).front().start == 0); // the early note clamps to the downbeat
+    }
+
+    SECTION ("73 ms before bar 3 (a pickup, more than 1/8 beat): bar 2")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (8));
+        f.transport (0, true, 0.0);
+        sing (f, 2 * bar - 3500, 2 * bar + 40000, 60);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 2);
+        CHECK (f.segmenter.getOpenTake()->startSample == bar);
+    }
+
+    SECTION ("onset refinement moving the first note into the next bar keeps the anchor bar as the origin")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        sing (f, 2 * bar - 3500, 2 * bar + 40000, 60);
+        f.transport (5 * bar, false, 20.0);
+        f.advance (5 * bar + tail);
+        REQUIRE (f.closed.size() == 1);
+        auto take = f.closed[0];
+        CHECK (take.anchorBar == 2);
+
+        for (auto& e : take.events)
+            if (e.event.type == VsEventType::noteOn && ! e.synthetic)
+                e.refinedSample = e.estimatedSample + 4000; // host 2 * bar + 500: bar 3
+
+        RenderOptions clean;
+        clean.roundTripSamples = rt;
+        const auto r = TakeRenderer::render (take, clean);
+        CHECK (r.originBar == 2); // where the cut was counted from (file name Bar002)
+        CHECK (r.endTick <= 4 * barTicks);
+        CHECK (TakeRenderer::computeAudioSpan (take, clean).startSample == bar + rt);
+    }
+}
+
+TEST_CASE ("TakeSegmenter M3.1: click and noise notes never anchor a take", "[takesegmenter][takelength]")
+{
+    SECTION ("a click in bar 1 before a phrase from bar 3: anchored at bar 3, cut at bar 11")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (8));
+        f.transport (0, true, 0.0);
+        sing (f, 10000, 11000, 70); // 21 ms: a mouse click
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+        f.advance (10000 + bar);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+
+        for (int64_t k = 0; k < 8; ++k)
+            sing (f, 2 * bar + k * bar + 2000, 2 * bar + k * bar + 60000, 60 + static_cast<int> (k % 3));
+
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 3);
+        CHECK (f.segmenter.getOpenTake()->startSample == 2 * bar);
+        f.advance (10 * bar + 1);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+
+        // Clicks after the cut: take 2 holds only them and is never listed; its number is given again
+        sing (f, 10 * bar + 30000, 10 * bar + 30800, 70);
+        sing (f, 11 * bar + 5000, 11 * bar + 6000, 71);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+        f.transport (12 * bar, false, 48.0);
+        f.advance (12 * bar + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].number == 1);
+        CHECK (f.closed[0].startSample == 2 * bar);
+        CHECK (f.closed[0].endSample == 10 * bar);
+        CHECK (f.segmenter.getNextTakeNumber() == 2);
+        const auto r = TakeRenderer::render (f.closed[0], rawWithRoundTrip());
+        CHECK (r.originBar == 3);
+        CHECK (r.noteCount == 8); // the click before bar 3 is dropped by the clamp
+    }
+
+    SECTION ("a note-on that is still on after the threshold anchors at its note-on")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        const auto minLength = TakeSegmenter::anchorMinNoteSamples (*f.segmenter.getOpenTake());
+        const auto detectionTail = static_cast<int64_t> (std::llround (TakeSegmenter::detectionTailSeconds * 48000.0));
+        f.noteOn (bar + 100 + rt, 60);
+        f.advance (bar + 100 + rt + minLength + detectionTail - 1);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+        f.advance (bar + 100 + rt + minLength + detectionTail);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 2);
+        CHECK (f.segmenter.getOpenTake()->startSample == bar);
+    }
+
+    SECTION ("with limit Off a click-only take is still listed (0.3.0)")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (0));
+        f.transport (0, true, 0.0);
+        sing (f, 10000, 11000, 70);
+        f.transport (bar, false, 4.0);
+        f.advance (bar + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].anchorBar == 0);
+    }
+
+    SECTION ("free: the cut is counted from the first real note; a click-only free take is not listed")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.noTransport (0);
+        const auto limit = freeModeBarsToSamples (4, 48000.0, 120.0);
+        f.noteOn (48000, 70); // click: opens the free take, does not start the count
+        f.noteOff (49000, 70);
+
+        for (int64_t k = 0; k < 8; ++k)
+        {
+            f.noteOn (96000 + k * 50000, 60);
+            f.noteOff (106000 + k * 50000, 60);
+        }
+
+        f.advance (48000 + limit + 1);
+        CHECK (f.closed.empty());
+        f.advance (96000 + limit + 1);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].startSample == 48000);
+        CHECK (f.closed[0].endSample == 96000 + limit);
+        CHECK (f.closed[0].noteCount == 9);
+
+        f.noteOn (1000000, 70);
+        f.noteOff (1001000, 70);
+        f.advance (1001000 + gap3s + 1);
+        CHECK (f.closed.size() == 1);
+        CHECK (f.segmenter.getNextTakeNumber() == 2);
+    }
+}
+
+TEST_CASE ("TakeSegmenter M3.1: a note just overhanging the cut neither anchors nor lists the next take",
+           "[takesegmenter][takelength]")
+{
+    SECTION ("held 20 ms past bar 5, next phrase at bar 7: take 2 starts at bar 7")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        f.noteOn (1000 + rt, 60);
+        f.advance (4 * bar + 1); // cut at bar 5 while 60 sounds
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+        f.noteOff (4 * bar + 960 + rt, 60);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0);
+        sing (f, 6 * bar + 1000, 6 * bar + 30000, 62);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 7);
+        CHECK (f.segmenter.getOpenTake()->startSample == 6 * bar);
+        f.advance (10 * bar);
+        CHECK (f.segmenter.getOpenTake()->number == 2); // cut at bar 11, not bar 9
+        f.transport (10 * bar + 1, false, 40.0);
+        f.advance (10 * bar + 1 + tail);
+        REQUIRE (f.closed.size() == 2);
+        CHECK (f.closed[1].number == 2);
+        CHECK (f.closed[1].anchorBar == 7);
+        const auto r = TakeRenderer::render (f.closed[1], rawWithRoundTrip());
+        CHECK (r.originBar == 7);
+        CHECK (r.noteCount == 1); // the 20 ms rest of note 60 is dropped
+    }
+
+    SECTION ("held 20 ms past the cut, then silence until Stop: no junk take, no lost number")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        f.noteOn (1000 + rt, 60);
+        f.advance (4 * bar + 1);
+        f.noteOff (4 * bar + 960 + rt, 60);
+        f.transport (5 * bar, false, 20.0);
+        f.advance (5 * bar + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.closed[0].number == 1);
+        CHECK (f.segmenter.getNextTakeNumber() == 2);
+    }
+
+    SECTION ("ended just before the cut, emitted after it, then silence: the next take gets number 2")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (4));
+        f.transport (0, true, 0.0);
+        sing (f, 1000, 20000, 60);
+        f.noteOn (3 * bar + rt, 62);
+        f.advance (4 * bar + 1);            // cut at bar 5 ...
+        f.noteOff (4 * bar - 524 + rt, 62); // ... the note ended before it
+        f.transport (5 * bar, false, 20.0);
+        f.advance (5 * bar + tail);
+        REQUIRE (f.closed.size() == 1);
+        CHECK (f.segmenter.getNextTakeNumber() == 2);
+        f.transport (6 * bar, true, 24.0);
+        sing (f, 6 * bar + 1000, 6 * bar + 30000, 64);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->number == 2);
+    }
+}
+
 TEST_CASE ("TakeSegmenter M3.1: limit Off keeps the 0.3.0 Play .. Stop take; New take restarts the count",
            "[takesegmenter][takelength]")
 {
@@ -1163,7 +1391,7 @@ TEST_CASE ("TakeSegmenter M3.1: limit Off keeps the 0.3.0 Play .. Stop take; New
         REQUIRE (f.closed.size() == 1);
         CHECK (f.closed[0].startSample == 0);
         CHECK (f.closed[0].endSample == 30 * bar);
-        CHECK (f.closed[0].anchorBar == 0);
+        CHECK (f.closed[0].anchorBar == 3); // status line only
         CHECK (f.closed[0].maxBars == 0);
         const auto r = TakeRenderer::render (f.closed[0], rawWithRoundTrip());
         CHECK (r.originBar == 3);

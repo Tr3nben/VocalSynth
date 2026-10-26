@@ -10,6 +10,8 @@ namespace vocalsynth
 {
 
 static_assert (TakeSegmenter::splitReserveEvents < TakeSegmenter::maxTakeEvents);
+static_assert (TakeSegmenter::anchorMinNoteMs == RenderOptions {}.cleanMinNoteMs,
+               "rule 7: the anchor threshold is the default Clean ghost threshold");
 
 namespace
 {
@@ -104,6 +106,13 @@ int countNoteOns (const Take& take) noexcept
                                             [] (const CapturedEvent& e) { return isNoteOn (e.event); }));
 }
 } // namespace
+
+int64_t TakeSegmenter::anchorMinNoteSamples (const Take& take) noexcept
+{
+    const auto rate = take.sampleRate > 0.0 ? take.sampleRate : 48000.0;
+    const auto ms = std::max (anchorMinNoteMs, static_cast<double> (take.settings.minNoteLengthMs));
+    return std::max<int64_t> (1, static_cast<int64_t> (std::llround (ms * rate / 1000.0)));
+}
 
 int64_t TakeSegmenter::compensationTailSamples (double sampleRate, int maxBlockSize) noexcept
 {
@@ -250,6 +259,7 @@ void TakeSegmenter::advanceInternal (int64_t sample, const CaptureHistory& histo
         Due due = Due::none;
         int64_t dueAt = noLimit;
         std::size_t index = 0;
+        constexpr auto atStart = std::numeric_limits<std::size_t>::max(); // Due::anchor: the take start
         double lineSample = 0.0;
 
         for (std::size_t i = 0; i < closingTakes.size(); ++i)
@@ -279,20 +289,33 @@ void TakeSegmenter::advanceInternal (int64_t sample, const CaptureHistory& histo
             dueAt = gapEndSample;
         }
 
-        if (hasOpenTake && openTake.take.mode == TakeMode::synced)
+        if (hasOpenTake && ! openTake.anchored)
         {
             const auto& b = openTake;
 
-            if (! b.anchored)
+            if (b.anchorDeadline <= sample && b.anchorDeadline < dueAt
+                && std::any_of (b.anchorCandidates.begin(), b.anchorCandidates.end(), [] (const auto& c) { return c.any(); }))
             {
-                if (b.anchorDeadline <= sample && b.anchorDeadline < dueAt
-                    && std::any_of (b.anchorCandidates.begin(), b.anchorCandidates.end(), [] (const auto& c) { return c.any(); }))
+                due = Due::anchor;
+                dueAt = b.anchorDeadline;
+                index = atStart;
+            }
+
+            for (std::size_t i = 0; i < b.numAnchorNotes; ++i)
+            {
+                if (b.anchorNotes[i].deadline <= sample && b.anchorNotes[i].deadline < dueAt)
                 {
                     due = Due::anchor;
-                    dueAt = b.anchorDeadline;
+                    dueAt = b.anchorNotes[i].deadline;
+                    index = i;
                 }
             }
-            else if (b.take.maxBars > 0)
+        }
+        else if (hasOpenTake && openTake.take.mode == TakeMode::synced)
+        {
+            const auto& b = openTake;
+
+            if (b.take.maxBars > 0)
             {
                 if (const auto line = b.take.timeline.barLineAfter (b.lineSample))
                 {
@@ -362,7 +385,19 @@ void TakeSegmenter::advanceInternal (int64_t sample, const CaptureHistory& histo
                 break;
             }
 
-            case Due::anchor: anchorOpenTake (openTake.take.startSample); break;
+            case Due::anchor:
+            {
+                // A note still sounding from the start decides first (as at a note-off, see trackAnchor)
+                const auto& b = openTake;
+                const bool fromStart = index == atStart
+                                       || std::any_of (b.anchorCandidates.begin(), b.anchorCandidates.end(), [] (const auto& c) { return c.any(); });
+
+                if (fromStart)
+                    anchorOpenTake (b.take.startSample, false);
+                else
+                    anchorOpenTake (b.anchorNotes[index].at, true);
+                break;
+            }
 
             case Due::barLine:
             {
@@ -645,10 +680,15 @@ void TakeSegmenter::handleGap (int64_t sample)
     if (hasOpenTake)
         openTake.take.incomplete = true;
 
-    // A note that sounded at the take start may have lost its note-off: it anchors the take at its start
-    if (hasOpenTake && ! openTake.anchored
-        && std::any_of (openTake.anchorCandidates.begin(), openTake.anchorCandidates.end(), [] (const auto& c) { return c.any(); }))
-        anchorOpenTake (openTake.take.startSample);
+    // A note that sounded at the take start or a note-on waiting for its length may have lost its note-off:
+    // it anchors the take (the gap ends every note here)
+    if (hasOpenTake && ! openTake.anchored)
+    {
+        if (std::any_of (openTake.anchorCandidates.begin(), openTake.anchorCandidates.end(), [] (const auto& c) { return c.any(); }))
+            anchorOpenTake (openTake.take.startSample, false);
+        else if (openTake.numAnchorNotes > 0)
+            anchorOpenTake (openTake.anchorNotes[0].at, true);
+    }
 
     for (auto& builder : closingTakes)
         if (sample < builder.take.captureEndSample)
@@ -690,18 +730,21 @@ void TakeSegmenter::openTakeAt (int64_t sample, TakeMode mode, TakeKind kind, co
     take.clockEpoch = history.getClockEpoch();
     builder.collectFrom = sample;
 
-    if (mode == TakeMode::synced && kind != TakeKind::record)
+    const bool limited = backgroundMode() && settings.takeMaxBars > 0 && kind != TakeKind::record;
+
+    if (mode == TakeMode::free && limited)
+        take.maxBars = settings.takeMaxBars; // rule 8: the cut is set once the take is anchored
+
+    if ((mode == TakeMode::synced && kind != TakeKind::record) || (mode == TakeMode::free && limited))
     {
-        // Rule 7: anchored at its first note; notes sounding now are candidates for the start
+        // Rule 7: anchored at its first note that lasts the ghost threshold; notes sounding now are
+        // candidates for the start
+        const auto detectionTail = static_cast<int64_t> (std::llround (detectionTailSeconds * sampleRate));
         builder.anchored = false;
+        builder.discardUnanchored = limited;
         builder.anchorCandidates = soundingNotes;
-        builder.anchorDeadline = sample + tailSamples();
-    }
-    else if (mode == TakeMode::free && backgroundMode() && settings.takeMaxBars > 0)
-    {
-        // Rule 8: free "bars" are 4/4 at the last host tempo (else 120 BPM)
-        take.maxBars = settings.takeMaxBars;
-        builder.freeCutSample = sample + std::max<int64_t> (1, freeModeBarsToSamples (take.maxBars, sampleRate, take.freeBpm));
+        builder.anchorDeadline = sample + (mode == TakeMode::synced ? tailSamples() : detectionTail)
+                                 + anchorMinNoteSamples (take);
     }
 
     if (mode == TakeMode::synced)
@@ -808,7 +851,8 @@ void TakeSegmenter::finish (Builder&& builder, std::vector<Take>& closedTakes)
     closeNotes (take, builder.notes, take.captureEndSample);
     take.noteCount = countNoteOns (take);
 
-    if (take.noteCount == 0)
+    // Rule 7: a limited take that only holds clicks / noise or a note that ended at its start is not listed
+    if (take.noteCount == 0 || (builder.discardUnanchored && ! builder.anchored && ! hasAnchorLengthNote (take)))
     {
         releaseNumber (take.number); // never listed
         return;
@@ -922,56 +966,157 @@ void TakeSegmenter::handleRecordMarker (int64_t sample, const MarkerRecord& mark
 
 void TakeSegmenter::trackAnchor (const CapturedEvent& event)
 {
-    if (! hasOpenTake || openTake.anchored || openTake.take.mode != TakeMode::synced)
+    if (! hasOpenTake || openTake.anchored)
         return;
 
     auto& b = openTake;
     const auto& e = event.event;
-    const auto h = event.estimatedSample - segmentRoundTrip (b.take);
+    const bool synced = b.take.mode == TakeMode::synced;
+    const auto h = event.estimatedSample - (synced ? segmentRoundTrip (b.take) : 0);
     const auto ch = channelIndex (e);
     const auto note = noteIndex (e);
     const auto start = b.take.startSample;
+    const auto minLength = anchorMinNoteSamples (b.take);
     const auto pending = std::any_of (b.anchorCandidates.begin(), b.anchorCandidates.end(), [] (const auto& c) { return c.any(); });
 
     if (isNoteOn (e))
     {
-        if (h >= start)
-            anchorOpenTake (pending ? start : h); // a note still sounding from the start decides first
-        else
-            b.anchorCandidates[ch][note] = true;  // sung before the start: anchors only if held past it
+        if (synced && h < start)
+        {
+            b.anchorCandidates[ch][note] = true; // sung before the start: anchors only if held past it
+            return;
+        }
 
+        // Anchors once it lasts the ghost threshold (a click or noise note never decides bar X)
+        if (b.numAnchorNotes == b.anchorNotes.size())
+        {
+            anchorOpenTake (pending ? start : b.anchorNotes[0].at, ! pending); // degenerate: many notes at once
+            return;
+        }
+
+        const auto detectionTail = static_cast<int64_t> (std::llround (detectionTailSeconds * sampleRate));
+        b.anchorNotes[b.numAnchorNotes++] = { synced ? h : event.sample, synced ? std::max (h, start) : h,
+                                              event.sample + minLength + detectionTail, static_cast<uint8_t> (ch),
+                                              static_cast<uint8_t> (note) };
         return;
     }
 
-    if (isNoteOff (e) && b.anchorCandidates[ch][note])
+    if (! isNoteOff (e))
+        return;
+
+    if (b.anchorCandidates[ch][note])
     {
         b.anchorCandidates[ch][note] = false;
 
-        if (h > start)
-            anchorOpenTake (start); // held across the start (a note held over the cut: bar X + N)
+        if (h - start >= minLength)
+        {
+            anchorOpenTake (start, false); // held across the start (a note held over the cut: bar X + N)
+            return;
+        }
+    }
+
+    for (std::size_t i = 0; i < b.numAnchorNotes; ++i)
+    {
+        const auto candidate = b.anchorNotes[i];
+
+        if (candidate.channel != ch || candidate.note != note)
+            continue;
+
+        if (h - candidate.on >= minLength)
+        {
+            const auto stillPending = std::any_of (b.anchorCandidates.begin(), b.anchorCandidates.end(), [] (const auto& c) { return c.any(); });
+            anchorOpenTake (stillPending ? start : candidate.at, ! stillPending); // a note from the start decides first
+            return;
+        }
+
+        // Too short: a click or noise ghost (Clean drops it)
+        std::copy (b.anchorNotes.begin() + static_cast<std::ptrdiff_t> (i + 1),
+                   b.anchorNotes.begin() + static_cast<std::ptrdiff_t> (b.numAnchorNotes),
+                   b.anchorNotes.begin() + static_cast<std::ptrdiff_t> (i));
+        --b.numAnchorNotes;
+        return;
     }
 }
 
-void TakeSegmenter::anchorOpenTake (int64_t at)
+void TakeSegmenter::anchorOpenTake (int64_t at, bool fromNote)
 {
     auto& b = openTake;
     auto& take = b.take;
     b.anchored = true;
     b.anchorCandidates = {};
+    b.numAnchorNotes = 0;
 
-    // The limit in force now applies to this take; Off: nothing changes (0.3.0)
-    if (! backgroundMode() || settings.takeMaxBars <= 0)
+    if (take.mode == TakeMode::free)
+    {
+        // Rule 8: free "bars" are 4/4 at the last host tempo (else 120 BPM), counted from the anchoring note
+        if (take.maxBars > 0)
+            b.freeCutSample = std::max (at, take.startSample)
+                              + std::max<int64_t> (1, freeModeBarsToSamples (take.maxBars, sampleRate, take.freeBpm));
+        return;
+    }
+
+    if (! backgroundMode())
         return;
 
-    const auto bar = take.timeline.barAt (static_cast<double> (std::max (at, take.startSample)));
-    const auto barStart = take.timeline.sampleAtBeats (bar.startBeats);
+    const auto& timeline = take.timeline;
+    const auto from = static_cast<double> (std::max (at, take.startSample));
+    auto bar = timeline.barAt (from);
+
+    // A downbeat sung (or estimated) a little early starts the bar it was meant for
+    if (fromNote)
+        if (const auto line = timeline.firstBarLineAtOrAfter (from))
+            if (line->beats - timeline.beatsAt (from) <= anchorEarlyToleranceBeats)
+                bar = timeline.barAt (line->sample);
+
+    take.anchorBar = bar.number; // also with limit Off (status line); the export ignores it there
+
+    // The limit in force now applies to this take; Off: nothing else changes (0.3.0)
+    if (settings.takeMaxBars <= 0)
+        return;
+
+    const auto barStart = timeline.sampleAtBeats (bar.startBeats);
     take.maxBars = settings.takeMaxBars;
-    take.anchorBar = bar.number;
     b.lineSample = barStart;
     b.barsDone = 0;
 
     // Pre-roll before bar X can never pull the origin earlier: the take is at most maxBars long
     take.startSample = std::max (take.startSample, ceilSample (barStart));
+}
+
+bool TakeSegmenter::hasAnchorLengthNote (const Take& take) const
+{
+    // Like the renderer's kept span: synced [startSample, endSample] in host time, free (-inf, endSample]
+    const bool synced = take.mode == TakeMode::synced;
+    const auto rt = synced ? segmentRoundTrip (take) : 0;
+    const auto lo = synced ? take.startSample : std::numeric_limits<int64_t>::min();
+    const auto hi = take.endSample;
+    const auto minLength = anchorMinNoteSamples (take);
+    std::array<std::array<int64_t, 128>, 16> onAt {};
+    std::array<std::bitset<128>, 16> on {};
+
+    for (const auto& e : take.events)
+    {
+        const auto ch = channelIndex (e.event);
+        const auto note = noteIndex (e.event);
+        const auto t = std::clamp (e.estimatedSample - rt, lo, hi);
+
+        if (isNoteOn (e.event))
+        {
+            if (! on[ch][note])
+                onAt[ch][note] = t;
+
+            on[ch][note] = true;
+        }
+        else if (isNoteOff (e.event) && on[ch][note])
+        {
+            on[ch][note] = false;
+
+            if (t - onAt[ch][note] >= minLength)
+                return true;
+        }
+    }
+
+    return false;
 }
 
 void TakeSegmenter::updateRecordStatus (const CaptureHistory& history) noexcept

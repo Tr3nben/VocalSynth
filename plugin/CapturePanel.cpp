@@ -807,6 +807,10 @@ void CapturePanel::pressRecord()
 
     auto& tap = vsProcessor.getCaptureTap();
 
+    // Decide on the newest worker status, not on what the last timer tick showed (a Record take that just
+    // ended by itself must not turn this press into a no-op Cancel)
+    updateModeControls (worker.getStatus());
+
     if (recordActive)
     {
         tap.requestRecordCancel();

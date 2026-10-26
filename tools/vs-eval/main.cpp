@@ -1021,7 +1021,7 @@ int usage (const char* message)
     std::fprintf (stderr, "vs-eval: %s\nUsage: vs-eval [--range r] [--algorithm yin|mpm|both] [--labels f.csv] [--f0-ref f.f0.csv]\n"
                           "               [--block n] [--key k] [--scale s] [--stickiness %%[,..]] [--gate dB[,..]]\n"
                           "               [--min-note ms[,..]] [--jobs n] [--json out.json] [--markdown out.md|-]\n"
-                          "               [--summary-only] [--notes] file.wav|dir...\n"
+                          "               [--summary-only] [--notes] [--frames prefix] file.wav|dir...\n"
                           "       vs-eval --self-test [--corpus-dir dir] [--keep]\n"
                           "       vs-eval --write-corpus dir\n"
                           "       vs-eval --unit-test\n",

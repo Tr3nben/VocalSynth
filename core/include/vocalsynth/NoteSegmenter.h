@@ -70,6 +70,30 @@ struct StickinessParams
         note-off), which in True mode was a bend spike right before every release.
     - note on, not weak-voiced: after releaseFrames consecutive such frames AND a note age
       >= minNoteLength -> note-off; back to idle. Until then the note is held (no bend updates).
+      v0.3.1 dropout hold (docs/M2-DESIGN.md 12): a not-weak frame is a dropout if
+      * it has no weak-voiced pitch: frequencyHz 0, or confidence < dropoutPitchConfidence (the pitch is
+        noise), or confidence < confidenceOff with a pitch that still reads the held note (no candidate
+        that wins by 2 h; one that reads another note is a transition and counts as before),
+      * rmsDb >= gateThresholdDb and >= the note level follower (not updated here) - dropoutMaxDropDb,
+      * and the frame levels (rmsDb of every frame, any kind) within dropoutLevelWindowMs up to it span
+        >= dropoutMinLevelStepDb (a level step).
+      Dropouts within dropoutHoldMs of the first not-weak frame of the run do not count towards
+      releaseFrames. Why: a level drop of more than PitchDetector::maxLevelStepDb within a window (an
+      abrupt decrescendo, a voiced consonant) gives frequency 0 for several frames (level-step rule), the
+      rise after a dip a few frames with confidence 0.3-0.6; that split a held note into note-off + note-on
+      of the same pitch. At a steady level such frames are a pitch transition (a big legato leap: the
+      octave guard holds the old octave for a while, and the release + new onset is the fast way to the
+      new note) or noise, and count as before. A gap in the voice still releases after releaseFrames
+      frames once the newest period is below the gate (silence of about 20 ms and more; about 10 ms is
+      now bridged in the low ranges); at a real note end the release comes later only by the frames whose
+      newest period is still above the gate (corpus: p95 2 ms, up to 10 ms in Bass), over a steady noise
+      floor above the gate by at most about dropoutLevelWindowMs, with a level that keeps stepping (loud
+      aperiodic sound) by at most dropoutHoldMs.
+      Re-entry: the first frame with confidence >= confidenceOn after a run that held a dropout (or the
+      first weak frame dropoutHoldMs after the run) decides: if its candidate wins by 2 h (the change
+      condition without T_min), the frame is >= the gate and the note >= minNoteLength, the note changes at
+      once (legato/retrigger order, timing flag noteChange, estimate = that frame - frameDelaySamples), as
+      the release + new onset did before; otherwise the note continues or changes by the normal rules.
     minNoteLength never delays a note-on: it only bounds note duration (deferred note-off and change).
     Short blips never start a note because of the onset confirmation + gate + confidence.
 
@@ -148,6 +172,14 @@ public:
     static constexpr int maxEventsPerFrame = 3;
     static constexpr float bendHoldDropDb = 3.0f;          ///< see "reliable" above
     static constexpr double levelFallDbPerSecond = 20.0;   ///< level follower for bendHoldDropDb
+    static constexpr double dropoutHoldMs = 60.0;          ///< v0.3.1 dropout hold (see class comment)
+    static constexpr float dropoutMaxDropDb = 24.0f;       ///< below the note level: no dropout, a release
+    static constexpr double dropoutLevelWindowMs = 25.0;   ///< a level step within this span
+    static constexpr float dropoutPitchConfidence = 0.3f;  ///< below: the frame's pitch is noise (no note test)
+    static constexpr float dropoutMinLevelStepDb = PitchDetector::maxLevelStepDb;
+    /** Level history length in frames: covers dropoutLevelWindowMs at the pipeline's 2 ms hop with room
+        (a shorter history only makes the level range smaller: fewer dropouts). */
+    static constexpr int levelHistoryFrames = 16;
 
     // Provisional onsets from FastOnsetDetector frames (see class comment)
     static constexpr float fastConfidenceOn = 0.95f;
@@ -288,6 +320,13 @@ private:
                     int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing) noexcept;
     /** Updates the level follower with this frame; true if the frame's pitch may drive the bend. */
     bool isPitchReliable (const PitchFrame& frame, int64_t absoluteSample) noexcept;
+    /** The level follower at absoluteSample without updating it. */
+    float noteLevelAt (int64_t absoluteSample) const noexcept;
+    /** True if a not-weak frame is a dropout (see class comment: dropout hold). */
+    bool isDropout (const PitchFrame& frame, double p, int64_t absoluteSample) const noexcept;
+    void pushLevelHistory (float rmsDb, int64_t absoluteSample) noexcept;
+    /** max - min of the frame levels within windowSamples up to absoluteSample (0 without frames). */
+    float levelRange (int64_t absoluteSample, int64_t windowSamples) const noexcept;
     void changeNote (int q, int outputNote, const PitchFrame& frame, double p, int64_t absoluteSample,
                      int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing) noexcept;
     void endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out,
@@ -322,6 +361,8 @@ private:
     int64_t onsetGlideHoldSamples = 0;
     int64_t onsetGlideWindowSamples = 0;
     int64_t minNoteSamples = 0;
+    int64_t dropoutHoldSamples = 0;
+    int64_t dropoutLevelWindowSamples = 0;
     int octaveShift = 0;
     double velocitySensitivityPercent = 70.0;
     bool legato = false;
@@ -331,6 +372,14 @@ private:
     int onsetFrames = 0;           ///< consecutive strong-voiced frames while idle
     float onsetMaxRmsDb = PitchFrame::silenceDb;
     int unvoicedFrames = 0;        ///< consecutive not-weak-voiced frames while a note is on
+    int releaseCountFrames = 0;    ///< of those, the frames that count towards releaseFrames (dropout hold)
+    bool dropoutHeld = false;      ///< the current run held a dropout frame
+    bool reentryPending = false;   ///< the voice is back after a held dropout, no strong frame yet
+    int64_t reentryDeadline = 0;
+    std::array<float, levelHistoryFrames> levelHistoryDb {};    ///< rmsDb of the newest frames (all kinds)
+    std::array<int64_t, levelHistoryFrames> levelHistorySample {};
+    int levelHistoryCount = 0;
+    int levelHistoryNext = 0;
     int activeQuantisedNote = -1;
     int activeOutputNote = -1;
     uint8_t activeChannel = 1;

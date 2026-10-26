@@ -166,7 +166,10 @@ Frames are timed at the analysis window centre; unknown reference frames and fra
 an analysis window + 1 hop) of a reference voicing change are not scored.
 
 Options for sweeps: `--algorithm yin|mpm|both`, `--gate dB[,..]`, `--stickiness %[,..]`, `--min-note ms[,..]`
-(comma lists span a grid), `--jobs n`, `--json file`, `--markdown file|-`, `--summary-only`. The per-file
+(comma lists span a grid), `--jobs n`, `--json file`, `--markdown file|-`, `--summary-only`, `--notes` (the
+detected notes per file). Diagnostics for one file (v0.3.1, no sweep): `--frames <prefix>` writes every analysis
+frame to `<prefix><algorithm>.csv` (time, raw and processed f0 / confidence / RMS, active note, voiced) and the
+notes to `<prefix><algorithm>.notes.csv`; this is how the split notes of docs/M2-DESIGN.md 12 were traced. The per-file
 results, `byRange` and `byDataset` are for the base point (the defaults where the lists contain them);
 `sweep` has the pooled summary of every grid point. `--self-test` and `--unit-test` are unchanged (ctest
 `vs-eval.self-test`, `vs-eval.unit-test`).

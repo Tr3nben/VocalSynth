@@ -1,7 +1,8 @@
 // M3.1 take length and Record mode (docs/M3.1-DESIGN.md 2): parameter IDs, version hint 3, choices, defaults,
 // layout order, old states load with the defaults. Implementation (docs/M3.1-DESIGN.md 4, 7): the processor
 // sends mode and limit per block, the Record / Cancel button, worker status, Capture tab texts and controls,
-// end to end: Record 8 bars at 120 BPM with an ASIO 2048 round trip.
+// end to end: Record 8 bars at 120 BPM with an ASIO 2048 round trip; Record armed at bar 2 beat 3 with clicks
+// after the phrase; background takes cut by Take Max Length 4 bars.
 
 #include "CaptureExporter.h"
 #include "CapturePanel.h"
@@ -12,6 +13,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+
+#include <algorithm>
+#include <cmath>
 
 using vocalsynth::Variant;
 using vocalsynth::VocalSynthProcessor;
@@ -435,5 +439,308 @@ TEST_CASE ("Record mode end to end: Record 8 bars at 120 BPM with an ASIO 2048 r
     CHECK (audio.getNumSamples() == 8 * bar);
 
     folder.deleteRecursively();
+    takesFolder.deleteRecursively();
+}
+
+//==============================================================================
+namespace
+{
+/** Mouse-click-like noise (0.3.0 feedback: clicks after singing kept takes open): a press and a release 80 ms
+    later, each a 4 ms burst of decaying white noise (deterministic hash), every period samples in
+    [from, to) (host time, heard roundTrip samples later). */
+float clickNoise (int64_t position, int64_t from, int64_t to, int64_t period, int64_t roundTrip)
+{
+    const auto hostSample = position - roundTrip;
+
+    if (hostSample < from || hostSample >= to)
+        return 0.0f;
+
+    const auto inPeriod = (hostSample - from) % period;
+    const auto inClick = inPeriod < 3840 ? inPeriod : inPeriod - 3840;
+
+    if (inClick < 0 || inClick >= 192)
+        return 0.0f;
+
+    auto h = static_cast<uint32_t> (hostSample) * 2654435761u;
+    h ^= h >> 15;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    const auto white = static_cast<float> (h & 0xffffu) / 32768.0f - 1.0f;
+    return 0.6f * white * std::exp (-static_cast<float> (inClick) / 48.0f);
+}
+
+int midiNoteOf (double hz)
+{
+    return static_cast<int> (std::lround (69.0 + 12.0 * std::log2 (hz / 440.0)));
+}
+} // namespace
+
+TEST_CASE ("Record mode end to end: armed at bar 2 beat 3, 8 bars, clicks after the phrase add nothing",
+           "[plugin][capture][recordmode][voice]")
+{
+    using namespace vocalsynth;
+    constexpr int preparedBlock = 512;
+    constexpr int64_t roundTrip = 2 * preparedBlock;
+    constexpr int64_t armSample = bar + 2 * 24000; // bar 2, beat 3 (transport from sample 0 = bar 1)
+    constexpr int64_t recordStart = 2 * bar;       // the next bar line: bar 3
+    constexpr int64_t recordEnd = recordStart + 8 * bar; // bar 11
+    constexpr int64_t clicksFrom = recordStart + 6 * bar + 30000; // after the phrase, over the end and beyond
+    constexpr int64_t clicksTo = recordEnd + 3 * bar;
+
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlain (p, params::voiceRange, (float) static_cast<int> (VoiceRange::tenor));
+    setPlain (p, params::captureMode, 1.0f); // Record
+    const auto takesFolder = juce::File::createTempFile ("vs-record-click-takes");
+    auto state = p.getCaptureState();
+    state.takesFolder = takesFolder.getFullPathName();
+    p.setCaptureState (state);
+
+    // Sung (host time): 12 half-bar notes in bars 3 .. 8, then only clicks
+    constexpr double pitches[] = { 220.0, 246.94, 261.63 };
+    std::vector<test::SungNote> notes;
+
+    for (int k = 0; k < 12; ++k)
+        notes.push_back ({ recordStart + 4000 + k * 48000, 40000, pitches[k % 3] });
+
+    test::CaptureHost host (p, p.getCaptureWorker(), rate, preparedBlock);
+    host.playHead.playStartSample = 0;
+    host.input = [notes] (int64_t pos)
+    {
+        return test::sungPhrase (notes, pos, rate, roundTrip)
+               + clickNoise (pos, clicksFrom, clicksTo, 19200, roundTrip);
+    };
+
+    host.runTo (armSample, preparedBlock);
+    p.getCaptureTap().requestRecord (p.getRecordBars());
+    host.runTo (armSample + 4 * preparedBlock, preparedBlock);
+    host.steps (1);
+    auto status = p.getCaptureWorker().getStatus();
+    CHECK (status.record.phase == RecordStatus::Phase::countIn);
+    CHECK (status.record.startBar == 3);
+
+    host.runTo (recordStart + 4 * bar, preparedBlock);
+    status = p.getCaptureWorker().getStatus();
+    CHECK (status.record.phase == RecordStatus::Phase::recording);
+    CHECK (status.record.startBar == 3);
+
+    host.runTo (clicksTo + bar, preparedBlock);
+    host.playHead.playStopSample = host.position;
+    host.runTo (host.position + (int64_t) rate, preparedBlock);
+    host.steps (4);
+
+    CHECK (host.noteOns == 12); // the live MIDI: the sung notes, nothing from the clicks
+
+    auto& worker = p.getCaptureWorker();
+    const auto takes = worker.getTakes();
+    REQUIRE (takes.size() == 1); // one Record take, no background take from the clicks
+    const auto& take = *takes.front();
+    CHECK (take.kind == TakeKind::record);
+    CHECK (take.startSample == recordStart);
+    CHECK (take.endSample == recordEnd);
+    CHECK (take.anchorBar == 3);
+    CHECK (take.maxBars == 8);
+    CHECK (take.noteCount == 12);
+
+    const auto folder = juce::File::createTempFile ("vs-record-click-mid");
+
+    for (const auto version : { ExportVersion::clean, ExportVersion::raw })
+    {
+        CAPTURE (version == ExportVersion::clean ? "Clean" : "Raw");
+        auto options = p.getRenderOptionsFor (take);
+        options.version = version;
+        const auto midi = CaptureExporter::writeMidi (take, options, SmfFormat::type1, folder);
+        REQUIRE (midi.existsAsFile());
+        CHECK (midi.getFileName().contains ("_Take01_Bar003_"));
+        juce::MidiFile midiFile;
+        REQUIRE (test::readMidiFile (midi, midiFile));
+        const auto fileNotes = test::notesOf (midiFile);
+        REQUIRE (fileNotes.size() == notes.size());
+
+        for (std::size_t k = 0; k < notes.size(); ++k)
+        {
+            CAPTURE (k);
+            const auto expectedOn = static_cast<double> (notes[k].startSample - recordStart) / static_cast<double> (bar) * 3840.0;
+            CHECK (fileNotes[k].note == midiNoteOf (notes[k].frequencyHz));
+            CHECK (fileNotes[k].onTick == Catch::Approx (expectedOn).margin (96.0)); // within 25 ms
+            CHECK (fileNotes[k].offTick > fileNotes[k].onTick);
+            CHECK (fileNotes[k].offTick <= Catch::Approx (static_cast<double> (clicksFrom - recordStart) / static_cast<double> (bar) * 3840.0));
+        }
+
+        const auto& track = *midiFile.getTrack (0);
+        const auto* last = track.getEventPointer (track.getNumEvents() - 1);
+        CHECK (last->message.isEndOfTrackMetaEvent());
+        CHECK (last->message.getTimeStamp() == Catch::Approx (8.0 * 3840.0)); // bars 3 .. 11, exactly 8 bars
+    }
+
+    folder.deleteRecursively();
+    takesFolder.deleteRecursively();
+}
+
+TEST_CASE ("Background end to end: Take Max Length 4 bars cuts 10 bars of singing into takes of at most 4 bars",
+           "[plugin][capture][recordmode][voice]")
+{
+    using namespace vocalsynth;
+    constexpr int preparedBlock = 512;
+    constexpr int64_t roundTrip = 2 * preparedBlock;
+    constexpr int64_t singStart = bar; // bar 2
+    constexpr int numNotes = 20;       // 10 bars, two notes per bar
+
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlain (p, params::voiceRange, (float) static_cast<int> (VoiceRange::tenor));
+    setPlain (p, params::takeMaxBars, 1.0f); // index 1: 4 bars
+    const auto takesFolder = juce::File::createTempFile ("vs-maxbars-takes");
+    auto state = p.getCaptureState();
+    state.takesFolder = takesFolder.getFullPathName();
+    p.setCaptureState (state);
+
+    constexpr double pitches[] = { 220.0, 246.94, 261.63, 196.0 };
+    std::vector<test::SungNote> notes;
+
+    for (int k = 0; k < numNotes; ++k)
+        notes.push_back ({ singStart + 6000 + k * 48000, 36000, pitches[k % 4] });
+
+    test::CaptureHost host (p, p.getCaptureWorker(), rate, preparedBlock);
+    host.playHead.playStartSample = 0;
+    host.input = [notes] (int64_t pos) { return test::sungPhrase (notes, pos, rate, roundTrip); };
+
+    host.runTo (singStart + 10 * bar + 2 * bar, preparedBlock);
+    host.playHead.playStopSample = host.position;
+    host.runTo (host.position + (int64_t) rate, preparedBlock);
+    host.steps (4);
+
+    auto& worker = p.getCaptureWorker();
+    auto takes = worker.getTakes();
+    std::sort (takes.begin(), takes.end(), [] (const auto& a, const auto& b) { return a->startSample < b->startSample; });
+    REQUIRE (takes.size() == 3); // bars 2 .. 5, 6 .. 9, 10 .. 11
+
+    const auto folder = juce::File::createTempFile ("vs-maxbars-mid");
+    std::size_t totalNotes = 0;
+
+    for (std::size_t i = 0; i < takes.size(); ++i)
+    {
+        const auto& take = *takes[i];
+        CAPTURE (i, take.startSample, take.endSample, take.anchorBar);
+        CHECK (take.kind == TakeKind::automatic);
+        CHECK (take.closed);
+        CHECK (take.maxBars == 4);
+        CHECK (take.anchorBar == 2 + 4 * static_cast<int64_t> (i));
+        CHECK (take.startSample == (take.anchorBar - 1) * bar);
+        CHECK (take.endSample - take.startSample <= 4 * bar);
+
+        if (i + 1 < takes.size())
+            CHECK (take.endSample == takes[i + 1]->startSample); // cut at the bar line, the next take there
+
+        for (const auto version : { ExportVersion::clean, ExportVersion::raw })
+        {
+            auto options = p.getRenderOptionsFor (take);
+            options.version = version;
+            const auto rendered = TakeRenderer::render (take, options);
+            CHECK (rendered.endTick <= 4 * 3840);
+            CHECK (rendered.endTick % 3840 == 0);
+        }
+
+        const auto midi = CaptureExporter::writeMidi (take, p.getRenderOptionsFor (take), SmfFormat::type1, folder);
+        REQUIRE (midi.existsAsFile());
+        juce::MidiFile midiFile;
+        REQUIRE (test::readMidiFile (midi, midiFile));
+        const auto fileNotes = test::notesOf (midiFile);
+
+        for (const auto& n : fileNotes)
+        {
+            CHECK (n.onTick >= 0.0);
+            CHECK (n.offTick <= 4.0 * 3840.0);
+        }
+
+        totalNotes += fileNotes.size();
+    }
+
+    CHECK (totalNotes == static_cast<std::size_t> (numNotes)); // every sung note in exactly one take
+
+    folder.deleteRecursively();
+    takesFolder.deleteRecursively();
+}
+
+TEST_CASE ("Background end to end: noise notes and a note just over the cut do not shape the takes (Max 8 bars)",
+           "[plugin][capture][recordmode][voice]")
+{
+    // 0.3.0 feedback: clicks and noise kept takes open. Short pitched bursts (notes < 80 ms) before, between
+    // and after two phrases; the first phrase's last note is held 20 ms past the cut (bar 11).
+    using namespace vocalsynth;
+    constexpr int preparedBlock = 512;
+    constexpr int64_t roundTrip = 2 * preparedBlock;
+    constexpr int64_t cut = 10 * bar; // bar 11: 8 bars after bar 3
+
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlain (p, params::voiceRange, (float) static_cast<int> (VoiceRange::tenor));
+    setPlain (p, params::takeMaxBars, 2.0f); // index 2: 8 bars
+    const auto takesFolder = juce::File::createTempFile ("vs-noise-takes");
+    auto state = p.getCaptureState();
+    state.takesFolder = takesFolder.getFullPathName();
+    p.setCaptureState (state);
+
+    constexpr double pitches[] = { 220.0, 246.94, 261.63, 196.0 };
+    std::vector<test::SungNote> notes;
+    notes.push_back ({ 20000, 2400, 329.63 });       // bar 1: a 50 ms burst
+    notes.push_back ({ bar + 30000, 2400, 293.66 }); // bar 2
+
+    for (int k = 0; k < 16; ++k) // phrase A: bars 3 .. 10, the last note ends 20 ms after the cut
+    {
+        const auto start = 2 * bar + 4000 + k * 48000;
+        notes.push_back ({ start, k == 15 ? cut + 960 - start : 40000, pitches[k % 4] });
+    }
+
+    notes.push_back ({ cut + 50000, 2400, 329.63 }); // bar 11
+    notes.push_back ({ cut + bar + 20000, 2400, 293.66 }); // bar 12
+
+    for (int k = 0; k < 4; ++k) // phrase B: bars 13 .. 14
+        notes.push_back ({ 12 * bar + 4000 + k * 48000, 40000, pitches[k % 4] });
+
+    test::CaptureHost host (p, p.getCaptureWorker(), rate, preparedBlock);
+    host.playHead.playStartSample = 0;
+    host.input = [notes] (int64_t pos) { return test::sungPhrase (notes, pos, rate, roundTrip); };
+
+    host.runTo (16 * bar, preparedBlock);
+    host.playHead.playStopSample = host.position;
+    host.runTo (host.position + (int64_t) rate, preparedBlock);
+    host.steps (4);
+
+    CAPTURE (host.noteOns);
+    CHECK (host.noteOns >= 20); // the phrases; the bursts may add short notes (that is the point)
+
+    auto takes = p.getCaptureWorker().getTakes();
+    std::sort (takes.begin(), takes.end(), [] (const auto& a, const auto& b) { return a->startSample < b->startSample; });
+    REQUIRE (takes.size() == 2); // no noise-only take, no take for the 20 ms rest
+
+    const auto& a = *takes[0];
+    const auto& b = *takes[1];
+    CHECK (a.number == 1);
+    CHECK (a.anchorBar == 3);
+    CHECK (a.startSample == 2 * bar);
+    CHECK (a.endSample == cut);
+    CHECK (b.number == 2);
+    CHECK (b.anchorBar == 13);
+    CHECK (b.startSample == 12 * bar);
+
+    for (const auto version : { ExportVersion::clean, ExportVersion::raw })
+    {
+        CAPTURE (version == ExportVersion::clean ? "Clean" : "Raw");
+        auto options = p.getRenderOptionsFor (a);
+        options.version = version;
+        const auto ra = TakeRenderer::render (a, options);
+        CHECK (ra.originBar == 3);
+        CHECK (ra.endTick == 8 * 3840);
+        CHECK (ra.noteCount == 16);
+
+        options = p.getRenderOptionsFor (b);
+        options.version = version;
+        const auto rb = TakeRenderer::render (b, options);
+        CHECK (rb.originBar == 13);
+        CHECK (rb.endTick == 2 * 3840);
+        CHECK (rb.noteCount == 4);
+    }
+
     takesFolder.deleteRecursively();
 }

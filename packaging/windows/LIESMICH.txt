@@ -8,7 +8,7 @@ Inhalt dieses Pakets
   VST3\                      VocalSynth FX.vst3, VocalSynth Instrument.vst3
   CLAP\                      VocalSynth FX.clap, VocalSynth Instrument.clap
   Standalone\                VocalSynth FX.exe (zum Testen ohne DAW)
-  M3-TESTING.md              Anleitung: Aufnahme und Drag & Drop testen (0.3.0)
+  M3-TESTING.md              Anleitung: Aufnahme und Drag & Drop testen (0.3.1)
   M2-TESTING.md              Anleitung: Singen -> MIDI in FL Studio testen
   FL-ROUTING.md              Anleitung zum MIDI-Routing-Test (Version 0.1.0)
 
@@ -29,26 +29,41 @@ Installation
    FL Studio durchsucht auch Unterordner, der Ordner "VocalSynth" wird also
    gefunden.
 
-Was ist das für eine Version? (0.3.0, Meilenstein 3)
+Was ist das für eine Version? (0.3.1, Meilenstein 3)
 ----------------------------------------------------
 Deine Stimme wird zu MIDI (seit 0.2): Du singst oder summst ins Mikrofon,
 VocalSynth erkennt die Tonhöhe und schickt Noten (und auf Wunsch
 Pitchbend) über den MIDI-Port von FL Studio an einen Synth.
 
-Neu in 0.3.0: VocalSynth nimmt selbst auf, was du singst (FL Studio nimmt
+Seit 0.3.0: VocalSynth nimmt selbst auf, was du singst (FL Studio nimmt
 das MIDI eines Plugins nicht in die Piano Roll auf). Jeder Take landet im
 neuen Reiter "Capture". Von dort ziehst du ihn als .mid auf einen Kanal
 im Channel Rack oder in die Piano Roll und die Stimme als .wav in die
 Playlist. Die Verzögerung der Soundkarte und der Tonhöhen-Erkennung wird
 dabei herausgerechnet, die Noten liegen dort, wo du gesungen hast.
-  - Transport läuft (Synced): ein Take von Play bis Stop; die .mid beginnt
-    am Takt deiner ersten Note, die Taktnummer steht im Dateinamen. Das
-    Pattern an diesen Takt legen.
+  - Transport läuft (Synced): ein Take beginnt am Takt deiner ersten Note
+    und endet mit Stop oder nach "Max length" Takten; die Taktnummer
+    steht im Dateinamen. Das Pattern an diesen Takt legen.
   - Transport gestoppt (Free): ein Take endet nach 3 s Pause.
   - "Grab last 8 bars / 30 s" holt nachträglich, was du gerade gesungen
     hast.
   - Takes werden NICHT im Projekt gespeichert: ziehen oder "Save as...".
     Gezogene WAVs liegen dauerhaft in Dokumente\VocalSynth\Takes.
+
+Neu in 0.3.1 (nach deiner Rückmeldung zu 0.3.0):
+  - "Max length" (Standard 16 Takte): Ein Take im Hintergrund wird nach
+    höchstens so vielen Takten abgeschnitten; wer weitersingt, bekommt
+    einen neuen Take. Klicks und Geräusche nach dem Singen verlängern den
+    Take nicht mehr: die .mid endet am Taktstrich nach der letzten Note.
+  - Record-Modus (Mode = Record): "Length" wählen (Standard 8 Takte) und
+    "Record" drücken. Die Aufnahme beginnt am nächsten Taktstrich (bei
+    gestopptem Transport dort, wo FL zu spielen beginnt), zeigt
+    "Recording bar 3/8" und hört nach genau so vielen Takten von selbst
+    auf. "Cancel" bricht ab.
+  - Gate-Standard -35 dB (vorher -40).
+  - Weniger Zusatznoten in gehaltenen Tönen: Schleifer gehen direkt auf
+    den Zielton, kurze Lautstärke-Einbrüche teilen die Note nicht mehr.
+  Kurztest dazu: M3-TESTING.md, Abschnitt 0.
 
 Die Anleitung zum Testen mit Checkliste liegt als M3-TESTING.md in
 diesem ZIP (mit dem Editor öffnen) und steht auch auf GitHub:
@@ -82,9 +97,11 @@ Das Plugin-Fenster hat drei Reiter (englisch beschriftet):
                      Drag test MIDI/WAV, Zähler der gesendeten MIDI-
                      Nachrichten und die Blockgrößen, die FL schickt.
                      Anleitung dazu: FL-ROUTING.md (liegt im ZIP).
-  Capture            Aufnahme (neu in 0.3.0): Take-Liste, Vorschau,
-                     Ziehflächen MIDI und WAV, Save as..., New take,
-                     Grab last ..., Clear, Exportoptionen (Version
+  Capture            Aufnahme (seit 0.3.0): Take-Liste, Vorschau,
+                     Ziehflächen MIDI und WAV, Save as..., Mode
+                     (Background/Record), Max length, Length + Record/
+                     Cancel (0.3.1), New take, Grab last ..., Clear,
+                     Exportoptionen (Version
                      Clean/Raw, Bends, Quantize), Offset (Auto/Manual/
                      Off + Fine), Capture / Capture audio, Free gap.
                      Anleitung dazu: M3-TESTING.md (liegt im ZIP).

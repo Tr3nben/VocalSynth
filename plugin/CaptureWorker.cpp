@@ -691,15 +691,32 @@ void CaptureWorker::checkWavRenders()
     std::vector<TakeWavState> outdated;
     bool restartJob = false;
 
+    // The spans need a Clean render of every take: computed without the list lock (the message thread polls
+    // the status and the list under it), then matched to the entries again by take
+    std::vector<std::pair<std::shared_ptr<const Take>, AudioSpan>> spans;
+    {
+        const std::scoped_lock lock (listMutex);
+        spans.reserve (entries.size());
+
+        for (const auto& e : entries)
+            if (e.take->audio != TakeAudio::none)
+                spans.emplace_back (e.take, AudioSpan {});
+    }
+
+    for (auto& [take, span] : spans)
+        span = TakeRenderer::computeAudioSpan (*take, wavRenderOptions (*take));
+
     {
         const std::scoped_lock lock (listMutex);
 
         for (auto& e : entries)
         {
-            if (e.take->audio == TakeAudio::none)
+            const auto found = std::find_if (spans.begin(), spans.end(), [&e] (const auto& p) { return p.first == e.take; });
+
+            if (found == spans.end())
                 continue;
 
-            const auto span = TakeRenderer::computeAudioSpan (*e.take, wavRenderOptions (*e.take));
+            const auto span = found->second;
 
             if (span == e.wavSpan && e.wavFormat == appliedOptions.wavFormat)
                 continue;

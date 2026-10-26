@@ -95,7 +95,8 @@ struct RenderedTake
        survive the clamp, independent of options.version (the worker refines before publishing, so Raw
        and Clean agree); a note the clamp drops never decides tick 0 or the bar in the file name; no
        surviving note: o = take.startSample (Record takes, M3.1: always o = take.startSample, the first
-       recorded bar, also if the first note comes later). Then
+       recorded bar, also if the first note comes later; background takes with a limit (maxBars > 0,
+       anchorBar > 0): always o = take.startSample, the start of the anchor bar the cut was counted from). Then
        - synced: originBeats = start of the bar containing timeline.beatsAt (clamp (o, start, end))
          (TakeTimeline::barAt, with its snap tolerance); ticks = llround ((beatsAt (t) - originBeats)
          * ppq);

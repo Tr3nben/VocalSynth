@@ -37,6 +37,7 @@ void NoteSegmenter::reset() noexcept
     onsetFrames = 0;
     onsetMaxRmsDb = PitchFrame::silenceDb;
     unvoicedFrames = 0;
+    releaseCountFrames = 0;
     activeQuantisedNote = -1;
     activeOutputNote = -1;
     activeChannel = 1;
@@ -50,6 +51,11 @@ void NoteSegmenter::reset() noexcept
     historyNext = 0;
     noteFromRest = false;
     restStartSample = 0;
+    dropoutHeld = false;
+    reentryPending = false;
+    reentryDeadline = 0;
+    levelHistoryCount = 0;
+    levelHistoryNext = 0;
     provisional = false;
     provisionalStartSample = 0;
     provisionalSeenStrong = false;
@@ -233,6 +239,8 @@ void NoteSegmenter::setSettings (const VoiceSettings& settings) noexcept
     onsetGlideHoldSamples = toSamples (onsetGlideHoldMs);
     onsetGlideWindowSamples = toSamples (onsetGlideWindowMs);
     minNoteSamples = toSamples (static_cast<double> (settings.minNoteLengthMs));
+    dropoutHoldSamples = toSamples (dropoutHoldMs);
+    dropoutLevelWindowSamples = toSamples (dropoutLevelWindowMs);
     octaveShift = settings.octaveShift;
     velocitySensitivityPercent = static_cast<double> (settings.velocitySensitivityPercent);
     legato = settings.legato;
@@ -249,6 +257,7 @@ void NoteSegmenter::processFrame (const PitchFrame& frame, int64_t absoluteSampl
                       && frame.rmsDb >= gateThresholdDb - gateHysteresisDb;
     const auto p = hasPitch ? frequencyToMidiNote (static_cast<double> (frame.frequencyHz)) : 0.0;
     lastTiming = {};
+    pushLevelHistory (frame.rmsDb, absoluteSample);
 
     if (activeOutputNote < 0)
         processIdleFrame (frame, strong, p, absoluteSample, sampleOffset, bend, out);
@@ -362,6 +371,66 @@ bool NoteSegmenter::isPitchReliable (const PitchFrame& frame, int64_t absoluteSa
     noteLevelDb = std::max (frame.rmsDb, static_cast<float> (std::max (fallen, static_cast<double> (PitchFrame::silenceDb))));
     noteLevelSample = absoluteSample;
     return frame.confidence >= confidenceOn && frame.rmsDb >= noteLevelDb - bendHoldDropDb;
+}
+
+float NoteSegmenter::noteLevelAt (int64_t absoluteSample) const noexcept
+{
+    const auto elapsedSeconds = static_cast<double> (absoluteSample - noteLevelSample) / sampleRate;
+    const auto fallen = static_cast<double> (noteLevelDb) - levelFallDbPerSecond * std::max (0.0, elapsedSeconds);
+    return static_cast<float> (std::max (fallen, static_cast<double> (PitchFrame::silenceDb)));
+}
+
+bool NoteSegmenter::isDropout (const PitchFrame& frame, double p, int64_t absoluteSample) const noexcept
+{
+    // The voice is still there but the detector lost it at a level step (see class comment): no
+    // weak-voiced pitch, a level near the note's, a level step in the recent frames. A low-confidence pitch
+    // must still read the held note (change hysteresis); below dropoutPitchConfidence it is noise (YIN at
+    // the rise after a dip: 2-3 semitones sharp at confidence 0-0.2). NaN fails every comparison.
+    const auto hasPitch = frame.frequencyHz > 0.0f && std::isfinite (frame.frequencyHz);
+
+    if (hasPitch && frame.confidence >= confidenceOff)
+        return false;
+
+    if (hasPitch && frame.confidence >= dropoutPitchConfidence)
+    {
+        const auto candidate = quantizer.quantize (p, activeQuantisedNote);
+        const auto q = static_cast<double> (activeQuantisedNote);
+        const auto advantage = std::abs (p - q) - std::abs (p - static_cast<double> (candidate));
+
+        if (candidate != activeQuantisedNote && advantage >= 2.0 * hysteresisSemitones - stickinessEpsilonSemitones)
+            return false;
+    }
+
+    return frame.rmsDb >= gateThresholdDb && frame.rmsDb >= noteLevelAt (absoluteSample) - dropoutMaxDropDb
+           && levelRange (absoluteSample, dropoutLevelWindowSamples) >= dropoutMinLevelStepDb;
+}
+
+void NoteSegmenter::pushLevelHistory (float rmsDb, int64_t absoluteSample) noexcept
+{
+    const auto index = static_cast<std::size_t> (levelHistoryNext);
+    levelHistoryDb[index] = std::isfinite (rmsDb) ? std::max (rmsDb, PitchFrame::silenceDb) : PitchFrame::silenceDb;
+    levelHistorySample[index] = absoluteSample;
+    levelHistoryNext = levelHistoryNext + 1 < levelHistoryFrames ? levelHistoryNext + 1 : 0;
+    levelHistoryCount = std::min (levelHistoryCount + 1, levelHistoryFrames);
+}
+
+float NoteSegmenter::levelRange (int64_t absoluteSample, int64_t windowSamples) const noexcept
+{
+    auto lo = std::numeric_limits<float>::max();
+    auto hi = std::numeric_limits<float>::lowest();
+
+    for (int i = 0; i < levelHistoryCount; ++i)
+    {
+        const auto index = static_cast<std::size_t> ((levelHistoryNext - 1 - i + levelHistoryFrames) % levelHistoryFrames);
+
+        if (absoluteSample - levelHistorySample[index] > windowSamples)
+            break;
+
+        lo = std::min (lo, levelHistoryDb[index]);
+        hi = std::max (hi, levelHistoryDb[index]);
+    }
+
+    return hi >= lo ? hi - lo : 0.0f;
 }
 
 void NoteSegmenter::pushPitchHistory (double p, int64_t absoluteSample) noexcept
@@ -482,17 +551,40 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
         changeTimerRunning = false;
 
         if (unvoicedFrames == 0)
+        {
             releaseRunStart = absoluteSample;
+            releaseCountFrames = 0;
+        }
 
-        // The note is held (no bend updates) until releaseFrames unvoiced frames AND minNoteLength.
-        if (++unvoicedFrames >= releaseFrames && absoluteSample - noteStartSample >= minNoteSamples)
+        unvoicedFrames = std::min (unvoicedFrames + 1, releaseFrames); // > 0 = in a run (bounded)
+
+        // Dropout hold (v0.3.1): a loud frame without a weak-voiced pitch early in the run does not count
+        if (absoluteSample - releaseRunStart < dropoutHoldSamples && isDropout (frame, p, absoluteSample))
+        {
+            dropoutHeld = true;
+            return;
+        }
+
+        // The note is held (no bend updates) until releaseFrames counted frames AND minNoteLength.
+        releaseCountFrames = std::min (releaseCountFrames + 1, releaseFrames);
+
+        if (releaseCountFrames >= releaseFrames && absoluteSample - noteStartSample >= minNoteSamples)
             endNote (absoluteSample, sampleOffset, bend, out, releaseTiming (absoluteSample));
 
         return;
     }
 
     lastFrameVoiced = true;
+
+    if (unvoicedFrames > 0 && dropoutHeld)
+    {
+        // The voice is back after a held dropout: the first strong frame decides about a re-entry
+        reentryPending = true;
+        reentryDeadline = absoluteSample + dropoutHoldSamples;
+    }
+
     unvoicedFrames = 0;
+    dropoutHeld = false;
 
     // Pitch history for the v0.3.1 change rules: consecutive frames that may request a change
     if (frame.confidence >= confidenceOn)
@@ -512,6 +604,24 @@ void NoteSegmenter::processNoteFrame (const PitchFrame& frame, bool weak, double
     }
 
     lastTiming.update = timingFor (absoluteSample, absoluteSample - frameDelay(), EventTimingKind::measured, 0);
+
+    // Re-entry after a held dropout (v0.3.1): the voice came back at another note. Without the hold this
+    // was a release and a new onset; the change comes at once, as that onset did (a big legato leap
+    // whose transition windows give no pitch), instead of after T_min. The first strong frame (or the
+    // deadline) decides; the same note just continues.
+    if (reentryPending && (frame.confidence >= confidenceOn || absoluteSample >= reentryDeadline))
+    {
+        reentryPending = false;
+
+        if (changeWanted && frame.rmsDb >= gateThresholdDb && absoluteSample - noteStartSample >= minNoteSamples)
+        {
+            lastTiming.update = {};
+            changeTimerStart = absoluteSample; // the estimate: where the voice came back
+            changeNote (candidate, candidate + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out,
+                        changeTiming (absoluteSample));
+            return;
+        }
+    }
 
     if (! changeWanted)
     {
@@ -565,6 +675,8 @@ void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float le
     changeTimerRunning = false;
     historyCount = 0;
     noteFromRest = false; // the callers that start from rest set it again
+    dropoutHeld = false;
+    reentryPending = false;
     onsetFrames = 0;
     onsetMaxRmsDb = PitchFrame::silenceDb;
     provisional = false;

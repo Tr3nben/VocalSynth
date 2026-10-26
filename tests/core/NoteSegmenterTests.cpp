@@ -985,8 +985,8 @@ TEST_CASE ("NoteSegmenter v0.3.1: a clean step right after the onset is not held
 
 TEST_CASE ("NoteSegmenter v0.3.1: dropouts and dips hold one note, a clear gap re-attacks", "[notesegmenter][segmentation]")
 {
-    // Evidence (vocadito_1, docs/M2-DESIGN.md 12): held notes did not split at voicing dropouts; these
-    // guarantees are pinned here so the change rules cannot break them.
+    // Evidence (vocadito_1, docs/M2-DESIGN.md 12): held notes did not split at voicing dropouts there; these
+    // guarantees are pinned here so the change rules cannot break them (level steps: next test case).
     const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
     CAPTURE (sr);
     VoiceSettings s;
@@ -1038,6 +1038,123 @@ TEST_CASE ("NoteSegmenter v0.3.1: dropouts and dips hold one note, a clear gap r
         rig.framesFor (voicedAt (60.0), 200.0);
         CHECK (noteNumbersOf (rig) == std::vector<int> { 60, 60 });
         CHECK (rig.noteOffs().size() == 1);
+    }
+
+    rig.flush();
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter v0.3.1: dropout hold at a level step inside a note", "[notesegmenter][segmentation]")
+{
+    // A level drop of more than PitchDetector::maxLevelStepDb within a window makes both detectors report no
+    // pitch for several frames (level-step rule), the rise after a dip a few low-confidence frames: before
+    // v0.3.1 that split a held note into note-off + note-on of the same pitch (pipeline: -12 / -20 dB dips).
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (sr);
+    VoiceSettings s;
+    const auto gate = s.gateThresholdDb;
+    SegmenterRig rig (s, sr);
+    const auto dropoutHoldSamples = std::llround (NoteSegmenter::dropoutHoldMs * 0.001 * sr);
+    rig.framesFor (voicedAt (60.0, 0.95f, -15.0f), 200.0);
+    REQUIRE (rig.noteOns().size() == 1);
+
+    SECTION ("frames without pitch after a level drop hold the note, the voice continues")
+    {
+        const auto dropout = GENERATE (0, 1, 2); // no pitch, low confidence on the note, noise pitch
+        CAPTURE (dropout);
+        const auto frame = dropout == 0 ? unvoiced (-28.0f)
+                         : dropout == 1 ? voicedAt (60.3, 0.5f, -28.0f)
+                                        : voicedAt (63.0, 0.5f * NoteSegmenter::dropoutPitchConfidence, -28.0f);
+        rig.framesFor (frame, 20.0);
+        REQUIRE (rig.framesIn (20.0) > NoteSegmenter::releaseFrames);
+        rig.framesFor (voicedAt (60.0, 0.95f, -28.0f), 100.0);
+        rig.frames (voicedAt (60.0, 0.4f, -18.0f), 4); // the rise: low confidence, still the note
+        rig.framesFor (voicedAt (60.0, 0.95f, -15.0f), 100.0);
+
+        CHECK (noteNumbersOf (rig) == std::vector<int> { 60 });
+        CHECK (rig.noteOffs().empty());
+    }
+
+    SECTION ("the same frames at a steady level release after releaseFrames frames, as before")
+    {
+        rig.framesFor (voicedAt (60.0, 0.95f, -28.0f), 100.0); // the level settles: no step in the span
+        const auto start = rig.now();
+        rig.frames (unvoiced (-28.0f), NoteSegmenter::releaseFrames);
+        REQUIRE (rig.noteOffs().size() == 1);
+        CHECK (rig.noteOffs()[0].position == start + (NoteSegmenter::releaseFrames - 1) * rig.hop);
+    }
+
+    SECTION ("low-confidence frames that read another note release as before (a transition)")
+    {
+        const auto start = rig.now();
+        rig.frames (voicedAt (62.0, 0.5f, -22.0f), NoteSegmenter::releaseFrames);
+        REQUIRE (rig.noteOffs().size() == 1);
+        CHECK (rig.noteOffs()[0].position == start + (NoteSegmenter::releaseFrames - 1) * rig.hop);
+    }
+
+    SECTION ("below the gate: a gap releases after releaseFrames frames, as before")
+    {
+        const auto start = rig.now();
+        rig.frames (unvoiced (gate - 1.0f), NoteSegmenter::releaseFrames);
+        REQUIRE (rig.noteOffs().size() == 1);
+        CHECK (rig.noteOffs()[0].position == start + (NoteSegmenter::releaseFrames - 1) * rig.hop);
+    }
+
+    SECTION ("more than dropoutMaxDropDb below the note level: a release, as before")
+    {
+        SegmenterRig loud (s, sr);
+        loud.framesFor (voicedAt (60.0, 0.95f, -5.0f), 200.0);
+        const auto level = -5.0f - NoteSegmenter::dropoutMaxDropDb - 1.0f;
+        REQUIRE (level > gate);
+        const auto start = loud.now();
+        loud.frames (unvoiced (level), NoteSegmenter::releaseFrames);
+        REQUIRE (loud.noteOffs().size() == 1);
+        CHECK (loud.noteOffs()[0].position == start + (NoteSegmenter::releaseFrames - 1) * loud.hop);
+        loud.flush();
+        checkMidiInvariants (loud.events);
+    }
+
+    SECTION ("the hold is bounded: loud aperiodic sound ends the note after dropoutHoldMs + releaseFrames frames")
+    {
+        const auto start = rig.now();
+
+        for (int i = 0; i < rig.framesIn (200.0); ++i)
+            rig.frame (unvoiced (i % 2 == 0 ? -20.0f : -28.0f)); // a level step in every span
+
+        REQUIRE (rig.noteOffs().size() == 1);
+        const auto off = rig.noteOffs()[0].position;
+        CHECK (off - start >= dropoutHoldSamples);
+        CHECK (off - start < dropoutHoldSamples + (NoteSegmenter::releaseFrames + 1) * rig.hop);
+    }
+
+    SECTION ("re-entry at another note: the change comes at the first strong frame, not after T_min")
+    {
+        const auto legato = GENERATE (false, true);
+        CAPTURE (legato);
+        s.legato = legato;
+        rig.apply (s);
+        rig.framesFor (unvoiced (-28.0f), 20.0);
+        rig.frames (voicedAt (64.0, 0.7f, -16.0f), 2); // weak: holds, does not decide
+        const auto strongAt = rig.now();
+        rig.framesFor (voicedAt (64.0, 0.95f, -15.0f), 100.0);
+
+        REQUIRE (noteNumbersOf (rig) == std::vector<int> { 60, 64 });
+        CHECK (rig.noteOns()[1].position == strongAt);
+        CHECK (rig.noteOffs().size() == 1);
+        CHECK (rig.noteOffs()[0].position == strongAt);
+    }
+
+    SECTION ("re-entry at the same note just continues; a later change follows the normal rules")
+    {
+        rig.framesFor (unvoiced (-28.0f), 20.0);
+        rig.framesFor (voicedAt (60.2, 0.95f, -15.0f), 100.0);
+        CHECK (noteNumbersOf (rig) == std::vector<int> { 60 });
+
+        const auto conditionStart = rig.now();
+        rig.framesFor (voicedAt (62.0, 0.95f, -15.0f), 100.0);
+        REQUIRE (noteNumbersOf (rig) == std::vector<int> { 60, 62 });
+        const auto arrival = std::llround (NoteSegmenter::arrivalFraction * NoteSegmenter::stickinessFromPercent (50.0).minChangeMs * 0.001 * sr);
+        CHECK (rig.noteOns()[1].position - conditionStart >= arrival);
     }
 
     rig.flush();

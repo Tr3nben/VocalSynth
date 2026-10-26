@@ -371,8 +371,12 @@ Origin computeOrigin (const Take& take, const RenderOptions& o)
 
     if (origin.synced)
     {
-        // Record takes: tick 0 = the first recorded bar, also if the first note comes later (M3.1 4.3)
-        const auto from = take.kind == TakeKind::record ? take.startSample : first;
+        // Record takes: tick 0 = the first recorded bar, also if the first note comes later (M3.1 4.3); a
+        // background take with a limit: its anchor bar X (= startSample's bar), where the segmenter counted its
+        // N bars from, so the file name and length always match the cut (onset refinement may move the first
+        // note a little later, across a bar line)
+        const auto fromStart = take.kind == TakeKind::record || (take.maxBars > 0 && take.anchorBar > 0);
+        const auto from = fromStart ? take.startSample : first;
         const auto hostSample = std::clamp (from, take.startSample, std::max (take.startSample, take.endSample));
         const auto bar = take.timeline.barAt (static_cast<double> (hostSample));
         origin.beats = bar.startBeats;

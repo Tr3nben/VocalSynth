@@ -512,8 +512,8 @@ TEST_CASE ("CaptureTap: Record / Cancel requests become markers in the binding o
     h.drain();
 
     h.tap.requestRecord (4);
-    h.tap.requestRecord (8); // coalesces: the newest length
     h.tap.requestRecordCancel();
+    h.tap.requestRecord (8); // Cancel then Record: disarm / discard, then arm with the newest length
     h.tap.requestClear();
     h.tap.requestGrab (2, 10.0);
     h.tap.requestNewTake();
@@ -539,6 +539,72 @@ TEST_CASE ("CaptureTap: Record / Cancel requests become markers in the binding o
     const auto arms = h.drain().markers (CaptureMarkerKind::recordArm);
     REQUIRE (arms.size() == 1);
     CHECK (arms[0].asMarker().grabBars == 1);
+}
+
+TEST_CASE ("CaptureTap: Record then Cancel before the next block: the last press wins", "[capturetap][recordmode]")
+{
+    Harness h;
+    h.block (32);
+    h.drain();
+
+    // Record pressed by mistake, Cancel at once (or both pending while the host does not call processBlock)
+    h.tap.requestRecord (8);
+    h.tap.requestRecordCancel();
+    h.block (32);
+    auto out = h.drain();
+    REQUIRE (out.records.size() == 1);
+    CHECK (out.records[0].asMarker().kind == CaptureMarkerKind::recordCancel);
+
+    // Record, Record, Cancel: still only the Cancel
+    h.tap.requestRecord (4);
+    h.tap.requestRecord (8);
+    h.tap.requestRecordCancel();
+    h.block (32);
+    out = h.drain();
+    REQUIRE (out.records.size() == 1);
+    CHECK (out.records[0].asMarker().kind == CaptureMarkerKind::recordCancel);
+
+    // Record alone, with its length; then nothing pending
+    h.tap.requestRecord (16);
+    h.block (32);
+    out = h.drain();
+    REQUIRE (out.records.size() == 1);
+    CHECK (out.records[0].asMarker().kind == CaptureMarkerKind::recordArm);
+    CHECK (out.records[0].asMarker().grabBars == 16);
+    h.block (32);
+    CHECK (h.drain().records.empty());
+
+    // The segmenter ends up idle after Record + Cancel in one block (armed after Cancel + Record)
+    for (const bool cancelLast : { true, false })
+    {
+        CAPTURE (cancelLast);
+        RecordFeeder f;
+        f.settings (0, [] { CaptureSettingsInfo i; i.captureMode = CaptureMode::record; return i; }());
+        f.transport (0, true, 0.0);
+        Harness tap;
+        tap.block (32);
+        tap.drain();
+
+        if (cancelLast)
+        {
+            tap.tap.requestRecord (8);
+            tap.tap.requestRecordCancel();
+        }
+        else
+        {
+            tap.tap.requestRecordCancel();
+            tap.tap.requestRecord (8);
+        }
+
+        tap.block (32);
+
+        for (const auto& r : tap.drain().records)
+            if (r.type == CaptureRecordType::marker)
+                f.marker (1000, r.asMarker().kind, r.asMarker().grabBars);
+
+        f.advance (1001);
+        CHECK ((f.segmenter.getRecordStatus().phase == RecordStatus::Phase::idle) == cancelLast);
+    }
 }
 
 TEST_CASE ("CaptureTap: mode and take limit travel in the settings record", "[capturetap][recordmode]")

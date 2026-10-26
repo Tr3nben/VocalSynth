@@ -60,19 +60,28 @@ namespace vocalsynth
 
     M3.1 take length and Record mode (docs/M3.1-DESIGN.md 3, 4; settings captureMode / takeMaxBars travel in
     the settings record, Record / Cancel as markers, so everything is timed by the audio clock):
-    7. Synced background takes are anchored at their first note: anchor bar X = the bar (TakeTimeline::barAt)
-       containing max (startSample, h), h = estimatedSample - rtSeg of the take's first note-on with
-       h >= startSample, or startSample if a note sounding at the start (synthetic note-on, or a note-on with
-       h < startSample) has a note-off with h > startSample or is still on at startSample + the capture tail.
-       rtSeg = computeRoundTripSamples (setOffsetSettings(), maxBlockSize, rate), 0 for test-pattern takes.
+    7. Synced background takes are anchored at their first note that lasts anchorMinNoteSamples() (the Clean
+       ghost threshold: a click or noise note never anchors): anchor bar X = the bar (TakeTimeline::barAt)
+       containing max (startSample, h), h = estimatedSample - rtSeg of that note's note-on (h >= startSample;
+       a bar line at most anchorEarlyToleranceBeats after h counts: a downbeat sung a little early starts
+       its bar), decided at its note-off (h of the note-off - h >= the threshold, else it is no candidate)
+       or once it is still on at its emit sample + threshold + detectionTailSeconds; or startSample if a
+       note sounding at the start (synthetic note-on, or a note-on with h < startSample) has a note-off with
+       h >= startSample + threshold or is still on at startSample + the capture tail + threshold (it decides
+       before a later note). rtSeg = computeRoundTripSamples (setOffsetSettings(), maxBlockSize, rate), 0 for
+       test-pattern takes. Anchor bar X is also set with limit Off (status line only; maxBars stays 0).
+       A take opened with a limit (synced or free) that is never anchored and has no note of at least the
+       threshold inside its span (only clicks / noise, or a note that ended at the cut) is discarded like an
+       empty take (its number is released).
        With takeMaxBars N > 0 at that moment (Take::maxBars = N, Take::anchorBar = X): startSample = max
        (startSample, start of bar X), and the take is cut at the N-th bar line after the start of bar X
        (TakeTimeline::barLineAfter, counted as the timeline crosses them) like a newTake marker there: the
        next synced take opens at the cut and anchors by the same rule (a note held across the cut: at the
        cut, i.e. bar X + N; otherwise at the bar of its own first note). Stop ends it earlier (rule 1).
-    8. Free background takes are cut at startSample + freeModeBarsToSamples (N, rate, freeBpm) like a free
-       manual split (synthetic note-offs); sounding notes continue in a new free take, else the segmenter
-       waits for the next note-on. The gap rule stays.
+    8. Free background takes are cut at A + freeModeBarsToSamples (N, rate, freeBpm) like a free manual split
+       (synthetic note-offs), A = the emit sample of the first note-on that lasts the threshold (rule 7, in
+       emit time; startSample for a note held across the start of a continued take); sounding notes continue
+       in a new free take, else the segmenter waits for the next note-on. The gap rule stays.
     9. Record mode: no background takes (no synced / free takes, newTake ignored; state syncedIdle while
        playing). recordArm (N = grabBars) arms; the Record take (kind record) starts at the first bar line at
        or after the marker (TakeTimeline::firstBarLineAtOrAfter on the history timeline; stopped: where
@@ -96,6 +105,14 @@ public:
         detection, with margin. */
     static constexpr double detectionTailSeconds = 0.25;
     static constexpr std::size_t maxTakeEvents = CaptureHistory::eventCapacity;
+    /** Rule 7: a bar line at most this far after the anchoring note-on counts as its bar (1/32 note: sung
+        anticipation and onset-estimate error of a downbeat; TakeTimeline::barSnapToleranceBeats is 1/32 beat). */
+    static constexpr double anchorEarlyToleranceBeats = 1.0 / 8.0;
+    /** Rule 7: shorter notes never anchor; = the default Clean ghost threshold (RenderOptions::cleanMinNoteMs). */
+    static constexpr double anchorMinNoteMs = 80.0;
+
+    /** max (anchorMinNoteMs, take.settings.minNoteLengthMs) in samples of take.sampleRate. */
+    static int64_t anchorMinNoteSamples (const Take& take) noexcept;
 
     /** maxRoundTripSamples (maxBlockSize, sampleRate) + detectionTailSeconds, in samples. */
     static int64_t compensationTailSamples (double sampleRate, int maxBlockSize) noexcept;
@@ -185,9 +202,22 @@ private:
         std::array<std::bitset<128>, 16> notes {};
         int64_t collectFrom = 0;  ///< events emitted from here on belong to it (startSample may move later)
         // M3.1 take length (rules 7 - 9)
-        bool anchored = true;     ///< synced background takes start unanchored
+        bool anchored = true;     ///< synced background takes and free takes with a limit start unanchored
+        bool discardUnanchored = false; ///< opened with a limit: discarded if never anchored (rule 7)
         std::array<std::bitset<128>, 16> anchorCandidates {}; ///< notes sounding at startSample (rule 7)
         int64_t anchorDeadline = 0; ///< candidates still on here anchor at startSample
+        /** Note-ons that anchor once they last anchorMinNoteSamples (rule 7), in arrival order. */
+        struct AnchorNote
+        {
+            int64_t at = 0;       ///< anchor position: synced h, free emit sample
+            int64_t on = 0;       ///< start for the length test (synced: max (h, startSample); free: estimate)
+            int64_t deadline = 0; ///< still on at this emit sample: long enough
+            uint8_t channel = 0;  ///< index 0..15
+            uint8_t note = 0;
+        };
+        static constexpr std::size_t maxAnchorNotes = 8;
+        std::array<AnchorNote, maxAnchorNotes> anchorNotes {};
+        std::size_t numAnchorNotes = 0;
         double lineSample = 0.0;  ///< newest bar line counted (start of bar X at first), fractional sample
         int barsDone = 0;         ///< bar lines crossed after the start of bar X
         int64_t freeCutSample = std::numeric_limits<int64_t>::max(); ///< free take: cut here (rule 8)
@@ -223,7 +253,10 @@ private:
     /** Opens the synced take at sample (background) or goes to syncedIdle (Record mode). */
     void startSyncedState (int64_t sample, const CaptureHistory& history);
     void trackAnchor (const CapturedEvent& event);
-    void anchorOpenTake (int64_t at);
+    /** fromNote: at is a note-on's h (the early tolerance applies), else the take start. */
+    void anchorOpenTake (int64_t at, bool fromNote);
+    /** Rule 7, after a take closed unanchored: a note of at least the threshold inside its kept span. */
+    bool hasAnchorLengthNote (const Take& take) const;
     int64_t segmentRoundTrip (const Take& take) const noexcept;
     void updateRecordStatus (const CaptureHistory& history) noexcept;
 

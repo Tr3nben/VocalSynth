@@ -109,7 +109,8 @@ public:
         (captureOff: note-offs for open notes first; captureOff / audioOff: the staged partial audio frame is
         completed with zeros and pushed before the marker), then the markers of pending requests: at most one
         per kind per block, in the order newTake, grab, clear, recordCancel, recordArm (requests made between
-        two blocks coalesce; a grab / Record carries the newest lengths). */
+        two blocks coalesce; a grab / Record carries the newest lengths; Record / Cancel keep their order:
+        recordCancel if Cancel was pressed, recordArm only if the last press was Record). */
     void beginBlock (const TransportInfo& transport, const CaptureBlockSettings& settings) noexcept;
 
     /** Note-off for every note the tap saw on (and a bend centre on channels whose last bend was not 0) at
@@ -135,7 +136,7 @@ public:
     /** M3.1 Record button (docs/M3.1-DESIGN.md 4.2): marker recordArm carrying bars (clamped to >= 1). */
     void requestRecord (int bars) noexcept;
     /** M3.1 Cancel: marker recordCancel. Marker order at one block start: newTake, grab, clear, recordCancel,
-        recordArm. */
+        recordArm (Record then Cancel before the next block: only recordCancel, the last press wins). */
     void requestRecordCancel() noexcept;
 
     /** Samples processed since the last clearing reset. Stored with release after the block's records were
@@ -225,9 +226,15 @@ private:
     std::atomic<uint32_t> newTakeRequests { 0 };
     std::atomic<uint32_t> grabRequests { 0 };
     std::atomic<uint32_t> clearRequests { 0 };
-    std::atomic<uint32_t> recordRequests { 0 };
-    std::atomic<uint32_t> recordCancelRequests { 0 };
-    std::atomic<int> recordBars { 8 };
+    /** Record / Cancel in one word (bits 0..15 bars of the last Record, bit 16 the last press was Record,
+        bits 24..43 Cancel count, 44..63 Record count): beginBlock() emits recordCancel if a Cancel came since
+        the last block, then recordArm only if the last press was Record. */
+    std::atomic<uint64_t> recordRequestState { 0 };
+    static constexpr uint64_t recordBarsMask = 0xffff;
+    static constexpr uint64_t recordLastIsArm = uint64_t { 1 } << 16;
+    static constexpr int recordCancelShift = 24;
+    static constexpr int recordArmShift = 44;
+    static constexpr uint64_t recordCountMask = 0xfffff;
     std::atomic<int> grabBars { 8 };
     std::atomic<double> grabSeconds { 30.0 };
     uint32_t handledNewTake = 0;
@@ -237,6 +244,7 @@ private:
     uint32_t handledRecordCancel = 0;
 
     static_assert (std::atomic<int64_t>::is_always_lock_free);
+    static_assert (std::atomic<uint64_t>::is_always_lock_free);
     static_assert (std::atomic<double>::is_always_lock_free);
 };
 

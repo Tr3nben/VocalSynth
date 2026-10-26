@@ -1403,6 +1403,150 @@ TEST_CASE ("Pipeline gives the same notes at 44.1, 48 and 96 kHz", "[pipeline]")
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// v0.3.1 segmentation on voice-like audio (docs/M2-DESIGN.md 12)
+
+namespace
+{
+
+double voiceShape (double phase)
+{
+    const auto w = 2.0 * std::numbers::pi * phase;
+    return std::sin (w) + 0.5 * std::sin (2.0 * w) + 0.25 * std::sin (3.0 * w);
+}
+
+/** Voice-like tone (fundamental + 2nd and 3rd harmonic, 0.3 peak) at the MIDI pitch pitchAt (t), times
+    gainAt (t), with 5 ms fades. */
+template <typename PitchFn, typename GainFn>
+test::Signal shapedTone (double sr, double seconds, PitchFn&& pitchAt, GainFn&& gainAt)
+{
+    auto s = test::oscillator (sr, seconds, 0.3f, [&] (double t) { return midiNoteToFrequency (pitchAt (t)); }, voiceShape);
+
+    for (std::size_t i = 0; i < s.size(); ++i)
+        s[i] = static_cast<float> (static_cast<double> (s[i]) * gainAt (static_cast<double> (i) / sr));
+
+    applyFades (s, sr, 0.005);
+    return s;
+}
+
+} // namespace
+
+TEST_CASE ("Pipeline v0.3.1: a held note stays one note through level dips, tremolo and breathy stretches",
+           "[pipeline][segmentation]")
+{
+    // v0.3.1 (docs/M2-DESIGN.md 12): abrupt dips (variants 0, 1) split the note into two or three of the
+    // same pitch before the dropout hold (the detectors' level-step rule); tremolo and breath did not.
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto variant = GENERATE (0, 1, 2, 3, 4);
+    const auto [range, note] = GENERATE (table<VoiceRange, double> ({ { VoiceRange::bass, 43.0 },
+                                                                      { VoiceRange::tenor, 57.0 },
+                                                                      { VoiceRange::soprano, 72.0 } }));
+    CAPTURE (algorithmName (algorithm), sr, variant, voiceRangeInfo (range).name, note);
+
+    const auto inside = [] (double t, double from, double length) { return t >= from && t < from + length; };
+    const auto gain = [&] (double t)
+    {
+        switch (variant)
+        {
+            case 0:  return inside (t, 0.4, 0.08) ? 0.25 : 1.0;                                    // -12 dB for 80 ms
+            case 1:  return inside (t, 0.4, 0.06) ? 0.1 : 1.0;                                     // -20 dB for 60 ms
+            case 2:  return std::pow (10.0, 3.0 / 20.0 * std::sin (2.0 * std::numbers::pi * 6.0 * t)); // +-3 dB tremolo
+            default: return inside (t, 0.4, 0.1) ? 0.5 : 1.0;                                      // breathy (below)
+        }
+    };
+    auto tone = shapedTone (sr, 1.0, [note] (double) { return note; }, gain);
+
+    if (variant >= 3)
+    {
+        // Breath noise over 100 ms of the tone: SNR about 6 dB (3), 0 dB (4)
+        auto breath = scaledToRmsDb (test::whiteNoise (sr, 0.1, 1.0f, 31), variant == 3 ? -26.0 : -20.0);
+        test::Signal noise (tone.size(), 0.0f);
+        std::copy (breath.begin(), breath.end(), noise.begin() + static_cast<std::ptrdiff_t> (test::numSamplesFor (0.4, sr)));
+        test::mixInto (tone, noise);
+    }
+
+    const auto input = test::concat ({ test::silence (sr, 0.1), tone, test::silence (sr, 0.2) });
+    const auto run = runPipeline (input, sr, settingsFor (range, algorithm));
+    const auto notes = notesOf (run.events);
+
+    CHECK (run.contractViolations == 0);
+    CHECK (midiInvariantViolations (run.events) == 0);
+    CHECK (noteNumbers (notes) == std::vector<int> { static_cast<int> (note) });
+}
+
+TEST_CASE ("Pipeline v0.3.1: a repeated note after a clear gap gives two notes", "[pipeline][segmentation]")
+{
+    // vocadito_1 has same-pitch repeats after gaps of 12-104 ms (re-sung syllables): a gap in the voice
+    // must stay a re-attack. The dropout hold needs the newest period above the gate, so silence of
+    // 20 ms and more always releases; about 10 ms of silence is now bridged in Bass and Tenor (the newest
+    // period of f0 min never empties), docs/M2-DESIGN.md 12.
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto gapSeconds = GENERATE (0.02, 0.04, 0.12);
+    const auto [range, note] = GENERATE (table<VoiceRange, double> ({ { VoiceRange::bass, 43.0 },
+                                                                      { VoiceRange::tenor, 57.0 },
+                                                                      { VoiceRange::soprano, 72.0 } }));
+    CAPTURE (algorithmName (algorithm), sr, gapSeconds, voiceRangeInfo (range).name, note);
+
+    const auto tone = shapedTone (sr, 0.4, [note] (double) { return note; }, [] (double) { return 1.0; });
+    const auto input = test::concat ({ test::silence (sr, 0.1), tone, test::silence (sr, gapSeconds), tone, test::silence (sr, 0.2) });
+    const auto run = runPipeline (input, sr, settingsFor (range, algorithm));
+    const auto notes = notesOf (run.events);
+
+    CHECK (run.contractViolations == 0);
+    CHECK (midiInvariantViolations (run.events) == 0);
+    REQUIRE (noteNumbers (notes) == std::vector<int> { static_cast<int> (note), static_cast<int> (note) });
+
+    // The second note starts after the gap, not before (no re-attack inside the first tone); the first
+    // one ends before it (its note-off may come after the gap's end: detection delay)
+    const auto secondTone = static_cast<int64_t> (test::numSamplesFor (0.1 + 0.4 + gapSeconds, sr));
+    CHECK (notes[1].on >= secondTone);
+    CHECK (notes[0].off <= notes[1].on);
+}
+
+TEST_CASE ("Pipeline v0.3.1: a scoop from rest and a fast glide give no passing notes, block-size invariant",
+           "[pipeline][segmentation]")
+{
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (algorithmName (algorithm), sr);
+
+    // Scoop 55 -> 57 over 100 ms (20 st/s) from rest, hold, glide 57 -> 62 over 80 ms (62.5 st/s), hold
+    const auto pitch = [] (double t)
+    {
+        if (t < 0.1)
+            return 55.0 + 2.0 * t / 0.1;
+        if (t < 0.5)
+            return 57.0;
+        if (t < 0.58)
+            return 57.0 + 5.0 * (t - 0.5) / 0.08;
+        return 62.0;
+    };
+    const auto tone = shapedTone (sr, 1.0, pitch, [] (double) { return 1.0; });
+    const auto input = test::concat ({ test::silence (sr, 0.1), tone, test::silence (sr, 0.2) });
+
+    for (const auto legato : { false, true })
+    {
+        CAPTURE (legato);
+        auto s = settingsFor (VoiceRange::tenor, algorithm);
+        s.legato = legato;
+        const auto run = runPipeline (input, sr, s, 512);
+        const auto numbers = noteNumbers (notesOf (run.events));
+        CAPTURE (numbers);
+
+        CHECK (run.contractViolations == 0);
+        CHECK (midiInvariantViolations (run.events) == 0);
+        REQUIRE (numbers.size() >= 2);
+        CHECK (numbers.back() == 62);
+        CHECK (numbers[numbers.size() - 2] == 57);  // the glide passes 58..61 without a note
+        CHECK (numbers.size() <= 3);                // at most one scoop note (the provisional start) before 57
+
+        CHECK (runPipeline (input, sr, s, 0).events == run.events);  // variable host blocks
+        CHECK (runPipeline (input, sr, s, 37).events == run.events);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // Latency
 
 TEST_CASE ("Pipeline latency: abrupt onset -> note-on within the model and the spec budgets", "[pipeline]")

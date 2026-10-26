@@ -1,6 +1,6 @@
 # Projektstand (Übergabe-Notiz)
 
-Stand: 2026-10-17. Diese Datei fasst zusammen, wo das Projekt steht, damit eine neue Sitzung oder ein Agent
+Stand: 2026-10-21. Diese Datei fasst zusammen, wo das Projekt steht, damit eine neue Sitzung oder ein Agent
 ohne den bisherigen Chatverlauf weitermachen kann.
 
 ## Erledigt
@@ -11,8 +11,9 @@ ohne den bisherigen Chatverlauf weitermachen kann.
 | M1 – Routing-Test (v0.1.0) | Testmodus mit Test-MIDI, Monitor-Ton, virtueller MIDI-Port, Diagnoseanzeigen. **In FL Studio 2026 getestet: T1 funktioniert** (Noten, Pitchbend, CC über MIDI-Port an VST3-Synth). FL nimmt Plugin-MIDI nicht in die Piano Roll auf. |
 | M2 – Singen wird zu MIDI (v0.2.0) | Pitch → MIDI mit YIN/MPM, Stimmlagen, Skalen, Stickiness, Gate, Bend, Legato, Tuner-UI, `vs-eval`. **In FL Studio 2026 getestet (2026-10-15): Einzeltöne, Tonleitern, Vibrato, Legato o.k., MPM etwas besser als YIN.** Über PR #2 in `master` gemergt. |
 | M2.1 – Feinschliff (v0.2.1) | Ruhiges Stimmgerät, schnellere Notenanfänge, Latenz- und DSP-Anzeige, Gate −40 dB. **Vom Nutzer in FL getestet (2026-10-16): „funktioniert alles super“.** Über PR #3 in `master`. |
+| M3 – Aufnahme und Drag & Drop (v0.3.0) | Immer laufende Aufnahme, Takes synchron/frei, `.mid`/`.wav` per Drag & Drop, Latenzausgleich, Clean/Raw, Grab. **Vom Nutzer in FL getestet (2026-10-21): Timing, Drag & Drop, Tempowechsel, „Grab last 8 bars“ und CPU o.k., Clean etwas besser als Raw; Problem: Takes im Hintergrund zu lang.** Über PR #4 in `master`. |
 
-M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3 in `master` gemergt.
+M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3, M3 (v0.3.0) über PR #4 in `master` gemergt.
 
 ## Entscheidungen
 
@@ -25,8 +26,62 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3 in `m
 - **Aufnahme (M3, 2026-10-16):** `.mid` ab dem Takt des Takes, Stimme als WAV (an, 10 min, `Dokumente\VocalSynth\Takes`),
   Latenzausgleich Auto + Feinregler (Kalibrierung später), Takes nicht im Projekt, Drag-Standard Clean ohne
   Quantisierung mit Bend wie im Plugin, Freimodus 3 s Pause (Details: [docs/M3-SPEC.md](M3-SPEC.md) „Decisions“).
+- **Take-Länge (0.3.1, 2026-10-21, Nutzerwunsch):** Hintergrund-Takes beginnen am Takt der ersten Note und werden
+  nach *Max length* Takten abgeschnitten (Standard 16), dazu ein Record-Modus mit genau N Takten ab dem nächsten
+  Taktstrich (Standard 8). Gate-Standard −35 dB (Korpus-Sweep und Nutzer: −35 … −40 dB).
+  Details: [docs/M3.1-DESIGN.md](M3.1-DESIGN.md).
 
-## Aktuell: M3 – Aufnahme und Drag & Drop (v0.3.0)
+## Aktuell: M3.1 – Take-Länge, Record-Modus, weniger Zusatznoten (v0.3.1)
+
+- Branch: `m3.1-takes` (von `master` nach v0.3.0 / PR #4). Stand im Arbeitsbaum: WIP-Commit `fe41d9e` (Design,
+  Gerüst, Capture-Umsetzung) plus noch nicht committete Änderungen (Segmentierung, Doku, End-to-end-Tests).
+  Design: [docs/M3.1-DESIGN.md](M3.1-DESIGN.md), Segmentierung [docs/M2-DESIGN.md](M2-DESIGN.md) Abschnitt 12.
+  Kurztest für den Nutzer (deutsch): [docs/M3-TESTING.md](M3-TESTING.md) Abschnitt 0, im Windows-Paket
+  `VocalSynth-0.3.1-Windows-<Commit>.zip`.
+- **Capture:** drei neue Parameter (Version-Hint 3): *Mode* (Background/Record), *Max length* (Off/4/8/16/32,
+  Standard 16), *Length* (1–32, Standard 8). Synchrone Hintergrund-Takes sind am Takt der ersten Note verankert
+  und werden nach N Takten geschnitten (gehaltene Note über den Schnitt → nächster Take nahtlos bei X + N; nach
+  einer Pause am Takt der eigenen ersten Note); Free-Takes nach N 4/4-Takten beim Host-Tempo (sonst 120 BPM).
+  Export-Ende am Taktstrich nach der letzten Note der Version, WAV-Ende wie Clean (Klicks am Ende verlängern
+  nichts mehr). Record-Modus: Knopf *Record*/*Cancel*, Start am nächsten Taktstrich (gestoppt: am Taktstrich des
+  Starts), genau N Takte, Herunterzählen und „Recording bar k/N“, keine Hintergrund-Takes, Grab geht weiter.
+  Blockgrößen-invariant (`.mid` byteweise gleich für 1/7/64/480/512/4096).
+- **Segmentierung** (`NoteSegmenter`): Analyse auf vocadito_1 – die Zusatznoten kommen fast nur von der Tonhöhe
+  (späte Wechsel, Durchgangsnoten in Schleifern/Glissandi, schnelle Fehlstarts, Intonation), kaum von
+  Aussetzern. Geändert: Wechsel nach halber Mindest-Wechselzeit, sobald die Stimme auf dem neuen Ton angekommen
+  ist; kein Wechsel, solange die Tonhöhe noch gleitet; Aussetzer-Halten (höchstens 60 ms) nach einem Pegelsprung
+  über dem Gate. Vorher/nachher (Gate −35 dB):
+
+  | Input | MPM F1 | YIN F1 |
+  |---|---|---|
+  | vocadito_1, annotator A1 | 0.284 → 0.317 (precision 0.218 → 0.248) | 0.313 → 0.305 |
+  | vocadito_1, annotator A2 | 0.310 → 0.355 | 0.339 → 0.343 |
+  | vocadito_1, notes from reference f0 | 0.354 → 0.423 | 0.326 → 0.400 |
+  | semi-synthetic sung set | 0.370 → 0.497 | 0.348 → 0.442 |
+  | self-test corpus | 0.808 → 0.832 | 0.779 → 0.826 |
+
+  Note-On aus der Stille unverändert (Selbsttest 15,4 / 30,9 ms), Rauschen/Atem/Stille 0 Noten, Vibrato eine Note,
+  Oktavfehler unverändert. Bekannt: YIN auf A1 eine Note schlechter; ca. 10 ms völlige Stille zwischen zwei
+  gleichen Tönen ergibt in Bass/Tenor eine Note (ab 20 ms immer zwei).
+- Integration 2026-10-21 (lokal, Linux, clang Release, alle eigenen Quellen neu übersetzt: 0 Warnungen): ctest
+  (xvfb) 503/503, darunter zwei neue End-to-end-Tests im Prozessor: Record 8 Takte, bei Takt 2 Schlag 3 scharf
+  geschaltet (120 BPM, gesungene Phrase, danach Mausklick-artige Geräusche über das Ende hinaus) → genau ein Take
+  Takt 3 bis 11, alle 12 Noten im Take, nichts von den Klicks (auch nicht live); Hintergrund mit *Max length* 4 und
+  10 Takten Gesang → drei Takes ab Takt 2, 6, 10, je höchstens 4 Takte, jede Note in genau einem Take.
+  pluginval Strictness 10 beide VST3, Steinberg-Validator 47/47 beide VST3, clap-validator 32 bestanden / 0 Fehler
+  beide CLAP (1 bekannte Warnung `state-invalid-random`, JUCE-CLAP-Wrapper). vs-eval-Standalone (Korpus-CI) baut,
+  2/2 ctests; Korpus-pytest mit vs-eval 30/30.
+- **Nächste Schritte:** Review (Echtzeit + Korrektheit) mit Gegenprüfung → Fixes → Commit/Push → CI → ZIP-Link an
+  den Nutzer → Kurztest in FL Studio 2026 ([docs/M3-TESTING.md](M3-TESTING.md) Abschnitt 0). **Den
+  Korpus-Workflow auf `m3.1-takes` neu laufen lassen** (`gh workflow run corpus-eval.yml --ref m3.1-takes`): die
+  Zahlen oben sind lokal (vocadito_1 und ein halbsynthetischer Satz), die Wirkung auf Dagstuhl ChoirSet und
+  VocalSet und der Gate-Sweep um −35 dB sind noch nicht gemessen. Für den Nutzer prüfen: Standard 16 Takte,
+  Länge der Record-Takes in FL (Pattern und Audio-Clip), deutsche Texte mit vielen Konsonanten, neu
+  angeschlagene Silben auf demselben Ton.
+- Danach: weitere Segmentierung (der Rest ist tonhöhengetrieben; mehr bräuchte Lookahead = Latenz) und M4
+  (Beatbox-Trigger, nutzt die Capture-Maschinerie).
+
+## Vorher: M3 – Aufnahme und Drag & Drop (v0.3.0, erledigt)
 
 - Branch: `m3-capture` (von `master` nach v0.2.1). Vorgabe: [docs/M3-SPEC.md](M3-SPEC.md) mit den vom Nutzer am
   2026-10-16 bestätigten 6 Entscheidungen (Abschnitt „Decisions“). Design: [docs/M3-DESIGN.md](M3-DESIGN.md)
@@ -50,14 +105,9 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3 in `m
   (7/8), Takes über einen Samplerate-Wechsel, Test-Pattern ohne Umweg-Ausgleich, Grab endet am Klick,
   Notenzahl live. Gates danach: ctest (xvfb) 461/461, pluginval 10 beide VST3, Steinberg 47/47 beide,
   clap-validator 32/0 beide (1 bekannte Warnung), 0 Warnungen.
-- **Nächste Schritte:** Commit/Push → CI → ZIP-Link
-  an den Nutzer → Nutzertest in FL Studio 2026 nach [docs/M3-TESTING.md](M3-TESTING.md). Dabei besonders
-  prüfen: ob FLs vorbereitete maximale Blockgröße dem ASIO-Puffer entspricht (der Capture-Reiter zeigt Auto
-  neben dem größten tatsächlich gesendeten Block und warnt ab Faktor 2), Import der Bends (Bereich), WAV und
-  Pattern am selben Takt, Aufräumen von `%TEMP%\VocalSynth\Capture` beim Schließen von FL (falls FL die DLL
-  entlädt, ohne den Prozessor zu zerstören, könnte das Beenden des Worker-Threads hängen – beobachten).
-- Danach: Feinabstimmung mit dem Korpus ([docs/CORPUS.md](CORPUS.md); gehaltene Noten zerfallen auf echten
-  Aufnahmen in Zusatznoten) und M4 (Beatbox-Trigger, nutzt die Capture-Maschinerie).
+- 2026-10-21 vom Nutzer in FL Studio 2026 getestet (Ergebnis in der Tabelle oben), per PR #4 in `master`.
+  Korpus-Auswertung danach: Note-F1 auf echtem Gesang ca. 0,33 (Präzision 0,26, gehaltene Noten zerfallen in
+  Zusatznoten), Sweep: Gate −35 dB am besten → 0.3.1.
 
 ## Vorher: M2.1 – Feinschliff nach dem Nutzertest (v0.2.1, erledigt)
 
