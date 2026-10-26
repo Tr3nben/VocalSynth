@@ -189,6 +189,12 @@ TEST_CASE ("Record mode: Capture tab status texts", "[plugin][capturepanel][reco
     off.openTakeStartBar = 0;
     CHECK (CapturePanel::formatStatus (off, true, 0) == "Synced 128.0 BPM 4/4 " + enDash() + " recording take 3 (bar 17)");
 
+    // Max length switched on during a take anchored with Off (review F4): the take records, it does not wait
+    CaptureStatus switched = off;
+    switched.takeMaxBars = 16;
+    switched.openTakeStartBar = 3;
+    CHECK (CapturePanel::formatStatus (switched, true, 0) == "Synced 128.0 BPM 4/4 " + enDash() + " recording take 3 (bar 17)");
+
     CaptureStatus free;
     free.started = true;
     free.state = TakeSegmenter::State::freeRecording;
@@ -347,6 +353,87 @@ TEST_CASE ("Record mode: Capture tab controls and the Record / Cancel button", "
     CHECK (panel.getRowText (0).contains ("Bar 2"));
     CHECK (panel.getRowText (0).contains ("2 bars"));
     CHECK (panel.getRowText (0).contains ("Rec"));
+}
+
+TEST_CASE ("Record mode: the Record button follows the last press and the newest status (review fixes)",
+           "[plugin][capturepanel][recordmode]")
+{
+    using namespace vocalsynth;
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlain (p, params::source, (float) static_cast<int> (params::Source::testPattern));
+    setPlain (p, params::testPattern, (float) static_cast<int> (TestPattern::notes));
+    setPlain (p, params::captureMode, 1.0f); // Record
+    setPlain (p, params::recordBars, 0.0f);  // 1 bar
+    auto& worker = p.getCaptureWorker();
+    test::CaptureHost host (p, worker, rate, 512);
+    CapturePanel panel (p);
+    host.runTo (4096, 512);
+    host.steps (1);
+    panel.runTimerTickForTests();
+    REQUIRE (panel.getRecordButtonText() == "Record");
+
+    // Record, then Cancel before the next audio block (realtime F2 / correctness F5): the Cancel wins
+    panel.pressRecord();
+    panel.pressRecord();
+    CHECK (panel.getRecordButtonText() == "Record");
+    host.runTo (8192, 512);
+    host.steps (1);
+    CHECK (worker.getStatus().record.phase == RecordStatus::Phase::idle);
+    panel.runTimerTickForTests();
+    CHECK (panel.getRecordButtonText() == "Record");
+
+    // A 1-bar Record take ends by itself; a press before the panel's next timer tick arms again (it is not
+    // turned into a Cancel by the stale button state)
+    host.playHead.playStartSample = host.position;
+    host.runTo (host.position + 24000, 512); // beat 2 of bar 1
+    panel.pressRecord();
+    host.runTo (host.position + 512, 512);
+    host.steps (1);
+    panel.runTimerTickForTests();
+    CHECK (worker.getStatus().record.phase == RecordStatus::Phase::countIn);
+    CHECK (worker.getStatus().record.startBar == 2);
+    CHECK (panel.getRecordButtonText() == "Cancel");
+    host.runTo (host.playHead.playStartSample + 2 * bar + 24000, 512); // bar 2 recorded, ended at bar 3
+    host.steps (2);
+    REQUIRE (worker.getStatus().record.phase == RecordStatus::Phase::idle);
+    CHECK (panel.getRecordButtonText() == "Cancel"); // no timer tick yet
+    panel.pressRecord();
+    CHECK (panel.getRecordButtonText() == "Cancel");
+    host.runTo (host.position + 512, 512);
+    host.steps (1);
+    CHECK (worker.getStatus().record.phase == RecordStatus::Phase::countIn);
+    CHECK (worker.getStatus().record.startBar == 4);
+}
+
+TEST_CASE ("Background: Max length switched on during a take recorded with Off shows it recording (review F4)",
+           "[plugin][capturepanel][recordmode]")
+{
+    using namespace vocalsynth;
+    VocalSynthProcessor p (Variant::fx);
+    p.getCaptureWorker().setManualSteppingForTests (true);
+    setPlain (p, params::source, (float) static_cast<int> (params::Source::testPattern));
+    setPlain (p, params::testPattern, (float) static_cast<int> (TestPattern::notes));
+    setPlain (p, params::takeMaxBars, 0.0f); // Off
+    auto& worker = p.getCaptureWorker();
+    test::CaptureHost host (p, worker, rate, 512);
+    host.playHead.playStartSample = 0;
+    CapturePanel panel (p);
+    host.runTo (bar + 24000, 512);
+    host.steps (1);
+    panel.runTimerTickForTests();
+    REQUIRE (worker.getStatus().recordingTakeNumber > 0);
+    CHECK (worker.getStatus().openTakeStartBar == 1); // anchored also with Off (status only)
+    CHECK (worker.getStatus().openTakeBars == 0);
+
+    setPlain (p, params::takeMaxBars, 3.0f); // 16 bars: applies from the next take
+    host.runTo (2 * bar, 512);
+    host.steps (1);
+    panel.runTimerTickForTests();
+    CHECK (worker.getStatus().takeMaxBars == 16);
+    CHECK (worker.getStatus().openTakeBars == 0);
+    CHECK (panel.getStatusText().contains ("recording take"));
+    CHECK_FALSE (panel.getStatusText().contains ("waiting for a note"));
 }
 
 TEST_CASE ("Record mode end to end: Record 8 bars at 120 BPM with an ASIO 2048 round trip", "[plugin][capture][recordmode][voice]")
@@ -708,7 +795,7 @@ TEST_CASE ("Background end to end: noise notes and a note just over the cut do n
     host.steps (4);
 
     CAPTURE (host.noteOns);
-    CHECK (host.noteOns >= 20); // the phrases; the bursts may add short notes (that is the point)
+    CHECK (host.noteOns >= 22); // the 20 phrase notes, and the bursts really produce (short) notes
 
     auto takes = p.getCaptureWorker().getTakes();
     std::sort (takes.begin(), takes.end(), [] (const auto& a, const auto& b) { return a->startSample < b->startSample; });

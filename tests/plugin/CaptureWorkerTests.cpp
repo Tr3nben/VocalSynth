@@ -445,6 +445,51 @@ TEST_CASE ("CaptureWorker re-renders a synced WAV when the offset parameters cha
     CHECK (dir.folder.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 1); // the old one is gone
 }
 
+TEST_CASE ("CaptureWorker computes the WAV spans of the re-render check outside the list lock",
+           "[plugin][captureworker][wav][realtime]")
+{
+    // 0.3.1 review (realtime F4): a span is a full Clean render; the message thread polls getStatus() /
+    // getTakes() under the list lock, so dragging Fine Offset must not hold it for a pass over every take
+    TestFolder dir;
+    CaptureTap tap;
+    tap.prepare (rate, 1024);
+    std::atomic<float> mode { 0.0f }, offsetMs { 0.0f }, fineMs { 0.0f };
+    CaptureWorkerSources sources;
+    sources.offsetMode = &mode;
+    sources.offsetMs = &offsetMs;
+    sources.fineOffsetMs = &fineMs;
+    CaptureWorker worker (tap, dir.folder, sources);
+    worker.setManualSteppingForTests (true);
+    worker.start();
+
+    TapFeeder feeder (tap);
+    feeder.worker = &worker;
+    feeder.audio = sine;
+    const int64_t playStart = 48000, playStop = 48000 + 4 * 24000;
+    feeder.transport = [=] (int64_t s) { return vocalsynth::test::playingTransport (s, rate, 120.0, playStart, 0.0, playStop); };
+    const std::vector<TimedEvent> events { noteOnAt (playStart + 3000, 60), noteOffAt (playStart + 30000, 60),
+                                           noteOnAt (playStop + 48000, 62), noteOffAt (playStop + 72000, 62) };
+    feeder.runTo (playStop + 6 * (int64_t) rate, 512, events); // a synced take, then a free take after the gap
+    worker.runStepForTests();
+    REQUIRE (worker.getTakes().size() == 2);
+    stepUntilWavDone (worker, 1);
+    stepUntilWavDone (worker, 2);
+
+    int spans = 0;
+    bool alwaysFree = true;
+    worker.setWavSpanHookForTests ([&]
+                                   {
+                                       ++spans;
+                                       alwaysFree = alwaysFree && worker.isListLockFreeForTests();
+                                   });
+    fineMs = 5.0f;
+    worker.runStepForTests();
+    CHECK (spans == 2);
+    CHECK (alwaysFree);
+    CHECK (worker.getWavState (1).kind == TakeWavState::Kind::preparing); // the synced WAV follows the offset
+    worker.setWavSpanHookForTests ({});
+}
+
 TEST_CASE ("CaptureWorker closes a free take when the host stops processing", "[plugin][captureworker]")
 {
     TestFolder dir;

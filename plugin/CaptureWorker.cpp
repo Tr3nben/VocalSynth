@@ -682,6 +682,19 @@ void CaptureWorker::deleteCachedWav (const TakeWavState& state)
     });
 }
 
+bool CaptureWorker::isListLockFreeForTests() const
+{
+    // try_lock on another thread: well defined also if the calling thread held the lock
+    bool isFree = false;
+    std::thread probe ([this, &isFree]
+                       {
+                           const std::unique_lock lock (listMutex, std::try_to_lock);
+                           isFree = lock.owns_lock();
+                       });
+    probe.join();
+    return isFree;
+}
+
 void CaptureWorker::checkWavRenders()
 {
     // The offset parameters, the free pre-roll or the WAV format changed: re-render cached WAVs whose span
@@ -704,7 +717,12 @@ void CaptureWorker::checkWavRenders()
     }
 
     for (auto& [take, span] : spans)
+    {
         span = TakeRenderer::computeAudioSpan (*take, wavRenderOptions (*take));
+
+        if (wavSpanHookForTests)
+            wavSpanHookForTests();
+    }
 
     {
         const std::scoped_lock lock (listMutex);

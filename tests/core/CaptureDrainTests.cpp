@@ -353,7 +353,9 @@ TEST_CASE ("CaptureDrain M3.1: take limit, Record takes and Grab are identical f
         const auto note = static_cast<uint8_t> (60 + k % 12);
         sc.events.push_back ({ s, VsEvent::makeNoteOn (0, 1, note, 90),
                                { static_cast<int32_t> ((k * 37) % 2000), EventTimingKind::measured, 0 } });
-        sc.events.push_back ({ s + 3077, VsEvent::makeNoteOff (0, 1, note),
+        // Every other note is shorter than the anchor threshold (80 ms, rule 7: it never anchors a take)
+        const int64_t length = k % 2 == 0 ? 7500 : 3077;
+        sc.events.push_back ({ s + length, VsEvent::makeNoteOff (0, 1, note),
                                { static_cast<int32_t> ((k * 53) % 3000), EventTimingKind::model, 0 } });
     }
 

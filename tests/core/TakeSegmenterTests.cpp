@@ -1398,6 +1398,25 @@ TEST_CASE ("TakeSegmenter M3.1: limit Off keeps the 0.3.0 Play .. Stop take; New
         CHECK (r.endTick == 23 * barTicks); // bars 3 .. 25: ends at the bar line after the last note
     }
 
+    SECTION ("Off, then Max length switched on during the take (review F4): anchored, no limit for it")
+    {
+        RecordFeeder f;
+        f.settings (0, withLimit (0));
+        f.transport (0, true, 0.0);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 0); // waiting for a note
+        sing (f, 2 * bar + 1000, 2 * bar + 20000, 60);
+        REQUIRE (f.segmenter.getOpenTake() != nullptr);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 3); // the status line shows it recording
+        f.settings (3 * bar, withLimit (16));
+        CHECK (f.segmenter.getTakeMaxBars() == 16);
+        sing (f, 4 * bar + 1000, 4 * bar + 20000, 62);
+        CHECK (f.segmenter.getOpenTake()->anchorBar == 3);
+        CHECK (f.segmenter.getOpenTake()->maxBars == 0);
+        CHECK (f.segmenter.getOpenTakeBar() == 0);
+        f.advance (30 * bar);
+        CHECK (f.segmenter.getOpenTake()->number == 1); // never cut: the limit applies from the next take
+    }
+
     SECTION ("New take")
     {
         RecordFeeder f;

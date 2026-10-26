@@ -71,7 +71,9 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3, M3 (
   pluginval Strictness 10 beide VST3, Steinberg-Validator 47/47 beide VST3, clap-validator 32 bestanden / 0 Fehler
   beide CLAP (1 bekannte Warnung `state-invalid-random`, JUCE-CLAP-Wrapper). vs-eval-Standalone (Korpus-CI) baut,
   2/2 ctests; Korpus-pytest mit vs-eval 30/30.
-- **Nächste Schritte:** Review (Echtzeit + Korrektheit) mit Gegenprüfung → Fixes → Commit/Push → CI → ZIP-Link an
+- **Review erledigt (2026-10-26):** 11 bestätigte Befunde behoben, je mit Regressionstest (Liste in
+  [M3.1-DESIGN.md](M3.1-DESIGN.md) Abschnitt 12); danach 511/511 ctest, pluginval 10, VST3- und clap-validator grün.
+- **Nächste Schritte:** CI → ZIP-Link an
   den Nutzer → Kurztest in FL Studio 2026 ([docs/M3-TESTING.md](M3-TESTING.md) Abschnitt 0). **Den
   Korpus-Workflow auf `m3.1-takes` neu laufen lassen** (`gh workflow run corpus-eval.yml --ref m3.1-takes`): die
   Zahlen oben sind lokal (vocadito_1 und ein halbsynthetischer Satz), die Wirkung auf Dagstuhl ChoirSet und

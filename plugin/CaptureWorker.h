@@ -227,6 +227,13 @@ public:
         another drive); the worker must keep draining meanwhile. */
     [[nodiscard]] std::unique_lock<std::mutex> holdFileLockForTests() { return std::unique_lock<std::mutex> (fileMutex); }
 
+    /** Tests (set before the steps run): called on the worker thread right after the WAV re-render check
+        computed one take's span (a full Clean render), which must happen outside listMutex. */
+    void setWavSpanHookForTests (std::function<void()> hook) { wavSpanHookForTests = std::move (hook); }
+
+    /** Tests: whether listMutex is free at this moment (try_lock on a helper thread, released at once). */
+    bool isListLockFreeForTests() const;
+
 private:
     struct Entry
     {
@@ -336,6 +343,8 @@ private:
 
     mutable std::mutex optionsMutex;
     CaptureWorkerOptions pendingOptions;
+
+    std::function<void()> wavSpanHookForTests;
 
     mutable std::mutex listMutex;
     std::vector<Entry> entries; ///< newest first

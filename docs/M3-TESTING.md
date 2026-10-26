@@ -84,9 +84,10 @@ Kurztest für 0.3.1 (ca. 15 Minuten), Projekt 120 BPM, Metronom an, ASIO wie gew
    „… – take 1, bar 1/4 (bar 3)“.
    *Zwei Takes: „Bar 3 · 4 bars“ und „Bar 7 · 2 bars“. Den zweiten als MIDI ziehen und an Takt 7 legen: Die Noten
    schließen an den ersten Take an.*
-3. **Geräusche:** *Max length* = *16 bars*. *Play*, 2 Takte singen, dann 4 Takte lang mit der Maus klicken oder auf
-   den Tisch klopfen, *Stop*.
-   *Mit Version Clean ist der Take ca. 2 Takte lang (nicht 6); die WAV endet am selben Taktstrich.*
+3. **Geräusche:** *Max length* = *16 bars*. *Play*, in Takt 1 und 2 ein paar Mal mit der Maus klicken, ab Takt 3
+   2 Takte singen, dann 4 Takte lang klicken oder auf den Tisch klopfen, *Stop*.
+   *Ein Take „Bar 3 …“ (die Klicks davor legen den Start nicht fest). Mit Version Clean ist er ca. 2 Takte lang
+   (nicht 6); die WAV endet am selben Taktstrich.*
 4. **Record bei laufendem Transport:** *Mode* = *Record*, *Length* = *8 bars*. *Play*, mitten in Takt 4 **Record**
    drücken.
    *„Starts at bar 5 – … beats“, ab Takt 5 rot „Recording bar 1/8 …“ bis „8/8“, die Aufnahme stoppt am Anfang von
@@ -285,7 +286,8 @@ Bitte als Liste oder Tabelle (Deutsch ist perfekt):
 - **Free-Takes** werden mit dem BPM-Wert von FL beim Singen in Ticks umgerechnet; in einem Projekt mit anderem
   Tempo werden sie gestreckt oder gestaucht.
 - Eine Note, die bis zu 1/32 Schlag **vor** dem Taktstrich beginnt, zählt zum neuen Takt und rutscht auf dessen
-  Anfang (höchstens 15,6 ms bei 120 BPM).
+  Anfang (höchstens 15,6 ms bei 120 BPM). Für den Starttakt eines Hintergrund-Takes mit *Max length* gilt mehr
+  Spielraum: bis eine 32stel-Note (1/8 Schlag, 62,5 ms bei 120 BPM) vor dem Taktstrich (Abschnitt 0).
 - Ein Tempowechsel innerhalb eines sehr großen Audio-Blocks wird erst am nächsten Block bemerkt (bei 2048 Samples
   höchstens ca. 43 ms); die Abweichung bleibt sehr klein.
 - **Speicher:** 10 Minuten Stimme kosten ca. 115 MB pro Instanz (48 kHz), bei 96 kHz ca. 230 MB, bei 192 kHz
