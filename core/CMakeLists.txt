@@ -55,7 +55,49 @@ add_library(VocalSynthCore STATIC
     src/WavWriter.cpp
     # M3.1 take length and Record mode (docs/M3.1-DESIGN.md)
     include/vocalsynth/CaptureMode.h
-    src/CaptureMode.cpp)
+    src/CaptureMode.cpp
+    # 0.4.0 synth (docs/SYNTH-DESIGN.md 19): A = wavetable, B = voice, C = engine + FX + expression
+    include/vocalsynth/synth/RealFft.h
+    include/vocalsynth/synth/Wavetable.h
+    include/vocalsynth/synth/WavetableBuilder.h
+    include/vocalsynth/synth/FactoryWavetables.h
+    include/vocalsynth/synth/WavReader.h
+    include/vocalsynth/synth/WavetableOscillator.h
+    include/vocalsynth/synth/SubOscillator.h
+    include/vocalsynth/synth/NoiseSource.h
+    include/vocalsynth/synth/SvfFilter.h
+    include/vocalsynth/synth/Envelope.h
+    include/vocalsynth/synth/Lfo.h
+    include/vocalsynth/synth/ModMatrix.h
+    include/vocalsynth/synth/SynthSettings.h
+    include/vocalsynth/synth/SynthVoice.h
+    include/vocalsynth/synth/VoiceAllocator.h
+    include/vocalsynth/synth/SynthEngine.h
+    include/vocalsynth/synth/fx/Chorus.h
+    include/vocalsynth/synth/fx/StereoDelay.h
+    include/vocalsynth/synth/fx/FdnReverb.h
+    include/vocalsynth/ExpressionFrame.h
+    include/vocalsynth/ExpressionTracker.h
+    src/synth/RealFft.cpp
+    src/synth/Wavetable.cpp
+    src/synth/WavetableBuilder.cpp
+    src/synth/FactoryWavetables.cpp
+    src/synth/WavReader.cpp
+    src/synth/WavetableOscillator.cpp
+    src/synth/SubOscillator.cpp
+    src/synth/NoiseSource.cpp
+    src/synth/SvfFilter.cpp
+    src/synth/Envelope.cpp
+    src/synth/Lfo.cpp
+    src/synth/ModMatrix.cpp
+    src/synth/SynthSettings.cpp
+    src/synth/SynthVoice.cpp
+    src/synth/VoiceAllocator.cpp
+    src/synth/SynthEngine.cpp
+    src/synth/fx/Chorus.cpp
+    src/synth/fx/StereoDelay.cpp
+    src/synth/fx/FdnReverb.cpp
+    src/ExpressionTracker.cpp)
 
 target_include_directories(VocalSynthCore PUBLIC include)
 target_compile_features(VocalSynthCore PUBLIC cxx_std_23)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SynthParameters.h"
 #include "vocalsynth/CaptureMode.h"
 #include "vocalsynth/CaptureOptions.h"
 #include "vocalsynth/VoiceSettings.h"
@@ -319,6 +320,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (recordBars, "Record Length", recordBarsChoiceNames,
                                                               defaultRecordBarsIndex));
+
+    // --- 0.4.0 synth (appended after the M3.1 parameters, version hint 4, plugin/SynthParameters.h,
+    // docs/SYNTH-DESIGN.md 15) ---
+    addSynthParameters (layout);
 
     return layout;
 }

@@ -1,3 +1,6 @@
 # Windows batch files and their readme must keep CRLF line endings
 *.bat text eol=crlf
 packaging/windows/*.txt text eol=crlf
+
+# Binary state fixtures for tests
+tests/data/*.bin binary

@@ -87,9 +87,11 @@ TEST_CASE ("The parameter layout has the M1, M2 and M3 parameters with unique ID
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter))
             ids.add (ranged->paramID);
 
-    // 7 M1 + 13 M2 + 5 M3 + 3 M3.1 (RecordModeTests.cpp), appended in that order (IDs are permanent)
-    CHECK (ids.size() == 28);
-    CHECK (parameters.size() == 28);
+    // 7 M1 + 13 M2 + 5 M3 + 3 M3.1 (RecordModeTests.cpp) + 101 synth (0.4.0, SynthParameterTests.cpp), appended
+    // in that order (IDs are permanent)
+    CHECK (ids.size() == 28 + vocalsynth::params::numSynthParameters);
+    CHECK (parameters.size() == 28 + vocalsynth::params::numSynthParameters);
+    CHECK (ids.indexOf ("synthOn") == 28);
     auto unique = ids;
     unique.removeDuplicates (false);
     CHECK (unique.size() == ids.size());
@@ -218,19 +220,25 @@ TEST_CASE ("State round trip: capture parameters and settings, one CAPTURE child
 
     const auto xml = juce::AudioProcessor::getXmlFromBinary (again.getData(), (int) again.getSize());
     REQUIRE (xml != nullptr);
-    CHECK (xml->getNumChildElements() == 29); // 28 PARAM + 1 CAPTURE
-    int captureChildren = 0;
+    // 28 PARAM + 101 synth PARAM (0.4.0) + 1 CAPTURE (+ at most one SYNTH child from 0.4.0 on, docs/SYNTH-DESIGN.md 13)
+    int captureChildren = 0, synthChildren = 0, paramChildren = 0;
 
     for (auto* child : xml->getChildIterator())
     {
         if (child->hasTagName ("CAPTURE"))
             ++captureChildren;
+        else if (child->hasTagName ("SYNTH"))
+            ++synthChildren;
+        else if (child->hasTagName ("PARAM"))
+            ++paramChildren;
         else
-            CHECK (child->hasTagName ("PARAM"));
+            FAIL_CHECK ("unexpected child " << child->getTagName());
     }
 
+    CHECK (paramChildren == 28 + numSynthParameters);
     CHECK (captureChildren == 1);
-    CHECK (again.getSize() < 8192); // never take data
+    CHECK (synthChildren <= 1);
+    CHECK (again.getSize() < 16384); // never take data (129 parameters ~ 6 KB)
 }
 
 TEST_CASE ("A state without capture settings loads the capture defaults", "[plugin][capture][state]")

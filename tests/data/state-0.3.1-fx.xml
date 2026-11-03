@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<PARAMS>
+  <PARAM id="bendMode" value="2.0"/>
+  <PARAM id="bendRange" value="1.0"/>
+  <PARAM id="captureAudio" value="0.0"/>
+  <PARAM id="captureEnabled" value="1.0"/>
+  <PARAM id="captureFineOffsetMs" value="0.0"/>
+  <PARAM id="captureMode" value="1.0"/>
+  <PARAM id="captureOffsetMode" value="1.0"/>
+  <PARAM id="captureOffsetMs" value="12.5"/>
+  <PARAM id="ccNumber" value="1.0"/>
+  <PARAM id="gateThreshold" value="-42.5"/>
+  <PARAM id="key" value="2.0"/>
+  <PARAM id="legato" value="1.0"/>
+  <PARAM id="midiChannel" value="3.0"/>
+  <PARAM id="minNoteLength" value="90.0"/>
+  <PARAM id="monitorTone" value="1.0"/>
+  <PARAM id="muteDry" value="1.0"/>
+  <PARAM id="octaveShift" value="1.0"/>
+  <PARAM id="pitchAlgorithm" value="1.0"/>
+  <PARAM id="recordBars" value="2.0"/>
+  <PARAM id="scale" value="7.0"/>
+  <PARAM id="source" value="0.0"/>
+  <PARAM id="stickiness" value="65.0"/>
+  <PARAM id="takeMaxBars" value="3.0"/>
+  <PARAM id="testPattern" value="0.0"/>
+  <PARAM id="testTempo" value="96.5"/>
+  <PARAM id="velocitySensitivity" value="40.0"/>
+  <PARAM id="virtualMidiOut" value="0.0"/>
+  <PARAM id="voiceRange" value="3.0"/>
+  <CAPTURE version="1" exportVersion="0" quantize="5" quantizeStrength="50.0"
+           quantizeEnds="1" bends="0" controlChanges="1" cleanMinNoteMs="80.0"
+           freePreRollMs="0.0" smfFormat="0" wavFormat="1" grabBars="16"
+           grabSeconds="30" takeGapSeconds="5.5" audioHistoryMinutes="10.0"
+           takesFolder=""/>
+</PARAMS>

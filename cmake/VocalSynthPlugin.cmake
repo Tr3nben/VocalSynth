@@ -44,7 +44,36 @@ target_sources(VocalSynthPluginCode INTERFACE
     ${CMAKE_SOURCE_DIR}/plugin/ExportFiles.h
     ${CMAKE_SOURCE_DIR}/plugin/ExportFiles.cpp
     ${CMAKE_SOURCE_DIR}/plugin/FileDragSource.h
-    ${CMAKE_SOURCE_DIR}/plugin/FileDragSource.cpp)
+    ${CMAKE_SOURCE_DIR}/plugin/FileDragSource.cpp
+    # 0.4.0 synth (docs/SYNTH-DESIGN.md 19): D = plugin data, F = presets, E = UI
+    ${CMAKE_SOURCE_DIR}/plugin/SynthParameters.h
+    ${CMAKE_SOURCE_DIR}/plugin/SynthSettingsBuilder.h
+    ${CMAKE_SOURCE_DIR}/plugin/SynthSettingsBuilder.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/WavetableStore.h
+    ${CMAKE_SOURCE_DIR}/plugin/WavetableStore.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/WavetableWorker.h
+    ${CMAKE_SOURCE_DIR}/plugin/WavetableWorker.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/SynthState.h
+    ${CMAKE_SOURCE_DIR}/plugin/SynthState.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/PresetManager.h
+    ${CMAKE_SOURCE_DIR}/plugin/PresetManager.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/FactoryPresets.h
+    ${CMAKE_SOURCE_DIR}/plugin/FactoryPresets.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ui/Theme.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/VsLookAndFeel.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/VsLookAndFeel.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ui/Knob.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/Knob.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ui/ChoiceChip.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/ChoiceChip.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ui/SectionPanel.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/SectionPanel.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ui/WavetableView.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/WavetableView.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ui/PresetBar.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/PresetBar.cpp
+    ${CMAKE_SOURCE_DIR}/plugin/ui/SynthPanel.h
+    ${CMAKE_SOURCE_DIR}/plugin/ui/SynthPanel.cpp)
 
 target_include_directories(VocalSynthPluginCode INTERFACE ${CMAKE_SOURCE_DIR}/plugin)
 
