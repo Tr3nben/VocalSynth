@@ -13,17 +13,9 @@ PresetManager::PresetManager (juce::AudioProcessorValueTreeState& state, Wavetab
       worker (w),
       userFolder (getDefaultUserFolder())
 {
-    for (const auto& id : params::getSynthParameterIds())
-        if (params::isPresetParameter (id))
-            apvts.addParameterListener (id, this);
 }
 
-PresetManager::~PresetManager()
-{
-    for (const auto& id : params::getSynthParameterIds())
-        if (params::isPresetParameter (id))
-            apvts.removeParameterListener (id, this);
-}
+PresetManager::~PresetManager() = default;
 
 juce::Array<PresetInfo> PresetManager::getPresets() const
 {
@@ -55,7 +47,7 @@ bool PresetManager::load (const PresetInfo&)
 bool PresetManager::loadFactory (int)
 {
     // Scaffold: the slot info is read so the members are in use; agent D sets parameters and tables here
-    juce::ignoreUnused (store.getSlot (0), worker.getStatus());
+    juce::ignoreUnused (apvts.state, store.getSlot (0), worker.getStatus());
     return false;
 }
 
@@ -71,13 +63,27 @@ bool PresetManager::saveUserPreset (const juce::String&, PresetCategory, juce::S
 
 juce::String PresetManager::getCurrentName() const
 {
+    const std::scoped_lock lock (mutex);
     return currentName;
+}
+
+bool PresetManager::isModified() const
+{
+    const std::scoped_lock lock (mutex);
+    return modifiedFlag;
+}
+
+void PresetManager::markModified()
+{
+    const std::scoped_lock lock (mutex);
+    modifiedFlag = true;
 }
 
 void PresetManager::setCurrent (const juce::String& name, bool isModifiedFlag)
 {
+    const std::scoped_lock lock (mutex);
     currentName = name;
-    modified.store (isModifiedFlag, std::memory_order_relaxed);
+    modifiedFlag = isModifiedFlag;
 }
 
 juce::File PresetManager::getDefaultUserFolder()
@@ -96,7 +102,5 @@ void PresetManager::setUserFolder (const juce::File& folder)
 {
     userFolder = folder;
 }
-
-void PresetManager::parameterChanged (const juce::String&, float) {}
 
 } // namespace vocalsynth

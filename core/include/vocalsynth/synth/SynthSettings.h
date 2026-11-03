@@ -85,9 +85,23 @@ enum class TempoDivision
 };
 inline constexpr int numTempoDivisions = 15;
 
-/** Length of a division in quarter notes (a bar is always 4 quarter notes in 0.4), 0 for off. */
-constexpr double tempoDivisionQuarterNotes (TempoDivision d) noexcept
+/** Host transport for the synced LFOs and the delay (the processor reads the play head once per block, like
+    the capture). A bar follows the host time signature like the capture's bars (docs/SYNTH-DESIGN.md 8.2,
+    22): quarterNotesPerBar = numerator * 4 / denominator (6/8 -> 3, 3/4 -> 3, 7/8 -> 3.5). */
+struct SynthTransport
 {
+    double bpm = 120.0;              ///< <= 0 or non-finite: 120
+    double quarterNotesPerBar = 4.0; ///< <= 0 or non-finite: 4 (no time signature from the host)
+
+    constexpr bool operator== (const SynthTransport&) const noexcept = default;
+};
+
+/** Length of a division in quarter notes, 0 for off. The bar divisions (1 / 2 / 4 bars) are multiples of
+    quarterNotesPerBar (SynthTransport; <= 0 is treated as 4); the note divisions never depend on it. */
+constexpr double tempoDivisionQuarterNotes (TempoDivision d, double quarterNotesPerBar = 4.0) noexcept
+{
+    const double bar = quarterNotesPerBar > 0.0 && quarterNotesPerBar < 1.0e6 ? quarterNotesPerBar : 4.0;
+
     switch (d)
     {
         case TempoDivision::off:    return 0.0;
@@ -102,9 +116,9 @@ constexpr double tempoDivisionQuarterNotes (TempoDivision d) noexcept
         case TempoDivision::d1_4:   return 1.0;
         case TempoDivision::d1_4D:  return 1.5;
         case TempoDivision::d1_2:   return 2.0;
-        case TempoDivision::bar1:   return 4.0;
-        case TempoDivision::bars2:  return 8.0;
-        case TempoDivision::bars4:  return 16.0;
+        case TempoDivision::bar1:   return bar;
+        case TempoDivision::bars2:  return 2.0 * bar;
+        case TempoDivision::bars4:  return 4.0 * bar;
     }
 
     return 0.0;
@@ -153,9 +167,10 @@ enum class ModDest
     lfo2Rate,
     chorusMix,
     delayMix,
-    reverbMix
+    reverbMix,
+    pitch       ///< the whole voice: Osc A + B, sub and keytrack (critique 0.4: one slot for vibrato)
 };
-inline constexpr int numModDests = 21;
+inline constexpr int numModDests = 22;
 
 /** The control tick (docs/SYNTH-DESIGN.md 3): modulation, envelopes, LFOs, filter coefficients and mip
     levels are evaluated every controlTickSamples samples at ABSOLUTE positions (multiples of it since the
@@ -180,6 +195,7 @@ struct Range
 namespace limits
 {
 inline constexpr Range synthVolumeDb { -60.0f, 6.0f };   ///< <= min: silent
+inline constexpr Range ampGainDb { -24.0f, 12.0f };      ///< preset level (patch gain), not a mix control
 inline constexpr Range dryLevelDb { -60.0f, 0.0f };      ///< <= min: silent
 inline constexpr Range glideTimeMs { 0.0f, 2000.0f };
 inline constexpr Range percent { 0.0f, 100.0f };
@@ -292,6 +308,7 @@ struct SynthSettings
     float glideTimeMs = 0.0f;
     GlideMode glideMode = GlideMode::legatoOnly;
     float ampVelocityPercent = 50.0f;
+    float ampGainDb = 0.0f; ///< patch gain after Env 1 (presets level themselves with it; synthVolume is the mix)
 
     std::array<OscSettings, numOscillators> osc { OscSettings {}, OscSettings { .on = false } };
 

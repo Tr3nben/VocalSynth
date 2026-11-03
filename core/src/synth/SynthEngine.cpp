@@ -33,6 +33,7 @@ void SynthEngine::prepare (double newSampleRate, int)
 void SynthEngine::reset() noexcept
 {
     samplePosition = 0;
+    tables.fill (nullptr);
     allocator.reset();
 
     for (auto& v : voices)

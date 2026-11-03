@@ -98,7 +98,8 @@ add_executable(VocalSynthPluginTests
     plugin/FactoryPresetsTests.cpp
     plugin/GoldenPresetTests.cpp
     plugin/SynthPanelTests.cpp
-    plugin/UiFoundationTests.cpp)
+    plugin/UiFoundationTests.cpp
+    plugin/SynthProcessorTests.cpp)
 target_link_libraries(VocalSynthPluginTests PRIVATE VocalSynthPluginCode Catch2::Catch2)
 target_compile_definitions(VocalSynthPluginTests PRIVATE
     $<TARGET_PROPERTY:VocalSynthFX,COMPILE_DEFINITIONS>

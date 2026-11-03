@@ -20,7 +20,7 @@ namespace vocalsynth::synth
     - Output: L = lines 0, 2, 4, 6, R = lines 1, 3, 5, 7 (signs alternating), scaled by 1 / sqrt (8).
     - Mix: dual-linear law (Chorus), on/off with a 10 ms crossfade, cleared when off; silence detection
       as the delay (input 0 and every line below 1e-6 for the longest line length * 4).
-    - NaN guard: a non-finite state clears all lines (getNanResetCount).
+    - NaN guard: a non-finite state clears all lines at the next beginTick() (getNanResetCount).
     prepare() allocates for the largest size at the given rate; the rest is real-time safe. Owner: agent C. */
 class FdnReverb
 {

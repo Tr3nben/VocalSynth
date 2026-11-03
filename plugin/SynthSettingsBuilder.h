@@ -19,9 +19,24 @@ namespace vocalsynth
 class SynthSettingsBuilder
 {
 public:
+    /** Plain values of every synth parameter in params::getSynthParameterIds() order. */
+    using PlainValues = std::array<float, params::numSynthParameters>;
+
     explicit SynthSettingsBuilder (juce::AudioProcessorValueTreeState& apvts);
 
+    /** fromPlain (the raw atomics' current values). */
     synth::SynthSettings build() const noexcept;
+
+    /** Plain values -> settings (choices / ints rounded, bools >= 0.5, then sanitised()); no APVTS needed:
+        golden renders (FactoryPresets values by ID) and tests. Real-time safe. */
+    static synth::SynthSettings fromPlain (const PlainValues& plain) noexcept;
+
+    /** The inverse for every synth parameter (fromPlain (toPlain (s)) == s.sanitised()); toPlain
+        (SynthSettings {}) = the parameter defaults. */
+    static PlainValues toPlain (const synth::SynthSettings& settings) noexcept;
+
+    /** Index of a synth parameter ID in PlainValues, -1 if it is not one. Message thread (string compare). */
+    static int indexOf (const juce::String& parameterId);
 
 private:
     /** In params::getSynthParameterIds() order; never null after construction. */

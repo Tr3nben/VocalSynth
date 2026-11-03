@@ -35,8 +35,8 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3, M3 (
 
 - Branch `v0.4-synth` von `m3.1-takes` (0.3.1, Nutzertest offen, noch nicht in `master`). Plan:
   [ROADMAP-0.4.md](ROADMAP-0.4.md) Abschnitt 4.1, Entscheidungen E1–E6 vom Nutzer angenommen (2026-11-03).
-- Phase 0 erledigt: [SYNTH-DESIGN.md](SYNTH-DESIGN.md) + eingefrorenes Gerüst (101 Synth-Parameter, Version-Hint 4,
-  0.3.1-State-Fixtures), Verhalten unverändert. Als Nächstes: Kritik am Design, dann Wellen A/B, C/D, E/F,
+- Phase 0 + Kritik (F1–F30, SYNTH-DESIGN Abschnitt 23) erledigt: [SYNTH-DESIGN.md](SYNTH-DESIGN.md) + eingefrorenes Gerüst (102 Synth-Parameter, Version-Hint 4,
+  0.3.1-State-Fixtures), Verhalten unverändert. Als Nächstes: Wellen A/B, C/D, E/F,
   Integration, Probehör-ZIP, Review.
 
 ## Davor: M3.1 – Take-Länge, Record-Modus, weniger Zusatznoten (v0.3.1)

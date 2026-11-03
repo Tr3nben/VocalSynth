@@ -18,7 +18,8 @@ using ModDestValues = std::array<float, numModDests>;
     position +1 (whole table), pitch +12 semitones, osc / sub / noise level +1 (linear, added to the
     knob's 0..1 and clamped 0..1), detune +100 cents (clamped 0..200), cutoff +60 semitones (5 octaves),
     resonance +1 (clamped 0..1), drive +24 dB (clamped 0..24), amp level +1 (gain *= clamp (1 + m, 0, 2)),
-    pan +1 (clamped -1..1), LFO rate +4 octaves, FX mix +1 (added to the mix fraction, clamped 0..1). */
+    pan +1 (clamped -1..1), LFO rate +4 octaves, FX mix +1 (added to the mix fraction, clamped 0..1), pitch
+    +12 semitones (added to the voice's note pitch like the bend: Osc A, Osc B, sub and filter keytrack). */
 constexpr float modDestScale (ModDest dest) noexcept
 {
     switch (dest)
@@ -44,6 +45,7 @@ constexpr float modDestScale (ModDest dest) noexcept
         case ModDest::chorusMix:
         case ModDest::delayMix:
         case ModDest::reverbMix:       return 1.0f;
+        case ModDest::pitch:           return 12.0f;
     }
 
     return 0.0f;

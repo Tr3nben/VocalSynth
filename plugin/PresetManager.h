@@ -6,7 +6,8 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-#include <atomic>
+#include <mutex>
+#include <vector>
 
 namespace vocalsynth
 {
@@ -34,11 +35,17 @@ struct PresetInfo
     load(): every preset parameter is set (missing IDs -> default, unknown IDs ignored, values clamped) with
     beginChangeGesture / setValueNotifyingHost / endChangeGesture per parameter on the MESSAGE thread; the
     tables go through the WavetableWorker. Never touches synthOn / synthVolume / dryLevel or any voice, test or
-    capture parameter. "Modified" = a preset parameter changed after the last load / save (APVTS listener).
+    capture parameter. "Modified" = a preset parameter's plain value differs from the snapshot taken at the
+    last load / save / setCurrent (compared against the APVTS raw atomics when isModified() is called; NO
+    APVTS listener: a listener runs on the audio thread during host automation, and JUCE's ListenerList may
+    allocate there).
     User presets live in getUserFolder() (<Documents>/VocalSynth/Presets, created on the first save; any
     Unicode path); names are sanitised for the file system (juce::File::createLegalFileName).
-    Message thread only. Owner: agent D. */
-class PresetManager : private juce::AudioProcessorValueTreeState::Listener
+    Tables: loaded SYNCHRONOUSLY (WavetableWorker::loadFactoryNow / loadEmbeddedNow) so the preset is
+    complete when load() returns. Threads: message thread, except getCurrentName(), isModified() and
+    setCurrent(), which getStateInformation / setStateInformation may call from any non-audio thread
+    (internal mutex). Owner: agent D. */
+class PresetManager
 {
 public:
     static constexpr int formatVersion = 1;
@@ -46,7 +53,7 @@ public:
     static inline const juce::Identifier presetTreeType { "VocalSynthPreset" };
 
     PresetManager (juce::AudioProcessorValueTreeState& apvts, WavetableStore& store, WavetableWorker& worker);
-    ~PresetManager() override;
+    ~PresetManager();
 
     /** Factory presets (FactoryPresets order) followed by the user presets (sorted by name). */
     juce::Array<PresetInfo> getPresets() const;
@@ -64,9 +71,14 @@ public:
     bool saveUserPreset (const juce::String& name, PresetCategory category, juce::String& errorMessage);
 
     juce::String getCurrentName() const;
-    bool isModified() const noexcept { return modified.load (std::memory_order_relaxed); }
+    /** True if a preset parameter differs from the snapshot (see class comment) or setCurrent() said so. */
+    bool isModified() const;
 
-    /** SynthState restore: name and modified flag of the project. */
+    /** A change that is not a parameter (the UI picked or imported a table) makes the preset modified. */
+    void markModified();
+
+    /** SynthState restore (after apvts.replaceState): name and modified flag of the project; takes the
+        snapshot of the current values. */
     void setCurrent (const juce::String& name, bool isModifiedFlag);
 
     static juce::File getDefaultUserFolder();
@@ -74,14 +86,15 @@ public:
     void setUserFolder (const juce::File& folder); ///< tests / settings
 
 private:
-    void parameterChanged (const juce::String& parameterID, float newValue) override;
 
     juce::AudioProcessorValueTreeState& apvts;
     WavetableStore& store;
     WavetableWorker& worker;
     juce::File userFolder;
+    mutable std::mutex mutex;          ///< guards currentName, modifiedFlag, snapshot (never the audio thread)
     juce::String currentName { "Init" };
-    std::atomic<bool> modified { false };
+    bool modifiedFlag = false;         ///< "modified" as restored from a project (setCurrent)
+    std::vector<float> snapshot;       ///< plain values of the preset parameters at the last load / save
     juce::Array<PresetInfo> userPresets;
 };
 

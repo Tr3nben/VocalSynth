@@ -28,7 +28,7 @@ void StereoDelay::reset() noexcept
     onGain = 0.0f;
 }
 
-void StereoDelay::beginTick (const DelaySettings&, double, float, int) noexcept {}
+void StereoDelay::beginTick (const DelaySettings&, const SynthTransport&, float, int) noexcept {}
 
 void StereoDelay::process (float*, float*, int) noexcept {}
 

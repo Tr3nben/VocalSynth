@@ -9,15 +9,19 @@
 namespace vocalsynth::synth
 {
 
-/** Sub oscillator: sine, triangle or square, band-limited from its own small mip tables (built in
-    prepare(): one Wavetable of 1 frame per shape, same mip rules as WavetableOscillator), mono, added to
-    both channels (docs/SYNTH-DESIGN.md 6.2). Pitch: the voice's note pitch (glide, bend; NOT Osc A's
-    octave / semi / fine / pitch modulation) minus 1 or 2 octaves.
+/** Sub oscillator: sine, triangle or square, band-limited from mip tables (one Wavetable of 1 frame per
+    shape, same mip and Hermite rules as WavetableOscillator), mono, added to both channels
+    (docs/SYNTH-DESIGN.md 6.2). The three tables are immutable and SHARED by every sub oscillator of the
+    process: built once by the first prepare() (function-local static, thread-safe initialisation, never
+    on the audio thread) - not 3 tables x 16 voices x instances. Pitch: the voice's note pitch (glide, bend,
+    the "Pitch" mod destination; NOT Osc A's octave / semi / fine / Osc A Pitch modulation) minus 1 or 2
+    octaves.
     process side real-time safe; audio thread only. Owner: agent A. */
 class SubOscillator
 {
 public:
-    /** Builds the three shape tables (allocates; NOT real-time). Calls reset(). */
+    /** Builds the shared shape tables on the first call in the process (allocates; NOT real-time). Calls
+        reset(). */
     void prepare (double sampleRate);
 
     void reset() noexcept;
@@ -34,7 +38,7 @@ public:
 
 private:
     double sampleRate = 48000.0;
-    std::array<std::unique_ptr<Wavetable>, numSubShapes> tables;
+    const std::array<std::unique_ptr<Wavetable>, numSubShapes>* tables = nullptr; ///< shared, see class comment
     SubShape shape = SubShape::sine;
     double phase = 0.0;
     double increment = 0.0;

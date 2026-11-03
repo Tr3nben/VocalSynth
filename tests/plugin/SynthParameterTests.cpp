@@ -1,4 +1,4 @@
-// 0.4.0 synth parameters (docs/SYNTH-DESIGN.md 15): 101 parameters appended after the M3.1 ones, version hint 4,
+// 0.4.0 synth parameters (docs/SYNTH-DESIGN.md 15): 102 parameters appended after the M3.1 ones, version hint 4,
 // unique IDs, defaults = the core SynthSettings defaults, choice lists = the core enums, value texts.
 // Written by the design agent; owner from the implementation phase on: agent D.
 
@@ -81,6 +81,7 @@ TEST_CASE ("Synth parameter defaults are the core SynthSettings defaults", "[plu
     CHECK (getPlain (p, dryLevel) == Catch::Approx (0.0f));
     CHECK (getPlain (p, playMode) == Catch::Approx (1.0f)); // Legato (E6)
     CHECK (getPlain (p, glideMode) == Catch::Approx (1.0f)); // Legato Only
+    CHECK (getPlain (p, ampGain) == Catch::Approx (0.0f));
     CHECK (getPlain (p, oscParameters[0].on) == Catch::Approx (1.0f));
     CHECK (getPlain (p, oscParameters[1].on) == Catch::Approx (0.0f));
     CHECK (getPlain (p, oscParameters[0].position) == Catch::Approx (50.0f));
@@ -113,6 +114,7 @@ TEST_CASE ("Synth choice lists match the core enums", "[plugin][parameters][synt
 
     CHECK (modSourceChoices[static_cast<int> (synth::ModSource::voicePitch)] == "Voice Pitch");
     CHECK (modDestChoices[static_cast<int> (synth::ModDest::reverbMix)] == "Reverb Mix");
+    CHECK (modDestChoices[static_cast<int> (synth::ModDest::pitch)] == "Pitch");
     CHECK (filterModeChoices[static_cast<int> (synth::FilterMode::notch)] == "Notch");
     CHECK (tempoDivisionChoices[static_cast<int> (synth::TempoDivision::bars4)] == "4 Bars");
 }
@@ -127,6 +129,7 @@ TEST_CASE ("Presets set every synth parameter except the mix", "[plugin][paramet
     CHECK_FALSE (isPresetParameter (gateThreshold.getParamID()));
     CHECK_FALSE (isPresetParameter (captureEnabled.getParamID()));
     CHECK (isPresetParameter (filterCutoff.getParamID()));
+    CHECK (isPresetParameter (ampGain.getParamID())); // the patch level is part of the preset
     CHECK (isPresetParameter (modParameters[3].dest.getParamID()));
 
     int count = 0;
@@ -151,6 +154,8 @@ TEST_CASE ("Synth value texts carry no unit and parse back", "[plugin][parameter
     CHECK (cutoff.convertFrom0to1 (0.5f) == Catch::Approx (std::sqrt (20.0f * 20000.0f)).epsilon (1e-4));
 
     CHECK (getParameter (p, synthVolume).getCurrentValueAsText() == "-6.0");
+    CHECK (getParameter (p, ampGain).getCurrentValueAsText() == "0.0");
+    CHECK (getParameter (p, ampGain).getLabel() == "dB");
     CHECK (getParameter (p, lfoParameters[1].rate).getCurrentValueAsText() == "0.50");
     CHECK (getParameter (p, envelopeParameters[0].attack).getCurrentValueAsText() == "5.0");
     CHECK (getParameter (p, envelopeParameters[0].decay).getCurrentValueAsText() == "300");

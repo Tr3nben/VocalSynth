@@ -13,6 +13,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -27,6 +28,9 @@ struct SynthPanelContext
     WavetableStore& store;
     WavetableWorker& worker;
     const ExpressionPublisher& expression;
+    /** Text of the top row's DSP display (the processor's synth load, formatted by the editor); empty
+        function = no display. Message thread. */
+    std::function<juce::String()> dspLoadText {};
 };
 
 /** The "Synth" page of 0.4 (docs/SYNTH-DESIGN.md 20.6), content area 1100 x 670 design pixels at 100 %:

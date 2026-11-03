@@ -13,7 +13,9 @@ void WavetableOscillator::prepare (double newSampleRate) noexcept
 
 void WavetableOscillator::reset() noexcept
 {
+    table = nullptr;
     previousTable = nullptr;
+    pendingTable = nullptr;
     mipLevel = 0;
     unison = 1;
     phase.fill (0.0);

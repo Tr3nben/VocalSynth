@@ -26,7 +26,8 @@ struct ExpressionFrame
 };
 
 /** Values without a voice: what the engine uses when no ExpressionBuffer is given (Test Pattern) -
-    level 1 while a note sounds, everything else 0 (docs/SYNTH-DESIGN.md 16.4). */
+    level 1 while a note is held, everything else 0 (docs/SYNTH-DESIGN.md 16.4). The engine smooths the
+    rest level per tick like the tracker (attack 5 ms, release 50 ms), so Voice Level -> Amp does not click. */
 constexpr ExpressionFrame restExpression (bool noteSounding) noexcept
 {
     return { 0, noteSounding ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };

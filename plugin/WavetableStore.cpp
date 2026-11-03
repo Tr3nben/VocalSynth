@@ -48,9 +48,10 @@ void WavetableStore::publish (int slot, std::shared_ptr<const synth::Wavetable> 
 
     const std::scoped_lock lock (mutex);
     auto& s = info[static_cast<std::size_t> (slot)];
-    retired.push_back ({ s.table, blockCounter.load (std::memory_order_acquire) });
+    auto old = std::move (s.table);
     s = { reference, std::move (table), std::move (userData) };
-    slots[static_cast<std::size_t> (slot)].store (s.table.get(), std::memory_order_release);
+    slots[static_cast<std::size_t> (slot)].exchange (s.table.get(), std::memory_order_seq_cst);
+    retired.push_back ({ std::move (old), blockCounter.load (std::memory_order_seq_cst) });
     generation.fetch_add (1, std::memory_order_acq_rel);
 }
 
@@ -86,7 +87,7 @@ const synth::Wavetable* WavetableStore::acquire (int slot) const noexcept
     if (slot < 0 || slot >= numSlots)
         return nullptr;
 
-    return slots[static_cast<std::size_t> (slot)].load (std::memory_order_acquire);
+    return slots[static_cast<std::size_t> (slot)].load (std::memory_order_seq_cst);
 }
 
 void WavetableStore::release (const synth::TablesInUse& oscA, const synth::TablesInUse& oscB) noexcept
@@ -95,7 +96,7 @@ void WavetableStore::release (const synth::TablesInUse& oscA, const synth::Table
     inUse[1].store (oscA.previous, std::memory_order_release);
     inUse[2].store (oscB.current, std::memory_order_release);
     inUse[3].store (oscB.previous, std::memory_order_release);
-    blockCounter.fetch_add (1, std::memory_order_release);
+    blockCounter.fetch_add (1, std::memory_order_seq_cst);
 }
 
 std::shared_ptr<const synth::Wavetable> WavetableStore::findShared (const juce::String&)

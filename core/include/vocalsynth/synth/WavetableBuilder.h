@@ -55,20 +55,26 @@ struct WavetableBuildResult
        round (i * (n - 1) / (maxFrames - 1)));
     3. DC removed per frame, peak-normalised over the whole table (largest |sample| of all frames = 1),
        quantised to PCM16 (see WavetableFrames); frames are NOT phase-aligned or otherwise changed;
-    4. per frame and mip level: FFT (2048) -> keep bins 1..maxHarmonic (level), zero the rest -> inverse
-       FFT at mipLength (level) -> guard samples; content hash = fnv1a64 of the PCM16 frames. */
+    4. per frame and mip level: FFT (2048) -> keep bins 1..min (maxHarmonic (level), 1023), zero the rest ->
+       inverse FFT at mipLength (level) (1024..8192: zero-padded spectrum = band-limited upsampling) ->
+       guard samples (Wavetable::guardBefore / guardAfter); content hash = fnv1a64 of the PCM16 frames. */
 class WavetableBuilder
 {
 public:
+    /** Longest input treated as ONE cycle (frameSize 0) by chooseFrameSize (single-cycle files are
+        256..4096 samples; a longer file without clm chunk is cut into 2048-sample frames instead of being
+        read as one huge cycle). */
+    static constexpr std::size_t maxSingleCycleSamples = 8192;
+
     /** frameSize: samples per frame of the input (power of two 32..8192), or 0 for a single cycle.
         cancel (optional) is polled between frames. */
     static WavetableBuildResult build (std::string name, std::span<const float> samples, int frameSize,
                                        const std::atomic<bool>* cancel = nullptr);
 
-    /** Frame size of an imported file (docs/SYNTH-DESIGN.md 5.4): override > 0 (import dialog: 256 / 512 /
-        1024 / 2048 / 4096) if the file holds at least one such frame; else the clm chunk's size if the file
-        holds at least one frame of it; else 2048 if the length is a positive multiple of 2048; else 0
-        (single cycle). */
+    /** Frame size of an imported file (docs/SYNTH-DESIGN.md 5.4), first match: override > 0 (import dialog:
+        256 / 512 / 1024 / 2048 / 4096) if the file holds at least one such frame; the clm chunk's size if the
+        file holds at least one frame of it; 2048 if the length is a positive multiple of 2048; 0 (single
+        cycle) if 2 <= length <= maxSingleCycleSamples; else 2048 (leftover samples ignored). */
     static int chooseFrameSize (std::size_t numSamples, int clmFrameSize, int overrideFrameSize) noexcept;
 
     /** readWav result -> table (chooseFrameSize + build). Leftover samples after the last whole frame are

@@ -43,6 +43,7 @@ inline const juce::ParameterID playMode = synthdetail::id ("playMode");
 inline const juce::ParameterID glideTime = synthdetail::id ("glideTime");
 inline const juce::ParameterID glideMode = synthdetail::id ("glideMode");
 inline const juce::ParameterID ampVelocity = synthdetail::id ("ampVelocity");
+inline const juce::ParameterID ampGain = synthdetail::id ("ampGain");
 
 // --- Oscillators A / B ---
 struct OscParameterIds
@@ -138,10 +139,10 @@ inline const juce::ParameterID reverbSize = synthdetail::id ("reverbSize");
 inline const juce::ParameterID reverbDamping = synthdetail::id ("reverbDamping");
 inline const juce::ParameterID reverbMix = synthdetail::id ("reverbMix");
 
-/** Number of synth parameters (docs/SYNTH-DESIGN.md 15): 3 mix + 4 play + 2 x 11 osc + 5 sub/noise + 7 filter
-    + 3 x 4 env + 2 x 5 LFO + 8 x 3 mod + 14 FX. */
-inline constexpr int numSynthParameters = 3 + 4 + 2 * 11 + 5 + 7 + 3 * 4 + 2 * 5 + 8 * 3 + 14;
-static_assert (numSynthParameters == 101);
+/** Number of synth parameters (docs/SYNTH-DESIGN.md 15): 3 mix + 5 play / amp + 2 x 11 osc + 5 sub/noise
+    + 7 filter + 3 x 4 env + 2 x 5 LFO + 8 x 3 mod + 14 FX. */
+inline constexpr int numSynthParameters = 3 + 5 + 2 * 11 + 5 + 7 + 3 * 4 + 2 * 5 + 8 * 3 + 14;
+static_assert (numSynthParameters == 102);
 
 // Choice names. Array sizes are the core enum counts: index == static_cast<int> (core enum). Append only.
 inline constexpr std::array<const char*, synth::numPlayModes> playModeNames { "Mono", "Legato", "Poly" };
@@ -165,7 +166,7 @@ inline constexpr std::array<const char*, synth::numModDests> modDestNames {
     "Off",          "Osc A Position", "Osc A Pitch",      "Osc A Level", "Osc A Detune", "Osc B Position",
     "Osc B Pitch",  "Osc B Level",    "Osc B Detune",     "Sub Level",   "Noise Level",  "Filter Cutoff",
     "Filter Resonance", "Filter Drive", "Amp Level",      "Pan",         "LFO 1 Rate",   "LFO 2 Rate",
-    "Chorus Mix",   "Delay Mix",      "Reverb Mix"
+    "Chorus Mix",   "Delay Mix",      "Reverb Mix",       "Pitch"
 };
 
 namespace synthdetail
@@ -321,6 +322,7 @@ inline void addSynthParameters (juce::AudioProcessorValueTreeState::ParameterLay
               timeText);
     addChoice (layout, glideMode, "Glide Mode", glideModeChoices, index (d.glideMode));
     addFloat (layout, ampVelocity, "Amp Velocity", linearRange (lim::percent), d.ampVelocityPercent, "%", integerText);
+    addFloat (layout, ampGain, "Amp Gain", linearRange (lim::ampGainDb), d.ampGainDb, "dB", oneDecimalText);
 
     // Oscillators
     for (std::size_t i = 0; i < oscParameters.size(); ++i)
@@ -436,7 +438,7 @@ inline juce::StringArray getSynthParameterIds()
 {
     juce::StringArray ids { synthOn.getParamID(), synthVolume.getParamID(), dryLevel.getParamID(),
                             playMode.getParamID(), glideTime.getParamID(), glideMode.getParamID(),
-                            ampVelocity.getParamID() };
+                            ampVelocity.getParamID(), ampGain.getParamID() };
 
     for (const auto& o : oscParameters)
         for (const auto* id : { &o.on, &o.position, &o.octave, &o.semi, &o.fine, &o.level, &o.pan, &o.unison,

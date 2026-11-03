@@ -21,4 +21,19 @@ synth::SynthSettings SynthSettingsBuilder::build() const noexcept
     return synth::SynthSettings {}.sanitised();
 }
 
+synth::SynthSettings SynthSettingsBuilder::fromPlain (const PlainValues&) noexcept
+{
+    return synth::SynthSettings {}.sanitised();
+}
+
+SynthSettingsBuilder::PlainValues SynthSettingsBuilder::toPlain (const synth::SynthSettings&) noexcept
+{
+    return {};
+}
+
+int SynthSettingsBuilder::indexOf (const juce::String& parameterId)
+{
+    return params::getSynthParameterIds().indexOf (parameterId);
+}
+
 } // namespace vocalsynth

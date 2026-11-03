@@ -32,7 +32,8 @@ struct FilterTick
     - Coefficient ramp: g and k are computed for the tick end; per sample linear ramp of g and k over the
       tick (the TPT structure is stable for any g > 0, k > 0, also while ramping). Cutoff smoothing is the
       caller's (SynthVoice smooths in log-frequency per tick).
-    - NaN / Inf guard: after each render() call, a non-finite state resets the integrators to 0 and
+    - NaN / Inf guard: at every beginTick() (a tick or command position, never at the end of a process()
+      call, whose length depends on the host block), a non-finite state resets the integrators to 0 and
       increments getNanResetCount(); a state below 1e-20 in magnitude is set to exactly 0 (denormals).
     Real-time safe, audio thread only. Owner: agent B. */
 class SvfFilter

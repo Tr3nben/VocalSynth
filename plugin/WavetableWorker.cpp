@@ -22,6 +22,21 @@ void WavetableWorker::requestImport (int, const juce::File&, int) {}
 
 void WavetableWorker::requestEmbedded (int, std::shared_ptr<const UserTableData>) {}
 
+bool WavetableWorker::loadFactoryNow (int, const juce::String&, juce::String&)
+{
+    return true;
+}
+
+bool WavetableWorker::loadEmbeddedNow (int, std::shared_ptr<const UserTableData>, juce::String&)
+{
+    return true;
+}
+
+WavetableSlotInfo WavetableWorker::getRequestedReference (int) const
+{
+    return {};
+}
+
 WavetableWorker::Status WavetableWorker::getStatus() const
 {
     return {};

@@ -27,7 +27,7 @@ void Lfo::retrigger (const LfoSettings&) noexcept
     fadeSamples = 0.0;
 }
 
-float Lfo::advanceTick (const LfoSettings&, double, float, int) noexcept
+float Lfo::advanceTick (const LfoSettings&, const SynthTransport&, float, int) noexcept
 {
     return value;
 }

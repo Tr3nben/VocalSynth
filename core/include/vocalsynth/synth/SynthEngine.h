@@ -21,12 +21,6 @@
 namespace vocalsynth::synth
 {
 
-/** Host tempo for the synced LFOs and the delay (the processor reads the play head once per block). */
-struct SynthTransport
-{
-    double bpm = 120.0; ///< <= 0 or non-finite: 120
-};
-
 /** UI / diagnostics (any thread through the processor's atomics; the engine itself is audio-thread only). */
 struct SynthEngineStats
 {
@@ -40,12 +34,19 @@ struct SynthEngineStats
     This is THE interface the processor uses (frozen for 0.4):
 
         prepareToPlay:  engine.prepare (sampleRate, maxChunk);                  // allocates, calls reset()
-        block start:    engine.setWavetable (0, store.acquire (0)); ... (1)     // once per host block
+        block start:    engine.setWavetable (0, store.acquire (0)); ... (1)     // EVERY block, also bypassed
         each chunk:     engine.process (events, timings, expression, settings, transport, L, R, n); // n <= 4096
-        block end:      store.release (engine.getTablesInUse (0), engine.getTablesInUse (1));
-        flush:          engine.releaseAll();      bypass / reset: engine.reset();
+        block end:      store.release (engine.getTablesInUse (0), engine.getTablesInUse (1));  // EVERY block
+        flush:          engine.releaseAll();      bypass: engine.reset();
+        releaseResources: engine.reset(); store.releaseAllRetired();           // audio stopped
 
-    Timing (binding): the engine keeps its own absolute sample clock (0 at reset()). Events are applied at
+    Table pointers (binding, docs/SYNTH-DESIGN.md 12.1): reset() and prepare() forget every table pointer
+    (engine, voices, oscillators). A table set with setWavetable() is applied at the next tick; it is only
+    read after that if the processor set it in the SAME block (every block starts with setWavetable), so
+    getTablesInUse() needs to report only what the voices read (current / previous of a crossfade).
+
+    Timing (binding): the engine keeps its own absolute sample clock (0 at reset()). A tick at clock t is run
+    by the process() call whose range [c, c + n) contains t, with that call's settings. Events are applied at
     clock + sampleOffset; all note events of one sample position form one VoiceAllocator group (bends at
     that position are applied before the group; CCs are ignored). Control ticks run at every clock value
     that is a multiple of controlTickSamples; at a sample that has both, the events come first. Settings
@@ -56,8 +57,11 @@ struct SynthEngineStats
     bendRangeSemitones, one-pole 5 ms per tick. Result: BIT-IDENTICAL output for any split of the same
     input into process() calls (block sizes 1, 7, 64, 480, 512, 4096 at 44.1 / 48 / 96 kHz).
 
-    synthOn: switching off fades the output over synthOnFadeSeconds, then resets the engine and returns
-    zeros at almost no cost; switching on starts from silence (a held note sounds from the next note-on).
+    synthOn: switching off fades the output over synthOnFadeSeconds, then (at a tick) clears voices,
+    allocator, LFOs and FX like reset() but KEEPS the clock and the tables, and returns zeros at almost no
+    cost; switching on starts from silence (a held note sounds from the next note-on). Every state decision
+    (fade end, voice inactive, FX tail end / bypass, NaN reset, denormal flush) is taken at a tick or an
+    event position, never at a process() or render-segment boundary (docs/SYNTH-DESIGN.md 3.5).
     Output: left / right are OVERWRITTEN with the synth signal (incl. FX and synthVolume; mono layouts:
     the processor uses left + right / 2). Silence after every voice and FX tail ended: exactly 0.
 
@@ -78,19 +82,23 @@ public:
     /** sampleRate > 0; maxChunk is a hint (process() accepts any n <= maxChunkSamples). NOT real-time. */
     void prepare (double sampleRate, int maxChunk);
 
-    /** Silence at once, clock 0, smoothers jump to the next settings, LFOs / FX / allocator cleared. */
+    /** Silence at once, clock 0, smoothers jump to the next settings, LFOs / FX / allocator cleared, every
+        table pointer forgotten (the built-in sine plays until the next setWavetable()). */
     void reset() noexcept;
 
     /** Note-off for every held note at the next process() position (envelopes release, FX tails ring). */
     void releaseAll() noexcept;
 
-    /** Table of oscillator oscIndex (0 = A, 1 = B) from the next tick on; nullptr = the built-in sine
-        (WavetableBuilder::makeSineTable, made in prepare()). Changing it crossfades (WavetableOscillator). */
+    /** Table of oscillator oscIndex (0 = A, 1 = B) from the next tick on, for every voice (silent voices
+        switch at once, sounding ones crossfade, WavetableOscillator); nullptr = the built-in sine
+        (WavetableBuilder::makeSineTable, made in prepare()). The first table after reset() is taken without
+        a crossfade. */
     void setWavetable (int oscIndex, const Wavetable* table) noexcept;
 
     /** Every table pointer oscillator oscIndex of any voice may still read (current / previous of the
-        crossfade, the union over the voices): the WavetableStore must keep them alive. Never the built-in
-        sine. */
+        crossfade, the union over ALL voices, also silent ones; at most two distinct pointers because every
+        voice gets the same setTable() at the same tick): the WavetableStore must keep them alive. Never the
+        built-in sine. */
     TablesInUse getTablesInUse (int oscIndex) const noexcept;
 
     /** events: this chunk's events (offsets in [0, numSamples), sorted); timings: entry i belongs to

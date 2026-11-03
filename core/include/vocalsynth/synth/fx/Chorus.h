@@ -15,7 +15,10 @@ namespace vocalsynth::synth
     Mix (dual-linear law, also used by the delay and the reverb): out = dry * min (1, 2 (1 - m)) +
     wet * min (1, 2 m), m = clamp (mixPercent / 100 + mixMod, 0, 1).
     On/off: 10 ms linear crossfade between dry and the effect; once off and faded, process() returns at
-    once and the lines are cleared (no stale tail when switched on again).
+    once and the lines are cleared (no stale tail when switched on again). Every such decision (fade end,
+    bypass, clearing, tail end, NaN reset, denormal flush) is taken in beginTick(), never at the end of a
+    process() call (block-size invariance, docs/SYNTH-DESIGN.md 3.5); the same holds for the delay and the
+    reverb.
     prepare() allocates for maxDelaySeconds at the given rate (any rate up to 192 kHz and beyond);
     everything else is real-time safe. Audio thread only. Owner: agent C. */
 class Chorus

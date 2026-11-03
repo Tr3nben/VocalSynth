@@ -87,12 +87,17 @@ struct AllocatorSettings
       Not connected (voice silent or releasing): start.
     - Correction rule: a connected change caused by a NOTE-ON within correctionWindowSeconds of the
       replaced note's own note-on (absolute samples), or flagged NoteInput::correction, is a correction
-      command (both modes, also Poly: the new note takes over the old note's voice).
+      command. Mono / Legato: the replaced note is the one sounding before the group. Poly: each note-on of
+      the group is paired, in event order, with the earliest not yet paired note-off of the same group whose
+      note held a voice; if that pair meets the rule, the new note takes over the old note's voice as a
+      correction (no release, no new voice); unpaired note-ons are normal starts (chords, 0.6).
     - Glide: glideEnabled and (glideMode == always and a previous note exists since reset, or
       glideMode == legatoOnly and the change is connected); never for corrections.
     - Poly: a note-on for a note that already has a voice (held or releasing) restarts that voice; else
       the lowest-index inactive voice; else steal: the voice in release whose release started first, else
-      the voice whose note-on is oldest. glideFromNote = the most recent note-on's note.
+      the voice whose note-on is oldest. glideFromNote = the most recent note-on's note. A second steal of
+      the same voice during its fade replaces the pending note: the replaced note no longer has a voice
+      (its note-off is then ignored).
     - Note-off for a note without a voice: ignored. At most maxVoices voices hold notes; nothing hangs:
       every voice that got a start / steal / legato / correction for a note gets a release when that
       note's last note-off arrives (invariant test with random event sequences).

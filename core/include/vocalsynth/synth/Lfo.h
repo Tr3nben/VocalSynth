@@ -9,15 +9,18 @@ namespace vocalsynth::synth
 
 /** Global LFO (one per engine, not per voice), evaluated once per control tick (docs/SYNTH-DESIGN.md 8.2).
 
-    - Rate: settings.rateHz (sync off) or bpm / 60 / tempoDivisionQuarterNotes (sync) cycles per second,
-      times 2^(rateOctaves) from the mod matrix (LFO n Rate, +-4 octaves at 100 %), clamped 0.001..100 Hz.
-      The phase runs freely (not locked to the host's song position): block-size invariant.
+    - Rate: settings.rateHz (sync off) or bpm / 60 / tempoDivisionQuarterNotes (sync, quarterNotesPerBar
+      from the transport: bars follow the host time signature) cycles per second, times 2^(rateOctaves)
+      from the mod matrix (LFO n Rate, +-4 octaves at 100 %), clamped 0.001..100 Hz. The phase runs freely
+      (not locked to the host's song position): block-size invariant.
     - Shapes (phase p in [0, 1)): sine sin (2 pi p); triangle 1 - 4 |p - 0.5| shifted so that p = 0 is 0
       and rising; saw up 2 p - 1; saw down 1 - 2 p; square p < 0.5 ? 1 : -1; S&H a new xorshift32 value in
       [-1, 1] at each cycle start; smooth random: cosine interpolation between successive S&H values.
       Square and S&H jump at the tick (the voice ramps every modulation over the tick, so no click).
-    - retrigger() (engine: on every envelope-starting note-on): phase 0 if settings.retrigger; the fade-in
-      restarts in any case: output *= min (1, t / fadeMs) with t since the last retrigger() call.
+    - retrigger() (engine: on every envelope-starting note-on, at the command's sample): takes effect at the
+      NEXT tick (quantised to the tick grid, so a mid-tick note start needs no sub-tick phase): the next
+      advanceTick() returns the value at phase 0 if settings.retrigger, and the fade-in restarts there in
+      any case: output *= min (1, t / fadeMs) with t = samples since that tick.
     Output -1..1. Real-time safe, audio thread only. Owner: agent B. */
 class Lfo
 {
@@ -29,8 +32,9 @@ public:
 
     void retrigger (const LfoSettings& settings) noexcept;
 
-    /** Advances tickSamples and returns the value at the new position. bpm <= 0: 120. */
-    float advanceTick (const LfoSettings& settings, double bpm, float rateOctaves, int tickSamples) noexcept;
+    /** Advances tickSamples and returns the value at the new position. transport.bpm <= 0: 120. */
+    float advanceTick (const LfoSettings& settings, const SynthTransport& transport, float rateOctaves,
+                       int tickSamples) noexcept;
 
     float getValue() const noexcept { return value; }
 

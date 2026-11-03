@@ -37,7 +37,8 @@ struct VoiceContext
       (envelopes restart from the CURRENT ramp value), advances what restarted by samplesToNextTick and
       re-targets every ramp over the remaining samples;
     - render() between control positions only runs the per-sample DSP.
-    Pitch (semitones): note + bend + glide offset + osc octave * 12 + semi + fine / 100 + pitch mod;
+    Pitch (semitones): note + bend + glide offset + "Pitch" mod (voice: Osc A, B, sub, keytrack)
+    + osc octave * 12 + semi + fine / 100 + Osc A / B Pitch mod;
     glide is linear in semitones over glideTimeMs (constant time), evaluated per tick.
     Inactive (Env 1 idle and no steal fade): render() adds nothing and costs nothing.
     prepare() allocates (sub tables); everything else is real-time safe. Audio thread only. Owner: agent B. */
@@ -46,7 +47,7 @@ class SynthVoice
 public:
     void prepare (double sampleRate, uint32_t seed);
 
-    /** Silent and inactive at once (no fade), all states cleared. */
+    /** Silent and inactive at once (no fade), all states cleared, table pointers forgotten (oscillator reset). */
     void reset() noexcept;
 
     /** Tables for Osc A / B (engine, once per block; nullptr = silence for that oscillator). */
