@@ -192,6 +192,11 @@ Gesamtdauer bis 1.0 (Windows): **ca. 7–10 Monate** bei 8–10 h/Woche.
 | M7 | UI/UX | 3–5 Wochen |
 | M8 | Beta und Release 1.0 (Windows) | 3–4 Wochen |
 
+**Reihenfolge ab 0.4 (Nutzerentscheidung E1, 2026-11-03):** die interne Engine kommt vor UI, Expression und
+Beatbox: 0.4 eigener Wavetable-Synth (M6, Synth-Teil) → 0.5 UI (M7) → 0.6 Expression/Akkorde (M5) → 0.7
+Beatbox (M4, mit Drum-Sampler). Verbindlicher Plan: [ROADMAP-0.4.md](ROADMAP-0.4.md), Design
+[SYNTH-DESIGN.md](SYNTH-DESIGN.md).
+
 ### M0 – Repo, Build, CI (1–2 Wochen)
 
 Ziel: ein leeres, aber valides Plugin, das auf allen drei CI-Plattformen baut und pluginval besteht.
