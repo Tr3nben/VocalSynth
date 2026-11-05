@@ -3,6 +3,8 @@
 #include "vocalsynth/BendGenerator.h"
 #include "vocalsynth/Decimator.h"
 #include "vocalsynth/EventTiming.h"
+#include "vocalsynth/ExpressionFrame.h"
+#include "vocalsynth/ExpressionTracker.h"
 #include "vocalsynth/Framer.h"
 #include "vocalsynth/InputConditioner.h"
 #include "vocalsynth/NoteSegmenter.h"
@@ -282,6 +284,22 @@ public:
                         VsEventTimingSink timing) noexcept;
     void flushToSink (int sampleOffset, VsEventSink out, VsEventTimingSink timing) noexcept;
 
+    /** 0.4 synth (docs/SYNTH-DESIGN.md 16.3): the same events and timings as the overload above (bit-identical
+        with and without the expression buffer) plus one ExpressionFrame per analysis hop, pushed to expression
+        with the hop's event offset (the input sample that completed the hop, the event rule above), also when
+        unvoiced (the level falls to 0). The ExpressionTracker runs only when a buffer is given (no cost for
+        the other overloads); frames that do not fit are dropped. The caller clears the buffer per chunk. */
+    template <std::size_t N>
+    void process (const float* mono, int numSamples, const VoiceSettings& settings, VsEventBuffer<N>& out,
+                  VsEventTimingBuffer<N>& timing, ExpressionBuffer& expression) noexcept
+    {
+        processToSink (mono, numSamples, settings, VsEventSink { out }, VsEventTimingSink { timing }, &expression);
+    }
+
+    /** Non-template version; expression == nullptr is the overload without expression. */
+    void processToSink (const float* mono, int numSamples, const VoiceSettings& settings, VsEventSink out,
+                        VsEventTimingSink timing, ExpressionBuffer* expression) noexcept;
+
     /** Level envelope for the onset / release estimates of the timing side output: one-pole power
         smoother (time constant in ms) on the conditioned input at the host rate. Its upward crossings
         of gateThresholdDb - NoteSegmenter::gateHysteresisDb and downward crossings of that level minus
@@ -404,6 +422,9 @@ private:
     int64_t levelLastRiseSample = 0;
 
     VoiceSnapshotPublisher snapshot;
+
+    // 0.4 expression side output (docs/SYNTH-DESIGN.md 16.3): runs only for the overload with a buffer
+    ExpressionTracker expressionTracker;
 };
 
 } // namespace vocalsynth

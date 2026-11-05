@@ -2,7 +2,7 @@
 
 #include "vocalsynth/synth/SynthSettings.h"
 
-#include <array>
+#include <cstdint>
 #include <vector>
 
 namespace vocalsynth::synth
@@ -38,13 +38,35 @@ public:
 
     /** Off and faded: process() does nothing. */
     bool isBypassed() const noexcept;
+    uint32_t getNanResetCount() const noexcept { return nanResets; }
 
 private:
+    void finishRamp() noexcept;
+    void clearLines() noexcept;
+    void advanceIdle (int numSamples) noexcept;
+    template <bool checked>
+    void run (float* left, float* right, int numSamples) noexcept;
+
     double sampleRate = 48000.0;
-    std::array<std::vector<float>, 2> lines;
+    std::vector<float> line; ///< mono sum (both taps read it), power-of-two length
+    int mask = 0;
+    int reach = 1;           ///< longest tap + 2 samples
     int writeIndex = 0;
+    int written = 0;         ///< samples written since the last (logical) clear, saturating at reach
     double lfoPhase = 0.0;
-    float onGain = 0.0f;
+    float fadeStepPerSample = 0.0f;
+    float onGain = 0.0f, onTarget = 0.0f, onStep = 0.0f;
+    float delayLeft = 0.0f, delayLeftTarget = 0.0f, delayLeftStep = 0.0f;
+    float delayRight = 0.0f, delayRightTarget = 0.0f, delayRightStep = 0.0f;
+    float dryGain = 1.0f, dryTarget = 1.0f, dryStep = 0.0f;
+    float wetGain = 0.0f, wetTarget = 0.0f, wetStep = 0.0f;
+    int rampLeft = 0;
+    int silentRun = 0;       ///< consecutive zero input samples
+    float nanCheck = 0.0f;   ///< sum of the written samples of this tick (non-finite -> clear)
+    uint32_t nanResets = 0;
+    bool bypassed = true;
+    bool idle = false;       ///< tail ended: nothing to do while the input is 0
+    bool firstTick = true;   ///< the first beginTick() after reset() jumps to the targets
 };
 
 } // namespace vocalsynth::synth

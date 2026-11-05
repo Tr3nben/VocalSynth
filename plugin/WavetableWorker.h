@@ -4,8 +4,12 @@
 
 #include <juce_core/juce_core.h>
 
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <mutex>
+#include <optional>
 
 namespace vocalsynth
 {
@@ -67,10 +71,57 @@ public:
     void stop();
 
 private:
+    /** One asynchronous request (at most one queued per slot: a newer one replaces it). */
+    struct Job
+    {
+        enum class Kind
+        {
+            factory,
+            import,
+            embedded
+        };
+
+        Kind kind = Kind::factory;
+        int slot = 0;
+        uint64_t sequence = 0;
+        uint64_t order = 0;                          ///< global arrival order (oldest queued job runs first)
+        juce::String factoryId;
+        juce::File file;
+        int frameSizeOverride = 0;
+        std::shared_ptr<const UserTableData> data;  ///< embedded: validated, hash recomputed
+    };
+
     void run() override;
 
+    /** Under the lock: a new request for the slot (drops its queued job, cancels its running build). */
+    uint64_t beginRequestLocked (int slot);
+    void enqueue (Job job);
+    void processJob (const Job& job);
+
+    /** Publishes if sequence is still the newest for the slot (worker lock held across check and publish). */
+    void finish (int slot, uint64_t sequence, std::shared_ptr<const synth::Wavetable> table,
+                 const WavetableReference& reference, std::shared_ptr<const UserTableData> userData);
+
+    /** A failed request: status error; if it is still the newest, the requested reference falls back to
+        what the slot holds (asynchronous) - the synchronous loads publish the default table instead. */
+    void fail (int slot, uint64_t sequence, const juce::String& message);
+    void failRequest (int slot, const juce::String& message); ///< an asynchronous request rejected at once
+    void finishSync();
+
+    bool isNewestLocked (int slot, uint64_t sequence) const;
+
     WavetableStore& store;
-    std::atomic<bool> cancel { false };
+    std::atomic<bool> cancel { false }; ///< cancel flag of the running asynchronous build
+
+    mutable std::mutex lock;            ///< everything below; never the audio thread
+    std::array<uint64_t, WavetableStore::numSlots> latestSequence {};
+    std::array<std::optional<Job>, WavetableStore::numSlots> pending;
+    std::array<WavetableSlotInfo, WavetableStore::numSlots> requested;
+    uint64_t nextOrder = 0;
+    int runningSlot = -1;
+    int syncLoadsRunning = 0;
+    bool stopped = false;
+    Status status;
 };
 
 } // namespace vocalsynth

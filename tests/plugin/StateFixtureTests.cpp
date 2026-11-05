@@ -10,6 +10,7 @@
 #include "PluginProcessor.h"
 #include "SynthParameters.h"
 #include "SynthState.h"
+#include "WavetableWorker.h"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -114,4 +115,61 @@ TEST_CASE ("0.3.1 state fixtures load with every old value unchanged and the syn
     CHECK (countChildren (againTree, CaptureState::treeType) == 1);
     CHECK (countChildren (againTree, SynthState::treeType) <= 1);
     CHECK (countChildren (againTree, "PARAM") == 28 + params::numSynthParameters);
+}
+
+TEST_CASE ("0.3.1 state fixtures give the default synth state and default tables", "[plugin][state][fixtures]")
+{
+    using namespace vocalsynth;
+
+    const auto name = GENERATE (juce::String ("state-0.3.1-fx"), juce::String ("state-0.3.1-instrument"));
+    CAPTURE (name);
+
+    juce::MemoryBlock blob;
+    REQUIRE (fixture (name + ".bin").loadFileAsData (blob));
+    const auto xml = juce::AudioProcessor::getXmlFromBinary (blob.getData(), static_cast<int> (blob.getSize()));
+    REQUIRE (xml != nullptr);
+    auto state = juce::ValueTree::fromXml (*xml);
+
+    // The restore path of setStateInformation (docs/SYNTH-DESIGN.md 13.1) on a state without SYNTH
+    const auto synthState = SynthState::fromValueTree (state.getChildWithName (SynthState::treeType));
+    CHECK (synthState.presetName == "Init");
+    CHECK_FALSE (synthState.presetModified);
+    CHECK (synthState.editorScalePercent == 100);
+
+    WavetableStore store;
+    WavetableWorker worker (store);
+
+    for (int s = 0; s < WavetableStore::numSlots; ++s)
+    {
+        const auto& table = synthState.tables[static_cast<std::size_t> (s)];
+        CHECK (table.reference.toRefString() == "factory:basic-shapes");
+        CHECK (table.embedded == nullptr);
+
+        juce::String error;
+        CHECK (worker.loadFactoryNow (s, table.reference.id, error));
+        CHECK (store.getSlot (s).reference.toRefString() == "factory:basic-shapes");
+        CHECK (store.acquire (s) != nullptr);
+    }
+
+    // Saving adds exactly one SYNTH child and stateVersion 4; nothing else of the old state changes
+    const auto before = state.createCopy();
+    SynthState::removeFromState (state);
+    CHECK (state.isEquivalentTo (before));
+
+    SynthState saved;
+
+    for (int s = 0; s < WavetableStore::numSlots; ++s)
+    {
+        const auto info = worker.getRequestedReference (s);
+        saved.tables[static_cast<std::size_t> (s)] = { info.reference, info.userData };
+    }
+
+    state.appendChild (saved.toValueTree(), nullptr);
+    state.setProperty (SynthState::stateVersionProperty, SynthState::currentStateVersion, nullptr);
+    CHECK (SynthState::getStateVersion (state) == 4);
+    CHECK (countChildren (state, SynthState::treeType) == 1);
+    CHECK (countChildren (state, "PARAM") == countChildren (before, "PARAM"));
+    CHECK (countChildren (state, CaptureState::treeType) == 1);
+    CHECK (SynthState::fromValueTree (state.getChildWithName (SynthState::treeType)).tables[1].reference
+           == synthState.tables[1].reference);
 }

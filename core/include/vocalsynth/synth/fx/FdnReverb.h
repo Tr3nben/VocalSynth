@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace vocalsynth::synth
@@ -26,6 +27,7 @@ class FdnReverb
 {
 public:
     static constexpr int numLines = 8;
+    static constexpr int numDiffusers = 4;
     static constexpr double switchFadeSeconds = 0.010;
 
     void prepare (double sampleRate);
@@ -39,12 +41,42 @@ public:
     uint32_t getNanResetCount() const noexcept { return nanResets; }
 
 private:
+    void finishRamp() noexcept;
+    void clearState() noexcept;
+    template <bool checked>
+    void run (float* left, float* right, int numSamples) noexcept;
+
     double sampleRate = 48000.0;
-    std::array<std::vector<float>, numLines> lines;
-    std::array<float, numLines> damping {};
-    int writeIndex = 0;
-    float onGain = 0.0f;
+    std::array<std::vector<float>, numLines> lines;         ///< power-of-two lengths
+    std::array<std::vector<float>, numDiffusers> diffusers; ///< all-pass delay lines
+    std::vector<float> preDelay;
+    uint32_t writeCounter = 0;   ///< shared by every buffer (masked per buffer, wraps)
+    int written = 0;             ///< samples written since the last (logical) clear, saturating at maxReach
+    int maxReach = 1;            ///< longest read distance of any buffer + margin
+    int preDelaySamples = 1;
+    std::array<int, numDiffusers> diffuserDelay {};
+    std::array<float, numLines> lineLength {};   ///< nominal length (samples) for the current size
+    std::array<float, numLines> lineDelay {}, lineDelayTarget {}, lineDelayStep {}; ///< incl. modulation
+    std::array<float, numLines> lineGain {}, lineGainTarget {}, lineGainStep {};    ///< RT60 gain per pass
+    std::array<float, numLines> damping {};      ///< one-pole low-pass states
+    std::array<std::pair<double, double>, numLines> modulation {};   ///< (cos, sin) phasor per line
+    std::array<std::pair<double, double>, numLines> tickRotation {}; ///< phasor step per 16-sample tick
+    std::array<double, numLines> modulationAngle {};                 ///< radians per sample
+    float modulationDepth = 0.0f; ///< samples
+    float dampingCoefficient = 1.0f;
+    float cachedSize = -1.0f, cachedDamping = -1.0f;
+    int longestLine = 1;
+    float fadeStepPerSample = 0.0f;
+    float onGain = 0.0f, onTarget = 0.0f, onStep = 0.0f;
+    float dryGain = 1.0f, dryTarget = 1.0f, dryStep = 0.0f;
+    float wetGain = 0.0f, wetTarget = 0.0f, wetStep = 0.0f;
+    int rampLeft = 0;
+    int silentRun = 0;     ///< consecutive samples with input 0 and every line write below 1e-6
+    float nanCheck = 0.0f; ///< sum of the line feedback of this tick (non-finite -> clear)
     uint32_t nanResets = 0;
+    bool bypassed = true;
+    bool idle = false;     ///< tail ended
+    bool firstTick = true;
 };
 
 } // namespace vocalsynth::synth

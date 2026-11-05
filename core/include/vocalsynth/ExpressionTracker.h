@@ -56,6 +56,9 @@ public:
     ExpressionFrame processHop (const ExpressionTrackerInput& input) noexcept;
 
 private:
+    void updateHann (int length) noexcept;
+    void analyseSpectrum (std::span<const float> window) noexcept;
+
     double analysisRate = 16000.0;
     int hopSamples = 32;
     int hopCounter = 0;
@@ -63,6 +66,12 @@ private:
     std::vector<float> windowed;
     std::vector<float> power;
     std::vector<float> hann;
+    int hannLength = 0;          ///< samples the Hann table is computed for (window shorter than fftSize)
+    int firstBin = 1, lastBin = 1;
+    float binHertz = 31.25f;
+    float attackCoefficient = 1.0f, releaseCoefficient = 1.0f, smoothingCoefficient = 1.0f;
+    float brightnessTarget = 0.0f; ///< of the newest spectrum (held between spectra)
+    float flatnessTarget = 0.0f;   ///< F' of the newest spectrum
     ExpressionFrame current {};
 };
 

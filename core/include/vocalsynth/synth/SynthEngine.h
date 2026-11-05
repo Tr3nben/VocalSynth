@@ -75,6 +75,9 @@ public:
     static constexpr double settingsSmoothingSeconds = 0.020;
     static constexpr double bendSmoothingSeconds = 0.005;
     static constexpr double synthOnFadeSeconds = 0.010;
+    /** Unison voices per oscillator in Poly mode (docs/SYNTH-DESIGN.md 18 decision rule; the parameter range
+        stays 1..8, Mono / Legato always get the full count). */
+    static constexpr int polyMaxUnison = maxUnisonVoices;
 
     SynthEngine();
     ~SynthEngine();
@@ -117,21 +120,92 @@ public:
     ExpressionFrame getCurrentExpression() const noexcept { return expressionValue; }
 
 private:
+    enum class RunState : uint8_t
+    {
+        off,      ///< synthOn off and faded: everything cleared, nothing rendered (the clock runs)
+        running,
+        fadingOut ///< synthOn switched off: output fades over synthOnFadeSeconds, then off
+    };
+
+    struct PendingFrame
+    {
+        ExpressionFrame frame {};
+        int64_t position = 0;
+        int distance = controlTickSamples;
+        bool valid = false;
+    };
+
+    void controlTick (int64_t tickPosition) noexcept;
+    void smoothSettings() noexcept;
+    void updateDerivedSettings() noexcept;
+    void activate() noexcept;
+    void clearSounding() noexcept;
+    void handleGroup (int64_t position) noexcept;
+    void applyCommands (int64_t position) noexcept;
+    void forwardTables() noexcept;
+    void updateExpression (int64_t tickPosition) noexcept;
+    void consumeFrame (int index, PendingFrame& out) noexcept;
+    void renderSegment (float* left, float* right, int numSamples) noexcept;
+    float bendSemitones (int raw) const noexcept;
+
     double sampleRate = 48000.0;
     int64_t samplePosition = 0;
     std::unique_ptr<Wavetable> fallbackSine;
-    std::array<const Wavetable*, numOscillators> tables {};
+    std::array<const Wavetable*, numOscillators> tables {};  ///< newest setWavetable() (nullptr = the sine)
+    std::array<const Wavetable*, numOscillators> applied {}; ///< what the voices were given (never nullptr after prepare)
     VoiceAllocator allocator;
     std::array<SynthVoice, maxVoices> voices;
     std::array<Lfo, numLfos> lfos;
     Chorus chorus;
     StereoDelay delay;
     FdnReverb reverb;
+
+    // Settings: target = sanitised settings of the current process() call; smoothed = per tick (20 ms);
+    // voiceSettings = smoothed with the engine's own limits (Poly unison cap) - what the voices read.
+    SynthSettings target {};
     SynthSettings smoothed {};
+    SynthSettings voiceSettings {};
+    SynthTransport transport {};
+    AllocatorSettings allocatorSettings {};
     bool hasSettings = false;
-    float bendTarget = 0.0f;
+    float smoothingCoefficient = 1.0f;
+    RunState state = RunState::off;
+
+    // Output: synthVolume and the synthOn fade, ramped per sample over the tick
+    float cachedVolumeDb = 1000.0f, volumeLinear = 0.0f;
+    float volumeGain = 0.0f, volumeTarget = 0.0f, volumeStep = 0.0f;
+    float onGain = 0.0f, onTarget = 0.0f, onStep = 0.0f;
+    float onFadePerTick = 1.0f;
+    int outputRampLeft = 0;
+
+    // Pitch bend (raw value of the newest bend event, smoothed in semitones per tick)
+    int bendRaw = 0;
     float bendSmoothed = 0.0f;
+    float bendCoefficient = 1.0f;
+
+    // Expression: frames of the current call (ticks latch them in order), the newest frame carried over
+    const ExpressionBuffer* frames = nullptr;
+    int frameIndex = 0;
+    int64_t callStart = 0;
+    int callSamples = 0;
+    PendingFrame carried {};
+    int64_t lastFramePosition = 0;
+    bool hasLastFrame = false;
     ExpressionFrame expressionValue {};
+    ExpressionFrame expressionTarget {};
+    ExpressionFrame expressionStep {};
+    int expressionRemaining = 0;
+    float restAttackCoefficient = 1.0f, restReleaseCoefficient = 1.0f;
+
+    // Modulation
+    ModSourceValues globalSources {};
+    std::array<float, numLfos> lfoRateOctaves {}; ///< LFO n Rate modulation of the previous tick
+    float chorusMixMod = 0.0f, delayMixMod = 0.0f, reverbMixMod = 0.0f;
+
+    // Events
+    std::array<NoteInput, VoiceCommandList::capacity> group {};
+    int groupSize = 0;
+    VoiceCommandList commands;
     bool releasePending = false;
 };
 

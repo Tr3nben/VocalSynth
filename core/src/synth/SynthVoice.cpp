@@ -116,8 +116,18 @@ void SynthVoice::reset() noexcept
 
 void SynthVoice::deactivate() noexcept
 {
-    // Silent: the next note starts clean (startFromSilence clears the DSP states). The oscillators keep their
-    // tables (only reset() forgets them), the pitch stays for a glide "Always" from silence.
+    // Silent: the next note starts clean (startFromSilence clears the DSP states). The pitch stays for a
+    // glide "Always" from silence. The oscillators forget every table pointer except the newest one they
+    // read (docs/SYNTH-DESIGN.md 12.1): an oscillator that stopped inside a table crossfade (switched off
+    // mid-fade, or the note ended) would otherwise report the faded-out table for ever, and an idle voice
+    // takes a new table at once anyway (setTable on a silent oscillator).
+    for (auto& o : osc)
+    {
+        const auto newest = o.getTablesInUse().current;
+        o.reset();
+        o.setTable (newest);
+    }
+
     active = false;
     released = false;
     hasPendingStart = false;

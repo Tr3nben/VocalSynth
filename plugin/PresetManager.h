@@ -6,6 +6,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -70,6 +71,19 @@ public:
     /** Writes <user folder>/<name>.vspreset (overwrites) and makes it current. False + errorMessage on failure. */
     bool saveUserPreset (const juce::String& name, PresetCategory category, juce::String& errorMessage);
 
+    /** The file saveUserPreset (name) writes: a Windows-safe file name (juce::File::createLegalFileName, no
+        trailing dots / spaces, no reserved device name such as CON or LPT1) + fileExtension. The UI asks
+        before overwriting when it exists. Message thread. (Added by agent D for rename / delete.) */
+    juce::File getUserPresetFile (const juce::String& name) const;
+
+    /** Renames a user preset: its name attribute and its file. False + errorMessage for a factory preset, an
+        empty name, a missing file or an existing other file with the new name. Message thread. */
+    bool renameUserPreset (const PresetInfo& preset, const juce::String& newName, juce::String& errorMessage);
+
+    /** Deletes a user preset file. False + errorMessage for a factory preset or when the file cannot be
+        deleted. The current name stays (the parameters are unchanged). Message thread. */
+    bool deleteUserPreset (const PresetInfo& preset, juce::String& errorMessage);
+
     juce::String getCurrentName() const;
     /** True if a preset parameter differs from the snapshot (see class comment) or setCurrent() said so. */
     bool isModified() const;
@@ -86,16 +100,35 @@ public:
     void setUserFolder (const juce::File& folder); ///< tests / settings
 
 private:
+    /** Parameters + tables of a preset to apply (factory data or a parsed file). */
+    struct PresetData;
+
+    bool apply (const PresetData& data);
+    void takeSnapshotLocked();
+    std::vector<float> readPresetValues() const;
+    int findCurrentIndex (const juce::Array<PresetInfo>& presets) const;
+    void scanIfNeeded() const;
 
     juce::AudioProcessorValueTreeState& apvts;
     WavetableStore& store;
     WavetableWorker& worker;
     juce::File userFolder;
+
+    /** The params::isPresetParameter parameters in layout order (constructor; immutable afterwards). */
+    std::vector<juce::RangedAudioParameter*> presetParameters;
+    std::vector<std::atomic<float>*> presetRaw;
+
     mutable std::mutex mutex;          ///< guards currentName, modifiedFlag, snapshot (never the audio thread)
     juce::String currentName { "Init" };
     bool modifiedFlag = false;         ///< "modified" as restored from a project (setCurrent)
     std::vector<float> snapshot;       ///< plain values of the preset parameters at the last load / save
-    juce::Array<PresetInfo> userPresets;
+    bool currentIsFactory = true;      ///< identity of the current preset for prev / next (with the name)
+    int currentFactoryIndex = 0;
+    juce::File currentFile;
+
+    // Message thread only
+    mutable juce::Array<PresetInfo> userPresets;
+    mutable bool scanned = false;      ///< the user folder is read on the first getPresets(), not in the constructor
 };
 
 } // namespace vocalsynth

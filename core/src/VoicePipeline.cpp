@@ -86,6 +86,7 @@ void VoicePipeline::prepare (double newSampleRate, int /*maxBlockSize*/)
     segmenter.prepare (sampleRate);
     bend.prepare (sampleRate, hopSeconds);
     levelCoefficient = 1.0 - std::exp (-1000.0 / (onsetEnvelopeTimeConstantMs * sampleRate));
+    expressionTracker.prepare (analysisRate, framer.getHopSamples());
 
     frameCounter = 0;
     reset();
@@ -99,6 +100,7 @@ void VoicePipeline::reset() noexcept
     postProcessor.reset();
     segmenter.reset();
     bend.reset();
+    expressionTracker.reset();
 
     lastSettings = {};
     hasLastSettings = false;
@@ -259,6 +261,12 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
 void VoicePipeline::processToSink (const float* mono, int numSamples, const VoiceSettings& settings, VsEventSink out,
                                    VsEventTimingSink timing) noexcept
 {
+    processToSink (mono, numSamples, settings, out, timing, nullptr);
+}
+
+void VoicePipeline::processToSink (const float* mono, int numSamples, const VoiceSettings& settings, VsEventSink out,
+                                   VsEventTimingSink timing, ExpressionBuffer* expression) noexcept
+{
     if (numSamples <= 0)
         return;
 
@@ -315,6 +323,21 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
             if (frameObserver != nullptr)
                 frameObserver (frameObserverContext,
                                { hopSample, raw, lastFrame, segmenter.getActiveNote(), segmenter.isFrameVoiced() });
+
+            // Expression side output (never changes the events): one frame per hop at the hop's event offset
+            if (expression != nullptr)
+            {
+                ExpressionTrackerInput in;
+                in.window = framer.getWindow();
+                in.rmsDb = lastFrame.rmsDb;
+                in.confidence = lastFrame.confidence;
+                in.frequencyHz = lastFrame.frequencyHz;
+                in.sungNote = segmenter.getQuantisedNote();
+                in.gateThresholdDb = s.gateThresholdDb;
+                auto frame = expressionTracker.processHop (in);
+                frame.sampleOffset = i;
+                expression->push (frame);
+            }
         }
 
         // Provisional onsets: only while no note is on (after the full frame of this sample, if any).
