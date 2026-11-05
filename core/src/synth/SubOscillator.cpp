@@ -91,6 +91,27 @@ int chooseMipLevel (int current, double maxIncrement) noexcept
     return std::min (down, current);
 }
 
+/** 1 / n for the ramp lengths 1..controlTickSamples (no division per tick). */
+constexpr auto reciprocalsD = []
+{
+    std::array<double, controlTickSamples + 1> r {};
+
+    for (int n = 1; n <= controlTickSamples; ++n)
+        r[static_cast<std::size_t> (n)] = 1.0 / static_cast<double> (n);
+
+    return r;
+}();
+
+constexpr auto reciprocalsF = []
+{
+    std::array<float, controlTickSamples + 1> r {};
+
+    for (int n = 1; n <= controlTickSamples; ++n)
+        r[static_cast<std::size_t> (n)] = 1.0f / static_cast<float> (n);
+
+    return r;
+}();
+
 /** Offset of each level relative to level 0 (Wavetable::levelOffset is a loop when called at run time). */
 constexpr auto levelOffsets = []
 {
@@ -221,8 +242,8 @@ void SubOscillator::beginTick (double newIncrement, float level, SubShape newSha
     const float safeLevel = std::isfinite (level) ? std::clamp (level, 0.0f, 1.0f) : 0.0f;
     gainTarget = maxInc <= WavetableOscillator::maxIncrementForLevel ? safeLevel : 0.0f;
 
-    const float invN = 1.0f / static_cast<float> (n);
-    incrementStep = (incrementTarget - increment) / static_cast<double> (n);
+    const float invN = reciprocalsF[static_cast<std::size_t> (n)];
+    incrementStep = (incrementTarget - increment) * reciprocalsD[static_cast<std::size_t> (n)];
     gainStep = (gainTarget - gain) * invN;
     levelMixStep = (1.0f - levelMix) * invN;
     samplesLeftInTick = n;

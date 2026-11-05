@@ -3,6 +3,7 @@
 #include "vocalsynth/synth/SynthSettings.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace vocalsynth::synth
@@ -31,6 +32,17 @@ constexpr PinkSet pinkSets[] = {
     { 176400.0, { 0.99871534, 0.98073432, 0.75569060 }, { 0.02665253, 0.07414734, 0.28982990 }, 0.20811559 },
     { 192000.0, { 0.99884018, 0.98210996, 0.78152532 }, { 0.02660957, 0.07838296, 0.26287398 }, 0.30857015 },
 };
+
+/** 1 / n for the ramp lengths 1..controlTickSamples (no division per tick). */
+constexpr auto reciprocalsF = []
+{
+    std::array<float, controlTickSamples + 1> r {};
+
+    for (int n = 1; n <= controlTickSamples; ++n)
+        r[static_cast<std::size_t> (n)] = 1.0f / static_cast<float> (n);
+
+    return r;
+}();
 
 constexpr double targetRms = 0.31622776601683794; // -10 dBFS at level 1
 constexpr double uniformVariance = 1.0 / 3.0;     // uniform [-1, 1)
@@ -103,7 +115,7 @@ void NoiseSource::beginTick (float level, float newColour, int tickSamples) noex
 
     gainTarget = std::isfinite (level) ? std::clamp (level, 0.0f, 1.0f) : 0.0f;
     colourTarget = std::isfinite (newColour) ? std::clamp (newColour, 0.0f, 1.0f) : 0.0f;
-    const float invN = 1.0f / static_cast<float> (n);
+    const float invN = reciprocalsF[static_cast<std::size_t> (n)];
     gainStep = (gainTarget - gain) * invN;
     colourStep = (colourTarget - colour) * invN;
     samplesLeftInTick = n;

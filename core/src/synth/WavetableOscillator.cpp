@@ -94,6 +94,27 @@ inline void splitPosition (double x, int& index, float& frac) noexcept
     frac = static_cast<float> (x - static_cast<double> (index));
 }
 
+/** 1 / n for the ramp lengths 1..controlTickSamples (no division per tick). */
+constexpr auto reciprocalsD = []
+{
+    std::array<double, controlTickSamples + 1> r {};
+
+    for (int n = 1; n <= controlTickSamples; ++n)
+        r[static_cast<std::size_t> (n)] = 1.0 / static_cast<double> (n);
+
+    return r;
+}();
+
+constexpr auto reciprocalsF = []
+{
+    std::array<float, controlTickSamples + 1> r {};
+
+    for (int n = 1; n <= controlTickSamples; ++n)
+        r[static_cast<std::size_t> (n)] = 1.0f / static_cast<float> (n);
+
+    return r;
+}();
+
 /** Offset of each level relative to level 0 (Wavetable::levelOffset is a loop when called at run time). */
 constexpr auto levelOffsets = []
 {
@@ -453,8 +474,8 @@ void WavetableOscillator::beginTick (const OscillatorTick& target, int tickSampl
     }
 
     // Steps over the (remaining) tick
-    const double invN = 1.0 / static_cast<double> (n);
-    const float invNf = 1.0f / static_cast<float> (n);
+    const double invN = reciprocalsD[static_cast<std::size_t> (n)];
+    const float invNf = reciprocalsF[static_cast<std::size_t> (n)];
 
     for (int u = 0; u < maxUnison; ++u)
     {
