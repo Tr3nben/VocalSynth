@@ -11,6 +11,13 @@
 #include <numbers>
 #include <vector>
 
+#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+ #define VOCALSYNTH_SUB_SSE2 1
+ #include <emmintrin.h>
+#else
+ #define VOCALSYNTH_SUB_SSE2 0
+#endif
+
 namespace vocalsynth::synth
 {
 
@@ -95,19 +102,34 @@ constexpr auto levelOffsets = []
     return offsets;
 }();
 
+/** 4-point Hermite (Catmull-Rom, the formula of WavetableOscillator.h) at x = phase * mipLength, written as
+    the weight polynomials w = ((A f + B) f + C) f + D and y = (w0 p[i-1] + w1 p[i]) + (w2 p[i+1] + w3 p[i+2]);
+    SSE2 where available (all x64 targets), plain C++ elsewhere. */
 inline float hermite (const float* p, double x) noexcept
 {
     const int i = static_cast<int> (x);
     const float f = static_cast<float> (x - static_cast<double> (i));
-    const float* a = p + i;
-    const float xm1 = a[-1];
-    const float x0 = a[0];
-    const float x1 = a[1];
-    const float x2 = a[2];
-    const float c1 = 0.5f * (x1 - xm1);
-    const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
-    const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
-    return ((c3 * f + c2) * f + c1) * f + x0;
+    const float* a = p + i - 1;
+#if VOCALSYNTH_SUB_SSE2
+    const __m128 fv = _mm_set1_ps (f);
+    __m128 w = _mm_add_ps (_mm_mul_ps (_mm_setr_ps (-0.5f, 1.5f, -1.5f, 0.5f), fv), _mm_setr_ps (1.0f, -2.5f, 2.0f, -0.5f));
+    w = _mm_add_ps (_mm_mul_ps (w, fv), _mm_setr_ps (-0.5f, 0.0f, 0.5f, 0.0f));
+    w = _mm_add_ps (_mm_mul_ps (w, fv), _mm_setr_ps (0.0f, 1.0f, 0.0f, 0.0f));
+    const __m128 prod = _mm_mul_ps (_mm_loadu_ps (a), w);
+    const __m128 pairs = _mm_add_ps (prod, _mm_shuffle_ps (prod, prod, _MM_SHUFFLE (2, 3, 0, 1)));
+    return _mm_cvtss_f32 (_mm_add_ss (pairs, _mm_movehl_ps (pairs, pairs)));
+#else
+    constexpr float wa[4] = { -0.5f, 1.5f, -1.5f, 0.5f };
+    constexpr float wb[4] = { 1.0f, -2.5f, 2.0f, -0.5f };
+    constexpr float wc[4] = { -0.5f, 0.0f, 0.5f, 0.0f };
+    constexpr float wd[4] = { 0.0f, 1.0f, 0.0f, 0.0f };
+    float y[4];
+
+    for (int j = 0; j < 4; ++j)
+        y[j] = a[j] * (((wa[j] * f + wb[j]) * f + wc[j]) * f + wd[j]);
+
+    return (y[0] + y[1]) + (y[2] + y[3]);
+#endif
 }
 } // namespace
 
