@@ -28,7 +28,8 @@ struct FilterTick
       LP24 = two LP stages with the same g: stage 1 Q = 0.5412, stage 2 Q = 1.3066 * (qMax / 1.3066)^r
       (4-pole Butterworth at r = 0, so -3 dB at fc for LP12 and LP24).
     - Drive d dB > 0: before the filter x' = s (G x) / sqrt (G), G = 10^(d / 20), s (u) = u / sqrt (1 + u^2)
-      (bounded, odd, soft); d == 0 skips the stage (exactly linear for the response tests).
+      (bounded, odd, soft); d == 0 skips the stage (exactly linear for the response tests); a change between
+      0 and > 0 crossfades the linear and the saturated signal over that tick (no level step).
     - Coefficient ramp: g and k are computed for the tick end; per sample linear ramp of g and k over the
       tick (the TPT structure is stable for any g > 0, k > 0, also while ramping). Cutoff smoothing is the
       caller's (SynthVoice smooths in log-frequency per tick).
@@ -54,12 +55,23 @@ public:
     uint32_t getNanResetCount() const noexcept { return nanResets; }
 
 private:
+    template <FilterMode M>
+    void run (float* left, float* right, int numSamples, bool ramping, int rampPosition) noexcept;
+
     double sampleRate = 48000.0;
     FilterMode mode = FilterMode::lp24;
-    float g = 0.0f, gStep = 0.0f;
-    float k = 1.4142f, kStep = 0.0f;
+    float g = 0.0f, gStep = 0.0f, gTarget = 0.0f;
+    float k = 1.4142f, kStep = 0.0f, kTarget = 1.4142f;
     float k1 = 1.8478f; ///< LP24 stage 1
-    float driveGain = 1.0f;
+    float driveGain = 1.0f, driveGainStep = 0.0f, driveGainTarget = 1.0f;
+    float driveNorm = 1.0f, driveNormStep = 0.0f, driveNormTarget = 1.0f; ///< 1 / sqrt (driveGain)
+    float driveMix = 0.0f, driveMixStep = 0.0f, driveMixTarget = 0.0f;    ///< 0 = linear, 1 = saturated
+    float cachedCutoff = -1.0f, cachedResonance = -1.0f, cachedDrive = -1.0f; ///< inputs of gTarget / kTarget / drive
+    float cachedDriveGain = 1.0f, cachedDriveNorm = 1.0f;
+    bool cachedFourPole = true;
+    int rampLeft = 0;        ///< samples until the ramp reaches the targets (then set exactly)
+    int rampTotal = 0;       ///< length of the running ramp (g, k, drive: start values + step * position)
+    bool jumpToTarget = true; ///< first beginTick() after reset(): no ramp
     std::array<std::array<float, 4>, 2> state {}; ///< [channel][ic1, ic2 of stage 1, ic1, ic2 of stage 2]
     uint32_t nanResets = 0;
 };

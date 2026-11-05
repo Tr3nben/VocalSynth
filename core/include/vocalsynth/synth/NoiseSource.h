@@ -24,12 +24,23 @@ public:
     void render (float* left, float* right, int numSamples) noexcept;
 
 private:
+    void finishRamps() noexcept;
+
     uint32_t seed = 1;
     uint32_t state = 1;
     std::array<float, 3> pinkState {};
+    std::array<float, 3> pinkPole {};   ///< Kellet's poles mapped to the sample rate
+    std::array<float, 3> pinkGain {};
+    float pinkDirect = 0.1848f;
+    float whiteScale = 1.0f;            ///< white RMS -> target RMS
+    float pinkScale = 1.0f;             ///< pink RMS -> target RMS
     float gain = 0.0f;
     float gainStep = 0.0f;
+    float gainTarget = 0.0f;
     float colour = 0.0f;
+    float colourStep = 0.0f;
+    float colourTarget = 0.0f;
+    int samplesLeftInTick = 0;
 };
 
 } // namespace vocalsynth::synth

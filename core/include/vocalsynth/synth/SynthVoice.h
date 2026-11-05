@@ -40,6 +40,9 @@ struct VoiceContext
     Pitch (semitones): note + bend + glide offset + "Pitch" mod (voice: Osc A, B, sub, keytrack)
     + osc octave * 12 + semi + fine / 100 + Osc A / B Pitch mod;
     glide is linear in semitones over glideTimeMs (constant time), evaluated per tick.
+    A start on a sounding voice (retrigger) restarts the envelopes from their current values and keeps the
+    oscillator phases (a phase restart would drop the oscillator gain to 0: a click); new phases, a cleared
+    filter and envelopes from 0 only for a start from silence and after a steal fade.
     Inactive (Env 1 idle and no steal fade): render() adds nothing and costs nothing.
     prepare() allocates (sub tables); everything else is real-time safe. Audio thread only. Owner: agent B. */
 class SynthVoice
@@ -73,6 +76,23 @@ public:
     uint32_t getNanResetCount() const noexcept;
 
 private:
+    /** Clean start of a note on a silent voice (or after a steal fade): states cleared, oscillators restarted,
+        envelopes from 0. */
+    void startFromSilence (const VoiceCommand& command, const VoiceContext& context) noexcept;
+    /** Note change on the sounding voice: new pitch (glide or jump), new velocity / random (not for
+        corrections); restartEnvelopes: from their current values (retrigger). */
+    void changeNote (const VoiceCommand& command, const VoiceContext& context, bool restartEnvelopes,
+                     bool newVelocity) noexcept;
+    void setPitchTarget (const VoiceCommand& command, const VoiceContext& context, float fromPitch) noexcept;
+    void advanceGlide (int samples, float glideTimeMs) noexcept;
+    float currentEnvelopeValue (int index) const noexcept;
+    float currentPitch() const noexcept;
+    /** Computes every target for the end of the current tick and ramps all modules to it over n samples. */
+    void retarget (const VoiceContext& context, int n, bool newTick) noexcept;
+    float nextRandom() noexcept;
+    void renderSegment (float* left, float* right, int numSamples) noexcept;
+    void deactivate() noexcept;
+
     double sampleRate = 48000.0;
     std::array<WavetableOscillator, numOscillators> osc;
     SubOscillator sub;
@@ -92,6 +112,31 @@ private:
     int stealFadeSamples = 0;
     VoiceCommand pendingStart {};
     bool hasPendingStart = false;
+
+    uint32_t seed = 1;
+    bool active = false;
+    bool released = false;
+    bool startedFromSilence = false;  ///< a start since the last retarget: filter cutoff jumps instead of smoothing
+    int rampLength = controlTickSamples; ///< length of the current ramp segment (tick or rest of a tick)
+    int rampDone = 0;                    ///< samples rendered in it
+    std::array<float, numEnvelopes> envFrom {}, envTo {}; ///< envelope values at the ramp start / end
+    float pitchFrom = 0.0f;              ///< glide pitch at the ramp start (pitch = at the ramp end)
+    float ampRight = 0.0f, ampRightStep = 0.0f; ///< ampGain / ampStep are the left channel (amp x pan)
+    float ampTargetLeft = 0.0f, ampTargetRight = 0.0f;
+    float fadeGain = 1.0f, fadeStep = 0.0f; ///< steal fade (linear to 0 over stealFadeSamples)
+    int stealFadeLength = 96;
+    float cutoffLog2 = 14.0f;            ///< smoothed log2 (cutoff Hz)
+    float cutoffCoefficient = 1.0f;      ///< one-pole per tick
+    float cachedPan = 0.0f, panLeft = 1.0f, panRight = 1.0f;
+    std::array<float, numOscillators> oscLevelSent {}; ///< level target of the last beginTick (0: may stop)
+    std::array<bool, numOscillators> oscRunning {};    ///< beginTick / render called this tick
+    float subLevelSent = 0.0f, noiseLevelSent = 0.0f;
+    bool subRunning = false, noiseRunning = false;
+    bool filterRunning = false;
+    ModSourceValues voiceSources {};     ///< per-voice entries of the last control position
+    float cachedAmpGainDb = 0.0f, ampGainLinear = 1.0f;
+    std::array<bool, numEnvelopes> restarted {}; ///< envelopes (re)started by the current command
+    bool pitchRestarted = false;                 ///< the current command set a new pitch / glide
 };
 
 } // namespace vocalsynth::synth

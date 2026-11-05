@@ -39,6 +39,10 @@ public:
     float getValue() const noexcept { return value; }
 
 private:
+    float nextRandom() noexcept;
+    void newCycle() noexcept;
+    float shapeValue (LfoShape shape) const noexcept;
+
     double sampleRate = 48000.0;
     uint32_t seed = 1;
     uint32_t random = 1;
@@ -47,6 +51,9 @@ private:
     float holdValue = 0.0f;
     float nextHoldValue = 0.0f;
     float value = 0.0f;
+    bool fading = false;          ///< a fade-in runs (from the tick after a retrigger())
+    bool retriggerPending = false; ///< retrigger() since the previous tick
+    bool phaseResetPending = false;
 };
 
 } // namespace vocalsynth::synth

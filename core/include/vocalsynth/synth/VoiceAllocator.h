@@ -130,11 +130,28 @@ public:
     int getNumHeldNotes() const noexcept;
 
 private:
+    void processMono (std::span<const NoteInput> group, int64_t absoluteSample, const AllocatorSettings& settings,
+                      const std::array<bool, maxVoices>& voiceActive, VoiceCommandList& out) noexcept;
+    void processPoly (std::span<const NoteInput> group, int64_t absoluteSample, const AllocatorSettings& settings,
+                      const std::array<bool, maxVoices>& voiceActive, VoiceCommandList& out) noexcept;
+    void stackRemove (int note) noexcept;
+    void stackPush (int note, uint8_t velocity) noexcept;
+    bool isCorrection (const NoteInput& noteOn, int voice, int64_t absoluteSample) const noexcept;
+    int findHeldVoice (int note) const noexcept;
+    void assign (int voice, int note, int64_t absoluteSample, bool keepStart) noexcept;
+    void markReleased (int voice, int64_t absoluteSample) noexcept;
+
     double sampleRate = 48000.0;
-    std::array<int16_t, maxVoices> voiceNote {};     ///< note held by each voice, -1 none
+    int64_t correctionWindowSamples = 1920;
+    std::array<int16_t, maxVoices> voiceNote {};     ///< note of each voice (held or releasing), -1 none
     std::array<int64_t, maxVoices> voiceStart {};    ///< absolute sample of its note-on (steal order, correction)
-    std::array<int64_t, maxVoices> voiceRelease {};  ///< absolute sample of its release, -1 none
+    std::array<int64_t, maxVoices> voiceRelease {};  ///< absolute sample of its release, -1 none (= held)
+    std::array<uint64_t, maxVoices> voiceOrder {};   ///< sequence number of the voice's newest command
     std::array<uint8_t, maxHeldNotes> stack {};
+    std::array<uint8_t, maxHeldNotes> stackVelocity {};
+    std::array<bool, 128> held {};                   ///< note-on without note-off yet (all modes)
+    uint64_t orderCounter = 0;
+    int64_t lastSample = 0;                          ///< position of the newest group (releaseAll's release time)
     int stackSize = 0;
     int lastNote = -1;
     int newestVoice = -1;

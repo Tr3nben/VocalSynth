@@ -37,13 +37,25 @@ public:
     void render (float* left, float* right, int numSamples) noexcept;
 
 private:
+    template <bool levelFade>
+    void renderSegment (float* left, float* right, int numSamples) noexcept;
+    void finishRamps() noexcept;
+
     double sampleRate = 48000.0;
     const std::array<std::unique_ptr<Wavetable>, numSubShapes>* tables = nullptr; ///< shared, see class comment
     SubShape shape = SubShape::sine;
     double phase = 0.0;
     double increment = 0.0;
+    double incrementStep = 0.0;
+    double incrementTarget = 0.0;
     float gain = 0.0f;
     float gainStep = 0.0f;
+    float gainTarget = 0.0f;
+    float levelMix = 1.0f, levelMixStep = 0.0f;   ///< weight of mipLevel vs fromMipLevel
+    int mipLevel = 0;
+    int fromMipLevel = 0;
+    int samplesLeftInTick = 0;
+    bool jumpToTargets = true;
 };
 
 } // namespace vocalsynth::synth

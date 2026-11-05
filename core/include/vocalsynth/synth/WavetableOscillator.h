@@ -94,16 +94,51 @@ public:
     int getMipLevel() const noexcept { return mipLevel; }
 
 private:
+    template <int numTables, bool levelFade>
+    void renderSegment (float* left, float* right, int numSamples) noexcept;
+    void finishRamps() noexcept;
+    void updateUnisonCache (int voices, float detuneCents, float pan, float spread) noexcept;
+
     double sampleRate = 48000.0;
-    const Wavetable* table = nullptr;
-    const Wavetable* previousTable = nullptr;
-    const Wavetable* pendingTable = nullptr;
-    int mipLevel = 0;
+    const Wavetable* table = nullptr;         ///< current (faded in during a crossfade)
+    const Wavetable* previousTable = nullptr; ///< faded out during a crossfade, else nullptr
+    const Wavetable* pendingTable = nullptr;  ///< newest setTable() (queued while a crossfade runs)
+    int mipLevel = 0;                         ///< level at the tick end
+    int fromMipLevel = 0;                     ///< level faded out during this tick (== mipLevel: no level fade)
     int unison = 1;
+    int renderVoices = 1;                     ///< unison voices with a gain ramp (incl. removed ones fading out)
+    int samplesLeftInTick = 0;
+    int fadeTicks = 1;                        ///< ceil (tableCrossfadeSeconds * fs / controlTickSamples)
+    int fadeTick = 0;
+    bool fading = false;
+    bool started = false;                     ///< restart() since reset()
+    bool jumpToTargets = true;                ///< first beginTick after reset / restart: no pitch / position ramp
+
+    // Per-sample ramps (current value, step, value at the tick end)
     std::array<double, maxUnison> phase {};
     std::array<double, maxUnison> increment {};
+    std::array<double, maxUnison> incrementStep {};
+    std::array<double, maxUnison> incrementTarget {};
     std::array<float, maxUnison> gainLeft {};
     std::array<float, maxUnison> gainRight {};
+    std::array<float, maxUnison> gainLeftStep {};
+    std::array<float, maxUnison> gainRightStep {};
+    std::array<float, maxUnison> gainLeftTarget {};
+    std::array<float, maxUnison> gainRightTarget {};
+    std::array<double, maxUnison> startPhase {};
+    float position = 0.0f, positionStep = 0.0f, positionTarget = 0.0f;
+    float tableMix = 1.0f, tableMixStep = 0.0f, tableMixTarget = 1.0f; ///< weight of table vs previousTable
+    float levelMix = 1.0f, levelMixStep = 0.0f, levelMixTarget = 1.0f; ///< weight of mipLevel vs fromMipLevel
+    float levelTarget = 0.0f;                 ///< overall gain at the tick end (0 = silent)
+
+    // Unison cache (recomputed only when its inputs change)
+    int cachedVoices = 0;
+    float cachedDetune = -1.0f;
+    float cachedPan = -2.0f;
+    float cachedSpread = -1.0f;
+    std::array<double, maxUnison> detuneRatio {};
+    std::array<float, maxUnison> panLeft {};
+    std::array<float, maxUnison> panRight {};
 };
 
 } // namespace vocalsynth::synth
