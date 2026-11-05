@@ -1,5 +1,7 @@
 #include "vocalsynth/ExpressionTracker.h"
 
+#include "vocalsynth/synth/RealFft.h"
+
 #include <algorithm>
 #include <cmath>
 #include <numbers>
@@ -34,11 +36,17 @@ inline float onePoleCoefficient (double seconds, double hopSeconds) noexcept
 }
 } // namespace
 
+ExpressionTracker::ExpressionTracker() = default;
+ExpressionTracker::~ExpressionTracker() = default;
+ExpressionTracker::ExpressionTracker (ExpressionTracker&&) noexcept = default;
+ExpressionTracker& ExpressionTracker::operator= (ExpressionTracker&&) noexcept = default;
+
 void ExpressionTracker::prepare (double analysisSampleRate, int hop)
 {
     analysisRate = analysisSampleRate > 0.0 && std::isfinite (analysisSampleRate) ? analysisSampleRate : 16000.0;
     hopSamples = hop > 0 ? hop : 1;
-    fft.prepare (fftOrder);
+    if (fft == nullptr)
+        fft = std::make_unique<synth::RealFft> (fftOrder);
     windowed.assign (static_cast<std::size_t> (fftSize), 0.0f);
     power.assign (static_cast<std::size_t> (fftSize / 2 + 1), 0.0f);
     hann.assign (static_cast<std::size_t> (fftSize), 0.0f);
@@ -92,8 +100,10 @@ void ExpressionTracker::analyseSpectrum (std::span<const float> window) noexcept
         windowed[static_cast<std::size_t> (i)] = std::isfinite (x) ? x * hann[static_cast<std::size_t> (i)] : 0.0f;
     }
 
-    fft.powerSpectrum (windowed, power);
+    if (fft == nullptr)
+        return; // not prepared
 
+    fft->powerSpectrum (windowed, power);
     double sum = 0.0, weighted = 0.0, logSum = 0.0;
 
     for (int k = firstBin; k <= lastBin; ++k)

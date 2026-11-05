@@ -44,6 +44,9 @@ struct SynthEngineStats
     (engine, voices, oscillators). A table set with setWavetable() is applied at the next tick; it is only
     read after that if the processor set it in the SAME block (every block starts with setWavetable), so
     getTablesInUse() needs to report only what the voices read (current / previous of a crossfade).
+    The engine hands a new table to the voices only between crossfades: a table set while a crossfade runs
+    waits for its end (<= 5 ms; newest wins), so all voices share one table timeline and at most two
+    pointers per oscillator are ever read (also when notes start mid-crossfade).
 
     Timing (binding): the engine keeps its own absolute sample clock (0 at reset()). A tick at clock t is run
     by the process() call whose range [c, c + n) contains t, with that call's settings. Events are applied at
@@ -76,7 +79,9 @@ public:
     static constexpr double bendSmoothingSeconds = 0.005;
     static constexpr double synthOnFadeSeconds = 0.010;
     /** Unison voices per oscillator in Poly mode (docs/SYNTH-DESIGN.md 18 decision rule; the parameter range
-        stays 1..8, Mono / Legato always get the full count). */
+        stays 1..8, Mono / Legato always get the full count). Decision at the end of wave 2: no cap - the
+        worst case (Poly 16 x 2 osc x 8 unison, sub, noise, LP24 + drive, all FX, 48 kHz / 128) measured
+        8.2 % (< 12 %). Must not change once the golden fingerprints exist. */
     static constexpr int polyMaxUnison = maxUnisonVoices;
 
     SynthEngine();

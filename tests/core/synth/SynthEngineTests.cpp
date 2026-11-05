@@ -37,6 +37,7 @@ using namespace vocalsynth;
 using namespace vocalsynth::synth;
 using Catch::Matchers::WithinAbs;
 namespace st = vocalsynth::synth::test;
+namespace sig = vocalsynth::test;
 
 //==============================================================================
 // Allocation counter for the audio path. tests/core/CaptureTapTests.cpp already replaces the global operator new
@@ -339,7 +340,7 @@ Scene invarianceScene (double sr, bool voiceMode)
 {
     Scene s;
     s.sr = sr;
-    s.length = s.at (5.0);
+    s.length = s.at (7.0); // the FDN needs 2 x RT60 (0.86 s) to reach -120 dB after the delay's tail
     s.voiceMode = voiceMode;
 
     auto poly = busySettings();
@@ -459,18 +460,18 @@ double zeroCrossingHz (const std::vector<float>& x, double sr, double from, doub
 //==============================================================================
 // The VoicePipeline in front of the engine (Voice mode, like the processor)
 
-test::Signal sungPhrase (double sr)
+sig::Signal sungPhrase (double sr)
 {
-    auto a = test::toneSequence (sr, { { 0.0, 0.1 }, { test::midiToHz (57), 0.3 }, { test::midiToHz (60), 0.25 },
-                                       { test::midiToHz (64), 0.25 }, { 0.0, 0.2 } },
-                                 0.3f, test::sawShape);
-    const auto vib = test::vibrato (sr, test::midiToHz (62), 50.0, 5.5, 0.5, 0.25f);
-    const auto breath = test::whiteNoise (sr, 0.2, 0.05f, 11);
-    const auto rest = test::silence (sr, 1.2);
-    return test::concat ({ a, vib, breath, rest });
+    auto a = sig::toneSequence (sr, { { 0.0, 0.1 }, { sig::midiToHz (57), 0.3 }, { sig::midiToHz (60), 0.25 },
+                                       { sig::midiToHz (64), 0.25 }, { 0.0, 0.2 } },
+                                 0.3f, sig::sawShape);
+    const auto vib = sig::vibrato (sr, sig::midiToHz (62), 50.0, 5.5, 0.5, 0.25f);
+    const auto breath = sig::whiteNoise (sr, 0.2, 0.05f, 11);
+    const auto rest = sig::silence (sr, 1.2);
+    return sig::concat ({ a, vib, breath, rest });
 }
 
-st::Stereo renderWithPipeline (const test::Signal& input, double sr, const SynthSettings& settings, int block)
+st::Stereo renderWithPipeline (const sig::Signal& input, double sr, const SynthSettings& settings, int block)
 {
     VoicePipeline pipeline;
     pipeline.prepare (sr, 4096);
@@ -519,7 +520,7 @@ TEST_CASE ("SynthEngine: bit-identical for every host block split (notes, bends,
     CHECK (rmsOf (reference.left, sr, 1.6, 2.1) > 1e-3);
     CHECK (rmsOf (reference.left, sr, 2.5, 3.0) > 1e-3);
     CHECK (rmsOf (reference.left, sr, 2.3, 2.34) == 0.0); // synthOn off (fade over), the note at 2.25 ignored
-    CHECK (rmsOf (reference.left, sr, 4.6, 5.0) == 0.0);  // every voice and FX tail ended
+    CHECK (rmsOf (reference.left, sr, 6.5, 7.0) == 0.0);  // every voice and FX tail ended
 
     for (const auto block : hostBlocks)
     {
@@ -564,9 +565,7 @@ TEST_CASE ("SynthEngine: no allocation on the audio path", "[synth][engine]")
     pipeline.prepare (sr, 4096);
     const auto input = sungPhrase (sr);
 
-    // Everything the scene renderer touches is sized before counting starts; render() itself only clears
-    // and refills reserved vectors. Then the whole scene and a Voice-mode pipeline run are counted.
-    st::Stereo out (static_cast<std::size_t> (scene.length));
+    // Voice mode like the processor: pipeline with expression -> engine, a table change, releaseAll, reset
     VsEventBuffer<1024> events;
     VsEventTimingBuffer<1024> timings;
     ExpressionBuffer frames;
@@ -612,13 +611,19 @@ TEST_CASE ("SynthEngine: no allocation on the audio path", "[synth][engine]")
         CHECK (allocations == 0);
     }
 
-    // The scene renderer path (Test Pattern / Voice mode buffers, all settings phases)
+    // The counter itself works (otherwise the checks above would pass vacuously)
     {
-        CountMallocs counter;
-        engine.reset();
-        const auto rendered = render (engine, scene, 480); // the output vector is allocated before counting? no:
-        (void) rendered;
-        // render() allocates its own output and change-point list - so this block only checks that it ran.
+        std::vector<float>* volatile probe = nullptr; // volatile: the allocation cannot be elided
+        std::size_t counted = 0;
+
+        {
+            CountMallocs counter;
+            probe = new std::vector<float> (100);
+            counted = counter.count();
+        }
+
+        delete probe;
+        CHECK (counted >= 2);
     }
 #else
     SKIP ("allocation counting needs glibc's malloc (not available on this platform / under sanitizers)");
@@ -630,9 +635,9 @@ TEST_CASE ("SynthEngine: silence gives exact 0 and no active voice once every ta
     const double sr = 48000.0;
     Scene s;
     s.sr = sr;
-    s.length = s.at (6.0);
+    s.length = s.at (8.0);
     auto settings = busySettings();
-    settings.reverb.sizePercent = 60.0f;
+    settings.reverb.sizePercent = 40.0f; // RT60 1.2 s: -120 dB (tail end) 2.4 s after the delay's tail
     s.settings = { { 0, settings } };
     s.tables = { { 0, { &st::sawTable(), &st::squareTable() } } };
     s.on (0.0, 60);
@@ -657,7 +662,7 @@ TEST_CASE ("SynthEngine: silence gives exact 0 and no active voice once every ta
     }();
 
     CAPTURE (lastNonZero);
-    CHECK (lastNonZero < 5.0);
+    CHECK (lastNonZero < 7.0);
     CHECK (engine.getStats().activeVoices == 0);
     CHECK (engine.getStats().nanResets == 0);
 }
@@ -758,7 +763,7 @@ TEST_CASE ("SynthEngine: rest expression (Test Pattern) - level 1 while a note i
     const auto tickSeconds = 16.0 / sr;
     std::vector<float> level;
 
-    for (int tick = 0; tick < 2000; ++tick)
+    for (int tick = 0; tick < 4000; ++tick)
     {
         std::vector<VsEvent> events;
 
@@ -1152,7 +1157,7 @@ TEST_CASE ("SynthEngine: non-finite settings, frames and odd events stay finite"
 
     const auto e = engine.getCurrentExpression();
     CHECK (std::isfinite (e.level));
-    CHECK (std::isfinite (e.pitchCents));
+    CHECK (std::abs (e.pitchCents) <= 100.0f); // frames are sanitised
 }
 
 TEST_CASE ("SynthVoice: an oscillator that ends inside a table crossfade forgets the faded-out table", "[synth][engine]")

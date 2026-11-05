@@ -1,10 +1,15 @@
 #pragma once
 
 #include "vocalsynth/ExpressionFrame.h"
-#include "vocalsynth/synth/RealFft.h"
 
+#include <memory>
 #include <span>
 #include <vector>
+
+namespace vocalsynth::synth
+{
+class RealFft;
+}
 
 namespace vocalsynth
 {
@@ -46,6 +51,11 @@ public:
     static constexpr float brightnessLowHz = 200.0f;
     static constexpr float brightnessHighHz = 5000.0f;
 
+    ExpressionTracker();
+    ~ExpressionTracker();
+    ExpressionTracker (ExpressionTracker&&) noexcept;
+    ExpressionTracker& operator= (ExpressionTracker&&) noexcept;
+
     /** analysisSampleRate: VoicePipeline::getAnalysisSampleRate(), hopSamples at that rate. NOT real-time. */
     void prepare (double analysisSampleRate, int hopSamples);
 
@@ -62,7 +72,7 @@ private:
     double analysisRate = 16000.0;
     int hopSamples = 32;
     int hopCounter = 0;
-    synth::RealFft fft;
+    std::unique_ptr<synth::RealFft> fft; ///< behind a pointer: VoicePipeline.h stays free of RealFft.h (made in prepare())
     std::vector<float> windowed;
     std::vector<float> power;
     std::vector<float> hann;

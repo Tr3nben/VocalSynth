@@ -323,7 +323,13 @@ void SynthEngine::consumeFrame (int index, PendingFrame& out) noexcept
     const auto& f = (*frames)[static_cast<std::size_t> (index)];
     const auto offset = std::clamp (f.sampleOffset, 0, std::max (0, callSamples - 1));
     const auto position = callStart + offset;
+    // Sanitised: non-finite -> 0, every value in its range (16.1)
+    const auto unit = [] (float v) noexcept { return std::isfinite (v) ? std::clamp (v, 0.0f, 1.0f) : 0.0f; };
     out.frame = f;
+    out.frame.level = unit (f.level);
+    out.frame.brightness = unit (f.brightness);
+    out.frame.noisiness = unit (f.noisiness);
+    out.frame.pitchCents = std::isfinite (f.pitchCents) ? std::clamp (f.pitchCents, -100.0f, 100.0f) : 0.0f;
     out.position = position;
     out.distance = hasLastFrame ? static_cast<int> (std::clamp<int64_t> (position - lastFramePosition, controlTickSamples,
                                                                          maxFrameDistance))

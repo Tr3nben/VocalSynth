@@ -170,6 +170,6 @@ TEST_CASE ("0.3.1 state fixtures give the default synth state and default tables
     CHECK (countChildren (state, SynthState::treeType) == 1);
     CHECK (countChildren (state, "PARAM") == countChildren (before, "PARAM"));
     CHECK (countChildren (state, CaptureState::treeType) == 1);
-    CHECK (SynthState::fromValueTree (state.getChildWithName (SynthState::treeType)).tables[1].reference
-           == synthState.tables[1].reference);
+    CHECK (SynthState::fromValueTree (state.getChildWithName (SynthState::treeType)).tables[1].reference.toRefString()
+           == "factory:basic-shapes");
 }
