@@ -124,24 +124,45 @@ void NoiseSource::render (float* left, float* right, int numSamples) noexcept
         float b0 = pinkState[0], b1 = pinkState[1], b2 = pinkState[2];
         const float p0 = pinkPole[0], p1 = pinkPole[1], p2 = pinkPole[2];
         const float g0 = pinkGain[0], g1 = pinkGain[1], g2 = pinkGain[2];
+        const float d = pinkDirect, ws = whiteScale, ps = pinkScale;
         float g = gain;
         float c = colour;
+        const float gStep = gainStep, cStep = colourStep;
 
-        for (int s = 0; s < n; ++s)
+        // Pure white for the whole tick (colour 0, not ramping): the pink filter is not run (its state waits;
+        // the decision depends on per-tick values only, so it is the same for every block split).
+        if (c == 0.0f && cStep == 0.0f)
         {
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            const float white = static_cast<float> (static_cast<int32_t> (x)) * (1.0f / 2147483648.0f);
-            b0 = p0 * b0 + g0 * white;
-            b1 = p1 * b1 + g1 * white;
-            b2 = p2 * b2 + g2 * white;
-            const float pink = b0 + b1 + b2 + pinkDirect * white;
-            const float out = g * ((1.0f - c) * whiteScale * white + c * pinkScale * pink);
-            left[s] += out;
-            right[s] += out;
-            g += gainStep;
-            c += colourStep;
+            for (int s = 0; s < n; ++s)
+            {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                const float white = static_cast<float> (static_cast<int32_t> (x)) * (1.0f / 2147483648.0f);
+                const float out = g * (ws * white);
+                left[s] += out;
+                right[s] += out;
+                g += gStep;
+            }
+        }
+        else
+        {
+            for (int s = 0; s < n; ++s)
+            {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                const float white = static_cast<float> (static_cast<int32_t> (x)) * (1.0f / 2147483648.0f);
+                b0 = p0 * b0 + g0 * white;
+                b1 = p1 * b1 + g1 * white;
+                b2 = p2 * b2 + g2 * white;
+                const float pink = b0 + b1 + b2 + d * white;
+                const float out = g * ((1.0f - c) * ws * white + c * ps * pink);
+                left[s] += out;
+                right[s] += out;
+                g += gStep;
+                c += cStep;
+            }
         }
 
         state = x;

@@ -5,6 +5,7 @@
 #include "vocalsynth/synth/WavetableOscillator.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <numbers>
@@ -82,6 +83,17 @@ int chooseMipLevel (int current, double maxIncrement) noexcept
 
     return std::min (down, current);
 }
+
+/** Offset of each level relative to level 0 (Wavetable::levelOffset is a loop when called at run time). */
+constexpr auto levelOffsets = []
+{
+    std::array<std::ptrdiff_t, Wavetable::numMipLevels> offsets {};
+
+    for (int level = 0; level < Wavetable::numMipLevels; ++level)
+        offsets[static_cast<std::size_t> (level)] = Wavetable::levelOffset (level) - Wavetable::levelOffset (0);
+
+    return offsets;
+}();
 
 inline float hermite (const float* p, double x) noexcept
 {
@@ -198,15 +210,18 @@ void SubOscillator::beginTick (double newIncrement, float level, SubShape newSha
 template <bool levelFade>
 void SubOscillator::renderSegment (float* left, float* right, int numSamples) noexcept
 {
-    const Wavetable& t = *(*tables)[static_cast<std::size_t> (shape)];
-    const float* to = t.getLevel (0, mipLevel);
-    [[maybe_unused]] const float* from = t.getLevel (0, fromMipLevel);
+    const float* level0 = (*tables)[static_cast<std::size_t> (shape)]->getLevel (0, 0);
+    const float* to = level0 + levelOffsets[static_cast<std::size_t> (mipLevel)];
+    [[maybe_unused]] const float* from = level0 + levelOffsets[static_cast<std::size_t> (fromMipLevel)];
     const double lenTo = static_cast<double> (Wavetable::mipLength (mipLevel));
     [[maybe_unused]] const double lenFrom = static_cast<double> (Wavetable::mipLength (fromMipLevel));
     double ph = phase;
     double inc = increment;
+    const double incStep = incrementStep;
     float g = gain;
+    const float gStep = gainStep;
     float mix = levelMix;
+    const float mixStep = levelMixStep;
 
     for (int s = 0; s < numSamples; ++s)
     {
@@ -216,7 +231,7 @@ void SubOscillator::renderSegment (float* left, float* right, int numSamples) no
         {
             const float vf = hermite (from, ph * lenFrom);
             v = vf + (v - vf) * mix;
-            mix += levelMixStep;
+            mix += mixStep;
         }
 
         const float out = v * g;
@@ -224,11 +239,11 @@ void SubOscillator::renderSegment (float* left, float* right, int numSamples) no
         right[s] += out;
         ph += inc;
 
-        if (ph >= 1.0)
+        if (ph >= 1.0) [[unlikely]] // a branch: a select would sit on the loop-carried phase chain
             ph -= 1.0;
 
-        inc += incrementStep;
-        g += gainStep;
+        inc += incStep;
+        g += gStep;
     }
 
     phase = ph;

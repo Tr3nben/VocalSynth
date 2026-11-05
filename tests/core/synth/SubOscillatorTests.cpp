@@ -185,33 +185,49 @@ TEST_CASE ("SubOscillator: bit-identical for every block split, mip changes duri
 
 TEST_CASE ("SubOscillator + NoiseSource: benchmark", "[synth][sub][noise][!benchmark]")
 {
-    // ns per voice per sample for sub + noise together (budget 3 ns, docs/SYNTH-DESIGN.md 18), incl. ticks.
-    SubOscillator sub;
-    sub.prepare (48000.0);
-    sub.restart();
-    NoiseSource noise;
-    noise.prepare (48000.0, 3u);
-    std::array<float, 128> l {}, r {};
-    double best = 1e9;
-
-    for (int run = 0; run < 9; ++run)
+    // ns per voice per sample (budget for sub + noise together 3 ns, docs/SYNTH-DESIGN.md 18), incl. ticks.
+    // Minimum of 9 runs.
+    const auto measure = [] (bool withSub, bool withNoise, float colour)
     {
-        const int blocks = 4000;
-        const auto start = std::chrono::steady_clock::now();
+        SubOscillator sub;
+        sub.prepare (48000.0);
+        sub.restart();
+        NoiseSource noise;
+        noise.prepare (48000.0, 3u);
+        std::array<float, 128> l {}, r {};
+        double best = 1e9;
 
-        for (int b = 0; b < blocks; ++b)
-            for (int s = 0; s < 128; s += 16)
-            {
-                sub.beginTick (55.0 / 48000.0, 0.5f, SubShape::triangle, 16);
-                noise.beginTick (0.3f, 0.5f, 16);
-                sub.render (l.data() + s, r.data() + s, 16);
-                noise.render (l.data() + s, r.data() + s, 16);
-            }
+        for (int run = 0; run < 9; ++run)
+        {
+            const int blocks = 4000;
+            const auto start = std::chrono::steady_clock::now();
 
-        const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
-        best = std::min (best, seconds * 1e9 / (blocks * 128.0));
-    }
+            for (int b = 0; b < blocks; ++b)
+                for (int s = 0; s < 128; s += 16)
+                {
+                    if (withSub)
+                    {
+                        sub.beginTick (55.0 / 48000.0, 0.5f, SubShape::triangle, 16);
+                        sub.render (l.data() + s, r.data() + s, 16);
+                    }
 
-    std::printf ("Sub + Noise: %.2f ns per voice per sample, checksum %g\n", best, static_cast<double> (l[3] + r[100]));
-    CHECK (best > 0.0);
+                    if (withNoise)
+                    {
+                        noise.beginTick (0.3f, colour, 16);
+                        noise.render (l.data() + s, r.data() + s, 16);
+                    }
+                }
+
+            const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
+            best = std::min (best, seconds * 1e9 / (blocks * 128.0));
+        }
+
+        CHECK (std::isfinite (l[3] + r[100]));
+        return best;
+    };
+
+    std::printf ("Sub: %.2f ns, white noise: %.2f ns, pink noise: %.2f ns, blended noise: %.2f ns, sub + blended noise: "
+                 "%.2f ns per voice per sample\n",
+                 measure (true, false, 0.0f), measure (false, true, 0.0f), measure (false, true, 1.0f),
+                 measure (false, true, 0.5f), measure (true, true, 0.5f));
 }
