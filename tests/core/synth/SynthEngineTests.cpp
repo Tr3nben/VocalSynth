@@ -871,7 +871,9 @@ TEST_CASE ("SynthEngine: table retire protocol with real frees - no pointer the 
     mallopt (M_MMAP_THRESHOLD, 128 * 1024);
 #endif
     const double sr = 48000.0;
-    std::mt19937 rng (1234);
+    const auto seed = GENERATE (1234u, 99u, 7u, 2026u, 31337u);
+    CAPTURE (seed);
+    std::mt19937 rng (seed);
     const auto saw = st::cycleFromSeries (st::sawSeries (300));
     const auto square = st::cycleFromSeries (st::squareSeries (300));
 
@@ -1211,6 +1213,24 @@ TEST_CASE ("SynthVoice: an oscillator that ends inside a table crossfade forgets
     voice.apply (start, context, 16);
     voice.controlTick (context);
     CHECK (voice.getTablesInUse (0).current == tableB.get());
+    CHECK (voice.getTablesInUse (0).previous == nullptr);
+
+    // A table given in the very tick the voice ends (the engine forwards before the voice ticks) is the one
+    // the idle voice keeps - not the oscillator's older current table (found by the retire-protocol test)
+    const auto tableC = st::buildTable ({ st::cycleFromSeries (st::sawSeries (50)) });
+    voice.render (l.data(), r.data(), 16);
+    voice.apply (release, context, 16);
+
+    for (int t = 0; t < 10 && voice.isActive(); ++t)
+    {
+        voice.setTables (tableC.get(), tableC.get());
+        voice.controlTick (context);
+        voice.render (l.data(), r.data(), 16);
+    }
+
+    REQUIRE_FALSE (voice.isActive());
+    CHECK (voice.getTablesInUse (0).current == tableC.get());
+    CHECK (voice.getTablesInUse (1).current == tableC.get());
     CHECK (voice.getTablesInUse (0).previous == nullptr);
 }
 

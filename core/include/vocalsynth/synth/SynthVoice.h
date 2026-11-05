@@ -136,6 +136,7 @@ private:
     ModSourceValues voiceSources {};     ///< per-voice entries of the last control position
     float cachedAmpGainDb = 0.0f, ampGainLinear = 1.0f;
     std::array<bool, numEnvelopes> restarted {}; ///< envelopes (re)started by the current command
+    std::array<const Wavetable*, numOscillators> tablesSet {}; ///< newest setTables() (kept by deactivate())
     bool pitchRestarted = false;                 ///< the current command set a new pitch / glide
 };
 

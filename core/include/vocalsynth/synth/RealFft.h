@@ -24,10 +24,10 @@ public:
     static constexpr int maxOrder = 14;
 
     RealFft() = default;
-    explicit RealFft (int order) { prepare (order); }
+    explicit RealFft (int fftOrder) { prepare (fftOrder); }
 
     /** order clamped to minOrder..maxOrder. NOT real-time (may throw std::bad_alloc). */
-    void prepare (int order);
+    void prepare (int newOrder);
 
     int getOrder() const noexcept { return order; }
     int getSize() const noexcept { return 1 << order; }

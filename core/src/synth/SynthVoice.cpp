@@ -73,6 +73,8 @@ void SynthVoice::reset() noexcept
     for (auto& o : osc)
         o.reset();
 
+    tablesSet.fill (nullptr);
+
     sub.reset();
     noise.reset();
     filter.reset();
@@ -117,15 +119,14 @@ void SynthVoice::reset() noexcept
 void SynthVoice::deactivate() noexcept
 {
     // Silent: the next note starts clean (startFromSilence clears the DSP states). The pitch stays for a
-    // glide "Always" from silence. The oscillators forget every table pointer except the newest one they
-    // read (docs/SYNTH-DESIGN.md 12.1): an oscillator that stopped inside a table crossfade (switched off
-    // mid-fade, or the note ended) would otherwise report the faded-out table for ever, and an idle voice
-    // takes a new table at once anyway (setTable on a silent oscillator).
-    for (auto& o : osc)
+    // glide "Always" from silence. The oscillators forget every table pointer and take the newest one set
+    // (docs/SYNTH-DESIGN.md 12.1): an oscillator that stopped inside a table crossfade (switched off mid-fade,
+    // or the note ended) would otherwise report the faded-out table for ever. Not the oscillator's current
+    // table: a setTables() earlier in this tick is still queued in it.
+    for (std::size_t i = 0; i < osc.size(); ++i)
     {
-        const auto newest = o.getTablesInUse().current;
-        o.reset();
-        o.setTable (newest);
+        osc[i].reset();
+        osc[i].setTable (tablesSet[i]);
     }
 
     active = false;
@@ -148,6 +149,7 @@ void SynthVoice::deactivate() noexcept
 
 void SynthVoice::setTables (const Wavetable* oscA, const Wavetable* oscB) noexcept
 {
+    tablesSet = { oscA, oscB };
     osc[0].setTable (oscA);
     osc[1].setTable (oscB);
 }
