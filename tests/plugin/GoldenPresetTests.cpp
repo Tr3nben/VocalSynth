@@ -54,7 +54,7 @@ constexpr int fftOrder = 13;         // 8192
 constexpr double floorDb = -100.0;
 
 // Level matching (FactoryPresets.cpp): every preset except Init
-constexpr double loudnessTargetLufs = -16.0;
+constexpr double loudnessTargetLufs = -18.0;
 constexpr double loudnessToleranceLu = 1.0;
 constexpr double peakLimitDbfs = -1.0;
 
@@ -611,8 +611,8 @@ TEST_CASE ("GoldenPreset: presets are level-matched with ampGain", "[plugin][syn
 
 TEST_CASE ("GoldenPreset: measure loudness, peaks and CPU per preset", "[.][presetmeasure]")
 {
-    std::printf ("%-16s %-6s %8s %8s %8s %8s %8s %8s %8s\n", "preset", "mode", "LUFS", "pkHeld", "pkLeg", "pkRest",
-                 "pkChd4", "cpu%", "cpuChd%");
+    std::printf ("%-16s %-6s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "preset", "mode", "LUFS", "pkHeld", "pkLeg",
+                 "pkRest", "pkChd4", "cpu%", "cpuChd%", "centrHz", "riseMs");
 
     double heaviest = 0.0;
     std::string heaviestName;
@@ -625,6 +625,27 @@ TEST_CASE ("GoldenPreset: measure loudness, peaks and CPU per preset", "[.][pres
         const auto held = render (preset, heldSequence(), ExpressionKind::golden);
         const auto legato = render (preset, legatoSequence(), ExpressionKind::golden);
         const auto rest = render (preset, heldSequence(), ExpressionKind::rest);
+
+        // Timbre and envelope shape of the held note with the singing expression: mean centroid of the windows
+        // within 20 dB of the loudest one, and the time until the RMS is within 3 dB of its maximum
+        const auto windows = fingerprint (render (preset, heldSequence(), ExpressionKind::singing));
+        double loudest = floorDb, centroidSum = 0.0, riseMs = 0.0;
+        int centroidCount = 0;
+
+        for (const auto& f : windows)
+            loudest = std::max (loudest, f.rms);
+
+        for (std::size_t w = 0; w < windows.size(); ++w)
+        {
+            if (windows[w].rms > loudest - 20.0)
+            {
+                centroidSum += windows[w].centroid;
+                ++centroidCount;
+            }
+
+            if (riseMs <= 0.0 && windows[w].rms > loudest - 3.0)
+                riseMs = 100.0 * static_cast<double> (w + 1);
+        }
 
         // CPU: 48 kHz, blocks of 128 (1 % = 26.7 us per block), best of 3 runs of the legato phrase
         const auto cpuOf = [&preset] (const Sequence& s)
@@ -655,9 +676,10 @@ TEST_CASE ("GoldenPreset: measure loudness, peaks and CPU per preset", "[.][pres
             heaviestName = std::string (preset.name);
         }
 
-        std::printf ("%-16s %-6s %8.2f %8.2f %8.2f %8.2f %8.2f %8.3f %8.3f\n", std::string (preset.name).c_str(),
-                     playModeName (settings), loudness, peakDb (held), peakDb (legato), peakDb (rest), chordPeak, cpu,
-                     cpuChord);
+        std::printf ("%-16s %-6s %8.2f %8.2f %8.2f %8.2f %8.2f %8.3f %8.3f %8.0f %8.0f\n",
+                     std::string (preset.name).c_str(), playModeName (settings), loudness, peakDb (held), peakDb (legato),
+                     peakDb (rest), chordPeak, cpu, cpuChord, centroidCount > 0 ? centroidSum / centroidCount : 0.0,
+                     riseMs);
     }
 
     std::printf ("heaviest: %s %.3f %%\n", heaviestName.c_str(), heaviest);

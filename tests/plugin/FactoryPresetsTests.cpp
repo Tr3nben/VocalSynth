@@ -46,6 +46,25 @@ sy::SynthSettings settingsOf (const FactoryPreset& preset)
     return SynthSettingsBuilder::fromPlain (plain);
 }
 
+/** Exact float equality without -Wfloat-equal (the values are copied, never computed). */
+bool sameValue (float a, float b)
+{
+    return ! (a < b) && ! (b < a);
+}
+
+/** Every synth parameter's plain value equal. */
+bool samePlain (const sy::SynthSettings& a, const sy::SynthSettings& b)
+{
+    const auto pa = SynthSettingsBuilder::toPlain (a);
+    const auto pb = SynthSettingsBuilder::toPlain (b);
+
+    for (std::size_t i = 0; i < pa.size(); ++i)
+        if (! sameValue (pa[i], pb[i]))
+            return false;
+
+    return a.bendRangeSemitones == b.bendRangeSemitones;
+}
+
 bool isVoiceSource (sy::ModSource s)
 {
     return s == sy::ModSource::voiceLevel || s == sy::ModSource::voiceBrightness || s == sy::ModSource::voiceNoisiness
@@ -162,7 +181,7 @@ TEST_CASE ("FactoryPresets: values are preset parameters, in range, integral whe
                                   || dynamic_cast<juce::AudioParameterBool*> (param) != nullptr;
 
             if (discrete)
-                CHECK (v.value == std::round (v.value));
+                CHECK (sameValue (v.value, std::round (v.value)));
 
             // The value survives the host's normalised round trip (what PresetManager::load does)
             CHECK (std::abs (param->convertFrom0to1 (param->convertTo0to1 (v.value)) - v.value)
@@ -171,7 +190,7 @@ TEST_CASE ("FactoryPresets: values are preset parameters, in range, integral whe
             // Only values that differ from the default are listed (14.3)
             const auto index = SynthSettingsBuilder::indexOf (id);
             REQUIRE (index >= 0);
-            CHECK (v.value != defaults[static_cast<std::size_t> (index)]);
+            CHECK_FALSE (sameValue (v.value, defaults[static_cast<std::size_t> (index)]));
         }
     }
 }
@@ -185,8 +204,8 @@ TEST_CASE ("FactoryPresets: Init is exactly the parameter defaults", "[plugin][s
     CHECK (init.values.empty());
     CHECK (init.tableA == defaultTable);
     CHECK (init.tableB == defaultTable);
-    CHECK (settingsOf (init) == sy::SynthSettings {}.sanitised());
-    CHECK (settingsOf (init) == sy::SynthSettings {});
+    CHECK (samePlain (settingsOf (init), sy::SynthSettings {}.sanitised()));
+    CHECK (samePlain (settingsOf (init), sy::SynthSettings {}));
 }
 
 TEST_CASE ("FactoryPresets: play modes, voice sources and the sound-design rules", "[plugin][synth][factorypresets]")
@@ -222,7 +241,7 @@ TEST_CASE ("FactoryPresets: play modes, voice sources and the sound-design rules
 
         // Unison above 2 voices only with random start phases (docs/SYNTH-DESIGN.md 6.1)
         for (const auto& o : s.osc)
-            if (o.on && o.unison > 2)
+            if (o.on && (o.unison > 2 || s.playMode == sy::PlayMode::poly)) // Poly: chord notes not in phase
                 CHECK (o.phaseRandPercent >= 50.0f);
 
         // Something sounds: an oscillator with level, the sub or the noise
