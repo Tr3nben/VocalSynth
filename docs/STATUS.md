@@ -63,9 +63,22 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3, M3 (
 - Bekannt / offen: Sub + Noise 8,6 ns statt 3 ns pro Stimme (nur wenn Pegel > 0); bei schnellen abwärts
   gleitenden Tönen leichtes Knistern über ca. 7,5 kHz (SYNTH-DESIGN 24.1, Nutzer soll melden); Presets ohne
   Gehör abgestimmt (Lautheit gemessen), Urteil kommt vom Nutzer.
-- **Nächste Schritte:** Review-Agenten (`juce-review`, `audio-dsp-review`, Korrektheit) → Gegenprüfung → Fixes →
-  Commit/Push → CI (Linux + Windows; pluginval-Laufzeit mit 130 Parametern beobachten) → Probehör-ZIP an den
-  Nutzer (Init + 8 Presets, SYNTH-TESTING.md Abschnitt 4) → 0.4.1 Nachstimmen nach Feedback.
+- **Review erledigt (2026-11-06):** zwei Reviews (Audio-Pfad; UI/Worker/State/Doku), alle Befunde behoben, jeweils
+  mit Regressionstest, der vorher fehlschlug (SYNTH-DESIGN.md 24.4). Wichtigste: nach Flush/Quellwechsel blieb
+  der Pitchbend im Synth hängen (alle folgenden Noten verstimmt, z. B. Test-Pattern „Pitch Bend“ → Voice); Synth On
+  aus→an innerhalb der 10-ms-Blende ließ eine Note hängen; Poly-Stimme stumm nach Aus+An im Steal-Fade; Bypass
+  blendet den Synth jetzt in 10 ms aus statt hart abzuschneiden. **Neue Regel:** Choice-Listen haben ab 0.4.0 feste
+  Länge (FL-Automation speichert Index/(n−1)); die geplanten Mod-Quellen *Vowel X/Y* (0.5) und *Vowel Weight 1–3*
+  (0.6) sind schon reserviert (grau, wirkungslos in 0.4), spätere Erweiterungen brauchen neue Parameter. Dazu:
+  WAV-Import fragt bei mehrdeutigen Längen (Vielfache von 2048 ohne `clm`) nach der Frame-Größe (2048
+  vorausgewählt), Timer der Synth-Seite/Preset-Leiste nur bei sichtbarer Seite, Wellenform-Cache, aktueller
+  Nutzer-Preset per Datei statt Name, geteilte Nutzer-Tabellen nur bei gleichen PCM-Daten, SYNTH-TESTING
+  (Automation über *Tools → Last tweaked*, Legato gleitet nur mit Glide > 0, Export-Hinweis Tail 0). Werte,
+  Presets, Golden-Daten und 0.4.0-Fixtures unverändert. Gate (lokal, clang Release, alles neu übersetzt):
+  0 Warnungen, ctest 785/785, pluginval Strictness 10 beide VST3 SUCCESS, Steinberg-Validator 47/47 beide,
+  clap-validator 32/0 beide (bekannte Warnung `state-invalid-random`).
+- **Nächste Schritte:** Commit/Push → CI (Linux + Windows; pluginval-Laufzeit mit 130 Parametern beobachten) →
+  Probehör-ZIP an den Nutzer (Init + 8 Presets, SYNTH-TESTING.md Abschnitt 4) → 0.4.1 Nachstimmen nach Feedback.
 
 ## Davor: M3.1 – Take-Länge, Record-Modus, weniger Zusatznoten (v0.3.1)
 

@@ -170,10 +170,11 @@ tempo-synchron (Host-BPM aus der Playhead, wie die Capture sie liest), Retrigger
 Global (nicht pro Stimme) – reicht für Mono und hält Poly günstig.
 
 **Mod-Matrix:** **8 Slots** (Quelle, Ziel, Betrag ±100 %).
-- Quellen (Liste nur hinten erweitern): Off, Env 2, Env 3, LFO 1, LFO 2, Velocity, Note (Keytrack), Random pro
+- Quellen (Länge ab 0.4.0 fest, SYNTH-DESIGN 24.4): Off, Env 2, Env 3, LFO 1, LFO 2, Velocity, Note (Keytrack), Random pro
   Note, **Voice Level, Voice Brightness, Voice Noisiness, Voice Pitch** (Abweichung vom Notenzentrum, ±100 ct);
-  0.5 hängt **Vowel X (F2)** und **Vowel Y (F1)** an, 0.6 die kalibrierten Vokal-Gewichte.
-- Ziele (Liste nur hinten erweitern): Off, Osc A Position/Pitch/Level/Detune, Osc B Position/Pitch/Level/Detune,
+  reserviert (in 0.4 wirkungslos): **Vowel X (F2)** und **Vowel Y (F1)** für 0.5, **Vowel Weight 1–3** (die
+  kalibrierten Vokal-Gewichte) für 0.6.
+- Ziele (Länge ab 0.4.0 fest): Off, Osc A Position/Pitch/Level/Detune, Osc B Position/Pitch/Level/Detune,
   Sub Level, Noise Level, Filter Cutoff (±5 Oktaven)/Resonance/Drive, Amp Level, Pan, LFO 1 Rate, LFO 2 Rate,
   Chorus/Delay/Reverb Mix.
 - Modulation wird intern addiert, **nie in Parameter zurückgeschrieben**.
@@ -222,7 +223,9 @@ Osc-Position, Noisiness → Noise Level, Voice Pitch → Vibrato-Tiefe). Als Dat
 - **IDs:** lowerCamelCase wie bisher, Gruppen-Präfixe (`synthOn`, `oscAPosition`, `filterCutoff`, `env2Attack`,
   `lfo1Rate`, `mod3Amount`, `delayFeedback`). **Version-Hint 4** für alle Parameter von 0.4.0, 5 für 0.5.0, 6 für
   0.6.0 (Begründung AU-Reihenfolge: `docs/M3-DESIGN.md` 13). Neue Parameter werden **hinten** an `createLayout()`
-  angehängt; bestehende IDs, Bereiche und Choice-Listen ändern sich nie (Choice-Listen nur hinten erweitern).
+  angehängt; bestehende IDs, Bereiche und Choice-Listen ändern sich nie. **Choice-Listen haben ab 0.4.0 eine
+  feste Länge** (Host-Automation speichert Index/(n−1)); geplante Einträge sind schon reserviert, spätere
+  Erweiterungen brauchen neue Parameter (Review 0.4, `docs/SYNTH-DESIGN.md` 24.4).
 - Synth-Parameter stehen in einer eigenen Datei `plugin/SynthParameters.h` (IDs, Listen, `addSynthParameters
   (layout)`); `Parameters.h` ruft sie am Ende von `createLayout()` auf.
 - Alle stetigen Synth-Regler sind automatisierbar (FL-Automation-Clips). Gesamt ca. 100 neue Parameter (Liste in
@@ -474,7 +477,7 @@ Ersteinrichtung und Preset-Browser. Dazu der Vokal als Mod-Quelle.
   Levinson-Durbin), Hüllkurve über `RealFft`, Spitzensuche F1 (250–1000 Hz) und F2 (700–3000 Hz) mit
   Kontinuitäts-Verfolgung, nur bei stimmhaften Frames; Normierung auf eine Vokal-Ebene mit Standardbereichen je
   Stimmlage (veröffentlichte Formant-Mittelwerte, keine Daten-Assets). Mod-Quellen **Vowel X**, **Vowel Y**
-  (an die Quellenliste angehängt). Kalibrierung erst in 0.6.
+  (in 0.4.0 schon in der Quellenliste reserviert). Kalibrierung erst in 0.6.
 
 **Module (neu)**
 - Core: `FormantTracker`, `Lpc` (Levinson-Durbin), Erweiterung `ExpressionTracker` (vowelX/Y).
@@ -540,8 +543,8 @@ und gesungene Töne können Akkorde spielen.
 
 **Features**
 - **Vokal-Kalibrierung:** Assistent „halte a, e, i, o, u je 2 s“, Referenzpunkte pro Projekt (State `VOWEL`,
-  `version` 1) und als Datei exportierbar; Ausgabe zusätzlich als 3 Morph-Gewichte (neue Mod-Quellen
-  angehängt).
+  `version` 1) und als Datei exportierbar; Ausgabe zusätzlich als 3 Morph-Gewichte (Mod-Quellen
+  *Vowel Weight 1–3*, in 0.4.0 schon reserviert).
 - **Expression → CC:** bis 8 Zuordnungen (Quelle → CC-Nummer, Bereich, Kurve, Glättung), Ratenbegrenzung
   (Standard 100 Hz pro CC, nur bei Änderung), auf dem MIDI-Kanal der Noten; geht über `MidiOutputStage`, also
   auch in Capture/Export (CC-Export gibt es schon).
