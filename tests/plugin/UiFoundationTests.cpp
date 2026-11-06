@@ -375,15 +375,21 @@ TEST_CASE ("UiFoundation: VsLookAndFeel draws the old pages' widgets", "[plugin]
     CHECK (countPixels (image, ui::theme::accent) > 50); // toggle switch, slider fill, the "on" page button
 
     // Popup menu and tooltip drawing (no window needed)
-    juce::Image menuImage (juce::Image::ARGB, 200, 100, true);
-    juce::Graphics g (menuImage);
-    f.lookAndFeel.drawPopupMenuBackground (g, 200, 100);
-    f.lookAndFeel.drawPopupMenuItem (g, { 0, 0, 200, 24 }, false, true, true, true, true, "Item", "Ctrl+X", nullptr, nullptr);
-    f.lookAndFeel.drawPopupMenuItem (g, { 0, 24, 200, 8 }, true, true, false, false, false, {}, {}, nullptr, nullptr);
-    f.lookAndFeel.drawPopupMenuSectionHeader (g, { 0, 32, 200, 24 }, "Factory");
-    juce::Image tipImage (juce::Image::ARGB, 200, 40, true);
-    juce::Graphics tipGraphics (tipImage);
-    f.lookAndFeel.drawTooltip (tipGraphics, "A tooltip text that is long enough to wrap onto a second line maybe", 200, 40);
+    // Software images and scoped Graphics: on Windows a default image may be a Direct2D image whose pixels only
+    // arrive when its Graphics context is destroyed
+    juce::Image menuImage (juce::Image::ARGB, 200, 100, true, juce::SoftwareImageType());
+    {
+        juce::Graphics g (menuImage);
+        f.lookAndFeel.drawPopupMenuBackground (g, 200, 100);
+        f.lookAndFeel.drawPopupMenuItem (g, { 0, 0, 200, 24 }, false, true, true, true, true, "Item", "Ctrl+X", nullptr, nullptr);
+        f.lookAndFeel.drawPopupMenuItem (g, { 0, 24, 200, 8 }, true, true, false, false, false, {}, {}, nullptr, nullptr);
+        f.lookAndFeel.drawPopupMenuSectionHeader (g, { 0, 32, 200, 24 }, "Factory");
+    }
+    juce::Image tipImage (juce::Image::ARGB, 200, 40, true, juce::SoftwareImageType());
+    {
+        juce::Graphics tipGraphics (tipImage);
+        f.lookAndFeel.drawTooltip (tipGraphics, "A tooltip text that is long enough to wrap onto a second line maybe", 200, 40);
+    }
     CHECK (countPixels (tipImage, ui::theme::text, 60) > 10);
     CHECK (f.lookAndFeel.getTooltipBounds ("Tip", { 100, 100 }, { 0, 0, 800, 600 }).getWidth() > 10);
     CHECK (countPixels (menuImage, ui::theme::accent) > 3); // the tick
