@@ -97,8 +97,13 @@ TEST_CASE ("0.3.1 state fixtures load with every old value unchanged and the syn
 
     CHECK (synthOnParam.getValue() == 0.0f);
 
+    // Every other synth parameter at its default (synthOn's default is on = a new instance, integration 0.4;
+    // an old project gets it off from migrateState, checked above)
     for (const auto& id : params::getSynthParameterIds())
     {
+        if (id == params::synthOn.getParamID())
+            continue;
+
         CAPTURE (id);
         auto& param = getParameter (p, id);
         CHECK (param.getValue() == Catch::Approx (param.getDefaultValue()));

@@ -47,7 +47,7 @@ Plugin - ohne MIDI-Routing, ohne zweites Plugin.
     im Reiter "Synth": Synth On, Volume, Dry). Wer weiter einen externen
     Synth über den MIDI-Port spielt, schaltet "Synth On" aus.
   - Alte 0.3-Projekte laden mit ausgeschaltetem Synth und klingen wie
-    vorher. Achtung: "Reset to default" in FL schaltet den Synth aus.
+    vorher.
   - Fenster skalierbar (75-200 %): Menü oben rechts oder Ecke unten
     rechts ziehen; die Größe wird mit dem Projekt gespeichert.
   - Die Instrument-Variante spielt den Synth aus dem Sidechain-Mikrofon

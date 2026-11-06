@@ -75,8 +75,11 @@ TEST_CASE ("Synth parameter defaults are the core SynthSettings defaults", "[plu
     using namespace vocalsynth::params;
     VocalSynthProcessor p (Variant::fx);
 
-    // The parameter default of synthOn is off (old projects load with the synth off), docs/SYNTH-DESIGN.md 13.3
-    CHECK (getParameter (p, synthOn).getDefaultValue() == 0.0f);
+    // synthOn: the parameter default is the value of a new instance (on, decision E4; integration 0.4 - a
+    // different initial value fails clap-validator's param-default-values); old projects get it off through
+    // migrateState (StateFixtureTests), docs/SYNTH-DESIGN.md 13.3, 24. The core default stays off.
+    CHECK (getParameter (p, synthOn).getDefaultValue() == Catch::Approx (synthOnForNewInstances ? 1.0 : 0.0));
+    CHECK_FALSE (vocalsynth::synth::SynthSettings {}.synthOn);
     CHECK (getPlain (p, synthVolume) == Catch::Approx (-6.0f));
     CHECK (getPlain (p, dryLevel) == Catch::Approx (0.0f));
     CHECK (getPlain (p, playMode) == Catch::Approx (1.0f)); // Legato (E6)

@@ -58,8 +58,8 @@ Zeitbedarf: Kurztest (Abschnitt 2 + Probehör-Auswahl) ca. 20 Minuten, ganze Che
 Tipp: Die meisten Presets sind auf **gleiche Lautheit** abgestimmt (±1 dB, Init ist etwas lauter). Wenn
 ein Preset deutlich leiser oder lauter wirkt, ist das ein Befund – bitte notieren.
 
-> Hinweis: „Reset to default“ von FL (Rechtsklick auf das Plugin) schaltet den Synth **aus** (der Standardwert
-> von *Synth On* ist „aus“, damit alte Projekte unverändert bleiben). Einfach wieder einschalten.
+> Hinweis: „Reset to default“ von FL (Rechtsklick auf das Plugin) schaltet den Synth **an** (der Standardwert
+> von *Synth On* ist „an“, wie bei einer neuen Instanz). Alte 0.3-Projekte laden trotzdem mit Synth **aus**.
 
 ---
 

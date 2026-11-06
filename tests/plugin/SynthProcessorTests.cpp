@@ -262,7 +262,7 @@ TEST_CASE ("SynthProcessor: a new instance plays the synth with the default tabl
     VocalSynthProcessor p (variant);
 
     CHECK (getPlain (p, params::synthOn.getParamID()) == 1.0f);          // decision E4 / E5
-    CHECK (param (p, params::synthOn.getParamID()).getDefaultValue() == 0.0f); // the parameter default stays off (13.3)
+    CHECK (param (p, params::synthOn.getParamID()).getDefaultValue() == 1.0f); // = the initial value (clap-validator)
     CHECK (p.getPresetManager().getCurrentName() == "Init");
     CHECK_FALSE (p.getPresetManager().isModified());
     CHECK (p.getEditorScalePercent() == 100);

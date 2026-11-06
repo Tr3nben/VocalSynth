@@ -45,12 +45,18 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3, M3 (
   - Prozessor: Synth in FX und Instrument (Instrument spielt aus dem Sidechain-Mikro, keine Host-MIDI),
     `dryLevel` mit 20-ms-Rampe (0 dB bitgleich zu 0.3.1), Wavetable-Store-Protokoll in jedem Block auch im
     Bypass, State mit Kind `SYNTH` und `stateVersion` 4, neue Instanzen Synth an + Init, alte Projekte Synth aus,
-    CLAP-Programmwechsel nach Preset-Laden.
+    CLAP-Programmwechsel nach Preset-Laden. Abweichung vom Design: Standardwert von *Synth On* ist jetzt **an**
+    (clap-validator `param-default-values` verlangt Startwert = Standardwert); alte States ohne `synthOn`
+    bekommen in `migrateState` „aus“.
   - Editor: 1100 × 700, skalierbar 75–200 % (Menü oben rechts + Ecke, Größe im Projekt), vierter Reiter „Synth“,
     neues LookAndFeel und Theme-Farben auch auf den alten Seiten, Hinweis zum Synth auf der Voice-Seite (E4; die
     eigentliche Ersteinrichtung kommt mit 0.5).
   - 130 Parameter (28 + 102 Synth), Version-Hint 4. State-Fixtures `tests/data/state-0.4.0-{fx,instrument}`.
-- Integration 2026-11-06 (lokal, Linux, clang Release, alle eigenen Quellen neu übersetzt): GATE_RESULTS
+- Integration 2026-11-06 (lokal, Linux, clang Release, alle eigenen Quellen neu übersetzt): 0 Warnungen,
+  ctest (xvfb) 772/772, pluginval Strictness 10 beide VST3 SUCCESS (je ca. 13 s, mit 130 Parametern), Steinberg-
+  Validator 47/47 beide VST3, clap-validator 32 bestanden / 0 Fehler beide CLAP (1 bekannte Warnung
+  `state-invalid-random`). Blockgrößen-Invarianz des ganzen Prozessor-Ausgangs (1/7/64/480/512/4096 ×
+  44,1/48/96 kHz, Warm Pad) bitgleich, 0 Allokationen in processBlock mit spielendem Synth.
 - CPU (ganzer processBlock, 48 kHz / 128, gesungene Phrase): Synth aus 0,47 %, Init 0,68 %, Voice Lead 0,98 %,
   Warm Pad (schwerstes Preset) 1,43 % im Mittel; Engine allein schlimmster Fall (Poly 16 × 2 × 8 Unison, alle
   FX) 8,2 % → keine Unison-Begrenzung. Details: SYNTH-DESIGN.md 18.

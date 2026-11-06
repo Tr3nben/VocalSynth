@@ -226,13 +226,24 @@ private:
     the instance was set to before. Missing parameters get their defaults instead.
     M1 states (0.1.x) have no "source": M1 always played its test pattern, so such a state selects
     Test Pattern when its pattern is not Off (the routing test the user saved keeps playing), else
-    Voice (the M2 default). */
+    Voice (the M2 default).
+    0.3.x and older states have no "synthOn": the synth stays OFF for them (the project sounds as before),
+    although the parameter default (= a new instance) is on (docs/SYNTH-DESIGN.md 13.3). */
 void migrateState (juce::ValueTree& state, const juce::Array<juce::AudioProcessorParameter*>& parameters)
 {
     static const juce::Identifier paramType ("PARAM"), idProperty ("id"), valueProperty ("value");
 
     const auto childFor = [&state] (const juce::String& id) { return state.getChildWithProperty (idProperty, id); };
     const auto sourceMissing = ! childFor (params::source.getParamID()).isValid();
+
+    if (! childFor (params::synthOn.getParamID()).isValid())
+    {
+        auto child = juce::ValueTree (paramType);
+        child.setProperty (idProperty, params::synthOn.getParamID(), nullptr);
+        child.setProperty (valueProperty, 0.0f, nullptr);
+        state.appendChild (child, nullptr);
+    }
+
     const auto savedPattern = childFor (params::testPattern.getParamID());
     const auto patternIndex = savedPattern.isValid() ? juce::roundToInt ((double) savedPattern.getProperty (valueProperty, 0.0))
                                                      : 0;
@@ -337,10 +348,8 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
 
     midiOutput.setVirtualPort (&virtualMidiPort);
 
-    // 0.4 synth (docs/SYNTH-DESIGN.md 13.3, 17). The parameter default of synthOn is off (old projects load
-    // with the synth off); a NEW instance plays the synth at once (decisions E4 / E5).
-    if (auto* synthOn = apvts.getParameter (params::synthOn.getParamID()))
-        synthOn->setValueNotifyingHost (params::synthOnForNewInstances ? 1.0f : 0.0f);
+    // 0.4 synth (docs/SYNTH-DESIGN.md 13.3, 17): a NEW instance plays the synth at once (decisions E4 / E5) -
+    // that is the parameter default of synthOn; old projects get it off in migrateState().
 
     // Never resized: the engine renders chunks of at most maxChunkSamples
     synthLeft.assign ((size_t) maxChunkSamples, 0.0f);

@@ -19,10 +19,11 @@ namespace vocalsynth::params
 // Written by the design agent; frozen for 0.4 (changes only through the design document).
 inline constexpr int synthParameterVersionHint = 4;
 
-/** The value a NEW instance gets for synthOn (decisions E4 / E5: on in FX and Instrument). The parameter
-    default stays off, so every state without synthOn (0.3.x projects) loads with the synth off through the
-    normal "missing parameter -> default" migration (docs/SYNTH-DESIGN.md 13.3). Applied by the processor's
-    constructor (integration). */
+/** The value a NEW instance gets for synthOn (decisions E4 / E5: on in FX and Instrument) = the parameter's
+    default (integration 0.4: a default off with a different initial value fails clap-validator's
+    param-default-values; docs/SYNTH-DESIGN.md 13.3, 24). The core SynthSettings {} keeps synthOn = false (engine
+    default). A state without synthOn (0.3.x and older) loads with the synth OFF through the processor's
+    migrateState() rule, not through the default. */
 inline constexpr bool synthOnForNewInstances = true;
 
 namespace synthdetail
@@ -311,7 +312,7 @@ inline void addSynthParameters (juce::AudioProcessorValueTreeState::ParameterLay
     const auto& d = synthDefaults;
 
     // Global / mix
-    addBool (layout, synthOn, "Synth On", d.synthOn);
+    addBool (layout, synthOn, "Synth On", synthOnForNewInstances); // not d.synthOn (see synthOnForNewInstances)
     addFloat (layout, synthVolume, "Synth Volume", linearRange (lim::synthVolumeDb), d.synthVolumeDb, "dB",
               oneDecimalText);
     addFloat (layout, dryLevel, "Dry Level", linearRange (lim::dryLevelDb), d.dryLevelDb, "dB", oneDecimalText);

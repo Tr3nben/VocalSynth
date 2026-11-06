@@ -219,8 +219,8 @@ TEST_CASE ("SynthSettingsBuilder: every synth parameter reaches its own field", 
     for (const auto& id : ids)
         REQUIRE (fields.count (id) == 1);
 
-    // A new instance plays the synth (synthOn on, decision E4, set by the processor constructor); every other
-    // synth parameter is at its default. Back to the parameter default for the comparison below.
+    // A new instance plays the synth (synthOn on = its parameter default, decision E4), while the core
+    // SynthSettings {} keeps synthOn off; every other field is at its default. synthOn off for the comparison.
     CHECK (getParameter (p, params::synthOn.getParamID()).getValue() == 1.0f);
     getParameter (p, params::synthOn.getParamID()).setValueNotifyingHost (0.0f);
 
@@ -230,7 +230,10 @@ TEST_CASE ("SynthSettingsBuilder: every synth parameter reaches its own field", 
     {
         CAPTURE (id);
         auto& param = getParameter (p, id);
-        param.setValueNotifyingHost (nonDefaultNormalised (param));
+        // synthOn: the parameter default is on, the core default off (docs/SYNTH-DESIGN.md 24): "non-default" and
+        // "back" are relative to the core SynthSettings {} here
+        const bool isSynthOn = id == params::synthOn.getParamID();
+        param.setValueNotifyingHost (isSynthOn ? 1.0f : nonDefaultNormalised (param));
         const auto expected = param.convertFrom0to1 (param.getValue());
         const auto s = builder.build();
 
@@ -240,7 +243,7 @@ TEST_CASE ("SynthSettingsBuilder: every synth parameter reaches its own field", 
         // ... and nothing else moved
         CHECK (allFieldsNear (fields, s, defaults, id));
 
-        param.setValueNotifyingHost (param.getDefaultValue());
+        param.setValueNotifyingHost (isSynthOn ? 0.0f : param.getDefaultValue());
     }
 
     CHECK (allFieldsNear (fields, builder.build(), defaults));
@@ -256,7 +259,12 @@ TEST_CASE ("SynthSettingsBuilder: toPlain of the defaults is the layout's defaul
     {
         CAPTURE (ids[i]);
         auto& param = getParameter (p, ids[i]);
-        CHECK (plain[static_cast<std::size_t> (i)] == Catch::Approx (param.convertFrom0to1 (param.getDefaultValue())).epsilon (1.0e-5).margin (1.0e-4));
+        // synthOn: the parameter default is on (new instances, E4), the core default off (docs/SYNTH-DESIGN.md 24)
+        if (ids[i] == params::synthOn.getParamID())
+            CHECK (plain[static_cast<std::size_t> (i)] == 0.0f);
+        else
+            CHECK (plain[static_cast<std::size_t> (i)] == Catch::Approx (param.convertFrom0to1 (param.getDefaultValue())).epsilon (1.0e-5).margin (1.0e-4));
+
         CHECK (SynthSettingsBuilder::indexOf (ids[i]) == i);
     }
 

@@ -558,12 +558,13 @@ Root property `stateVersion` = 4 from 0.4.0 (5 / 6 later). Missing = 0.3.x or ol
 
 ### 13.3 Migration from 0.3.1 (synth stays off)
 
-The **parameter default of `synthOn` is Off**. `migrateState()` already gives every parameter missing from a
-state its default, so a 0.3.x project loads with `synthOn` off and every synth parameter at its default — no
-special rule needed, robust for any older state. New instances get the decision E4 / E5 value: the processor
-constructor sets `synthOn` to `params::synthOnForNewInstances` (= on, FX and Instrument) right after creating the
-APVTS (integration). Consequences: host "reset to default" turns the synth off (acceptable); everything else of
-an old project is unchanged (fixture test). Fixtures: `tests/data/state-0.3.1-fx.bin / .xml`,
+**Changed by the integration (24.1):** the parameter default of `synthOn` is **On**
+(`params::synthOnForNewInstances`, the decision E4 / E5 value of a new instance), and `migrateState()` has one
+special rule: a state without a `synthOn` PARAM (0.3.x or older) gets `synthOn` = off; every other missing
+parameter gets its default as before. (The first design - default off, the constructor switching it on - failed
+clap-validator's `param-default-values`: a parameter's value right after initialisation must equal its
+default.) The core `SynthSettings {}` keeps `synthOn = false`. Consequences: host "reset to default" leaves the
+synth on; an old project loads with the synth off and everything else unchanged (fixture test). Fixtures: `tests/data/state-0.3.1-fx.bin / .xml`,
 `state-0.3.1-instrument.bin / .xml` = `getStateInformation()` of the v0.3.1 code (captured before the scaffold
 added any parameter) with non-default voice, test, capture parameters and capture settings.
 `StateFixtureTests.cpp`: every saved value unchanged, synthOn off even if it was on before loading, every synth
@@ -654,7 +655,7 @@ logarithmic mapping, "skew c" = `setSkewForCentre (c)`.
 
 | # | ID | Name | Type / range | Default | Label | Mapping |
 |---|---|---|---|---|---|---|
-| 1 | synthOn | Synth On | bool | **off** (new instances: on, 13.3) | | |
+| 1 | synthOn | Synth On | bool | **on** (= new instances; states without synthOn load off, 13.3) | | |
 | 2 | synthVolume | Synth Volume | -60..6 | -6 | dB | linear; -60 = silent |
 | 3 | dryLevel | Dry Level | -60..0 | 0 | dB | linear; -60 = silent; FX only |
 | 4 | playMode | Play Mode | Mono, Legato, Poly | Legato | | |
@@ -1002,7 +1003,7 @@ Every module has its test file (19); tags `[synth]`, `[expression]`, `[plugin]`;
 - MSVC vs clang floating point differ: only fingerprints cross platforms; invariance tests run per build.
 - The deferred note-off makes Legato connected for the pipeline's retrigger order — intended (the voice is
   monophonic). A user who wants retriggered envelopes picks Mono.
-- Host "reset to default" switches the synth off (13.3); documented in `SYNTH-TESTING.md`.
+- Host "reset to default" keeps the synth on (default on since the integration, 13.3).
 - 130 parameters in FL's wrapper list and pluginval run time: checked in the integration gate.
 - Worst-case CPU has ~4 % margin (18): decision rule for the Poly unison cap at the end of wave 2.
 - Memory: 23 MB per 256-frame user table (5.8 MB per 64 frames) - the price of the alias gate (5.1).
@@ -1127,8 +1128,11 @@ sections above stay as written where nothing is listed here.
   - `setStateInformation` loads every user TABLE with `loadEmbeddedNow` (after `SynthState::fromValueTree` a user
     reference always carries data: embedded, or a hash-only entry the worker looks up among the tables of the
     process), every factory TABLE with `loadFactoryNow`.
-  - The processor constructor sets `synthOn` with `setValueNotifyingHost` (no host yet), then loads
-    `basic-shapes` into both slots synchronously and calls `presetManager.setCurrent ("Init", false)`.
+  - **`synthOn` default on** (13.3): the parameter default is `synthOnForNewInstances` (on) instead of the
+    core default off, and `migrateState()` sets `synthOn` = off for every state without it (0.3.x). Reason:
+    clap-validator `param-default-values` failed when a new instance was switched on in the constructor while
+    the default said off. The processor constructor loads `basic-shapes` into both slots synchronously and
+    calls `presetManager.setCurrent ("Init", false)`.
   - The engine time per block (`synthLoad`) is accumulated over the chunks and added once per block.
 - **Editor (17, 20):** every page lives on a content component of 1100 x 700 that the editor scales with a
   transform (aspect kept, centred when the host gives a size off the ratio; `setResizeLimits` 825 x 525 ..
