@@ -14,7 +14,10 @@ namespace vocalsynth::params
 // 0.4.0 synth parameters (docs/SYNTH-DESIGN.md 15). IDs are PERMANENT, appended after the M3.1 parameters by
 // addSynthParameters() (called at the end of createLayout() in Parameters.h). Version hint 4 for all of them
 // (AUv2 index order, see Parameters.h). Ranges come from vocalsynth::synth::limits, defaults from
-// vocalsynth::synth::SynthSettings {} - one source of truth with the core. Choice lists only grow at the end.
+// vocalsynth::synth::SynthSettings {} - one source of truth with the core. Choice lists are FROZEN in length
+// from 0.4.0 (host automation stores index / (n - 1)); later additions need a new parameter (docs/SYNTH-DESIGN.md
+// 15, 24.4). Entries planned for later releases are reserved in the lists already (mod sources Vowel X / Y, Vowel
+// Weight 1..3).
 // Value texts carry no unit (the label does), like the M2 parameters.
 // Written by the design agent; frozen for 0.4 (changes only through the design document).
 inline constexpr int synthParameterVersionHint = 4;
@@ -145,7 +148,7 @@ inline const juce::ParameterID reverbMix = synthdetail::id ("reverbMix");
 inline constexpr int numSynthParameters = 3 + 5 + 2 * 11 + 5 + 7 + 3 * 4 + 2 * 5 + 8 * 3 + 14;
 static_assert (numSynthParameters == 102);
 
-// Choice names. Array sizes are the core enum counts: index == static_cast<int> (core enum). Append only.
+// Choice names. Array sizes are the core enum counts: index == static_cast<int> (core enum). Frozen lengths.
 inline constexpr std::array<const char*, synth::numPlayModes> playModeNames { "Mono", "Legato", "Poly" };
 inline constexpr std::array<const char*, synth::numGlideModes> glideModeNames { "Always", "Legato Only" };
 inline constexpr std::array<const char*, synth::numSubOctaves> subOctaveNames { "-1 Oct", "-2 Oct" };
@@ -161,8 +164,24 @@ inline constexpr std::array<const char*, synth::numTempoDivisions> tempoDivision
 };
 inline constexpr std::array<const char*, synth::numModSources> modSourceNames {
     "Off",    "Env 2",  "Env 3",      "LFO 1",           "LFO 2",           "Velocity",
-    "Note",   "Random", "Voice Level", "Voice Brightness", "Voice Noisiness", "Voice Pitch"
+    "Note",   "Random", "Voice Level", "Voice Brightness", "Voice Noisiness", "Voice Pitch",
+    "Vowel X", "Vowel Y", "Vowel Weight 1", "Vowel Weight 2", "Vowel Weight 3"
 };
+
+/** The release that brings a reserved mod source (synth::isReservedModSource), for the UI ("Vowel X (0.5)");
+    empty for the sources of this release. */
+inline const char* modSourceReleaseHint (int index) noexcept
+{
+    switch (index)
+    {
+        case static_cast<int> (synth::ModSource::vowelX):
+        case static_cast<int> (synth::ModSource::vowelY):       return "0.5";
+        case static_cast<int> (synth::ModSource::vowelWeight1):
+        case static_cast<int> (synth::ModSource::vowelWeight2):
+        case static_cast<int> (synth::ModSource::vowelWeight3): return "0.6";
+        default:                                                return "";
+    }
+}
 inline constexpr std::array<const char*, synth::numModDests> modDestNames {
     "Off",          "Osc A Position", "Osc A Pitch",      "Osc A Level", "Osc A Detune", "Osc B Position",
     "Osc B Pitch",  "Osc B Level",    "Osc B Detune",     "Sub Level",   "Noise Level",  "Filter Cutoff",

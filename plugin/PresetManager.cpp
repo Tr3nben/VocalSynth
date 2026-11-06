@@ -195,6 +195,18 @@ bool PresetManager::isModified() const
     return false;
 }
 
+bool PresetManager::isCurrentFactory() const
+{
+    const std::scoped_lock lock (mutex);
+    return currentIsFactory;
+}
+
+juce::File PresetManager::getCurrentUserFile() const
+{
+    const std::scoped_lock lock (mutex);
+    return currentIsFactory ? juce::File() : currentFile;
+}
+
 void PresetManager::markModified()
 {
     const std::scoped_lock lock (mutex);

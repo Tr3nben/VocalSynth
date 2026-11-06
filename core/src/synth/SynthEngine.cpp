@@ -148,6 +148,11 @@ void SynthEngine::clearSounding() noexcept
 void SynthEngine::releaseAll() noexcept
 {
     releasePending = true;
+
+    // A flush sends the MIDI port a centre bend as well (MidiOutputStage::flushAllNotes; MonitorSynth::releaseAll
+    // does the same), and the restarted sources never send one again (Bend Mode Off): centre here too, or every
+    // later note plays with the old bend (review 0.4 R1-1). The releasing tails slide back with the 5 ms smoother.
+    bendRaw = 0;
 }
 
 void SynthEngine::setWavetable (int oscIndex, const Wavetable* table) noexcept
@@ -432,9 +437,24 @@ void SynthEngine::handleGroup (int64_t position) noexcept
     if (state == RunState::off && target.synthOn)
         activate();
 
-    if (state != RunState::running)
+    if (state == RunState::fadingOut)
     {
-        groupSize = 0; // synth off (or fading out): notes are ignored, a held note sounds from the next note-on
+        // Fading out: note-ons are ignored, note-offs still reach the allocator - synthOn may come back before
+        // the fade ends (automation), and a dropped note-off would leave a hung note (review 0.4 R1-2)
+        int kept = 0;
+
+        for (int i = 0; i < groupSize; ++i)
+            if (! group[static_cast<std::size_t> (i)].isNoteOn)
+                group[static_cast<std::size_t> (kept++)] = group[static_cast<std::size_t> (i)];
+
+        groupSize = kept;
+
+        if (groupSize == 0)
+            return;
+    }
+    else if (state != RunState::running)
+    {
+        groupSize = 0; // synth off: notes are ignored, a held note sounds from the next note-on
         return;
     }
 

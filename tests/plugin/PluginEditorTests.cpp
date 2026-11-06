@@ -820,3 +820,45 @@ TEST_CASE ("Editor: synth hint on the Voice page and the synth DSP text (0.4)", 
     vsEditor->getSynthPanel().runTimerTickForTests();
     CHECK (vsEditor->getSynthPanel().getDspText() == VocalSynthEditor::formatSynthDspLoad (processor.getSynthDspLoad()));
 }
+
+TEST_CASE ("Editor: the Synth page and its preset bar tick only while the page is shown (review 0.4 R2-4)", "[editor][synth]")
+{
+    VocalSynthProcessor processor (Variant::fx);
+    std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+    auto* vsEditor = dynamic_cast<VocalSynthEditor*> (editor.get());
+    REQUIRE (vsEditor != nullptr);
+    REQUIRE (vsEditor->getPage() == VocalSynthEditor::Page::voice);
+    auto& panel = vsEditor->getSynthPanel();
+    REQUIRE_FALSE (panel.isVisible());
+
+    // Only the panel's timer writes the table button text, only the bar's timer the name text: neither may
+    // change while the page has never been shown (and after a visit, while it is hidden again)
+    const auto checkHiddenDoesNotTick = [&] (const juce::String& factoryId)
+    {
+        const auto tableText = panel.getTableButtonText (0);
+        const auto nameText = panel.getPresetBar().getNameText();
+        processor.getWavetableWorker().requestFactory (0, factoryId);
+        REQUIRE (processor.getWavetableWorker().waitUntilIdle (5000));
+        auto* cutoff = processor.getParameters().getParameter (params::filterCutoff.getParamID());
+        REQUIRE (cutoff != nullptr);
+        cutoff->setValueNotifyingHost (cutoff->getValue() * 0.5f); // the preset becomes modified
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (250);
+        CHECK (panel.getTableButtonText (0) == tableText);
+        CHECK (panel.getPresetBar().getNameText() == nameText);
+    };
+
+    checkHiddenDoesNotTick ("pwm");
+    CHECK_FALSE (panel.getPresetBar().isRefreshing());
+
+    // Shown: both follow at once and tick
+    vsEditor->showPage (VocalSynthEditor::Page::synth);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (250);
+    CHECK (panel.getTableButtonText (0) == "PWM");
+    CHECK (panel.getPresetBar().getNameText().endsWith ("*"));
+    CHECK (panel.getPresetBar().isRefreshing());
+
+    vsEditor->showPage (VocalSynthEditor::Page::voice);
+    processor.getPresetManager().loadInit(); // not modified any more; the hidden bar must not notice
+    checkHiddenDoesNotTick ("fold");
+    CHECK_FALSE (panel.getPresetBar().isRefreshing());
+}

@@ -37,7 +37,7 @@ struct SynthEngineStats
         block start:    engine.setWavetable (0, store.acquire (0)); ... (1)     // EVERY block, also bypassed
         each chunk:     engine.process (events, timings, expression, settings, transport, L, R, n); // n <= 4096
         block end:      store.release (engine.getTablesInUse (0), engine.getTablesInUse (1));  // EVERY block
-        flush:          engine.releaseAll();      bypass: engine.reset();
+        flush:          engine.releaseAll();      bypass: releaseAll + synthOn off for the 10 ms fade, then reset();
         releaseResources: engine.reset(); store.releaseAllRetired();           // audio stopped
 
     Table pointers (binding, docs/SYNTH-DESIGN.md 12.1): reset() and prepare() forget every table pointer
@@ -62,7 +62,8 @@ struct SynthEngineStats
 
     synthOn: switching off fades the output over synthOnFadeSeconds, then (at a tick) clears voices,
     allocator, LFOs and FX like reset() but KEEPS the clock and the tables, and returns zeros at almost no
-    cost; switching on starts from silence (a held note sounds from the next note-on). Every state decision
+    cost; switching on starts from silence (a held note sounds from the next note-on). While fading out,
+    note-ons are ignored and note-offs still release (synthOn may come back before the fade ends). Every state decision
     (fade end, voice inactive, FX tail end / bypass, NaN reset, denormal flush) is taken at a tick or an
     event position, never at a process() or render-segment boundary (docs/SYNTH-DESIGN.md 3.5).
     Output: left / right are OVERWRITTEN with the synth signal (incl. FX and synthVolume; mono layouts:
@@ -94,7 +95,8 @@ public:
         table pointer forgotten (the built-in sine plays until the next setWavetable()). */
     void reset() noexcept;
 
-    /** Note-off for every held note at the next process() position (envelopes release, FX tails ring). */
+    /** Note-off for every held note at the next process() position (envelopes release, FX tails ring); the pitch
+        bend goes back to the centre at once (smoothed 5 ms), like the MIDI port's flush. */
     void releaseAll() noexcept;
 
     /** Table of oscillator oscIndex (0 = A, 1 = B) from the next tick on, for every voice (silent voices

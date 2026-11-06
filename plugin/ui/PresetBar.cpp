@@ -46,8 +46,23 @@ PresetBar::PresetBar (PresetManager& p)
         addAndMakeVisible (*b);
 
     installDefaultDialogs();
-    refresh();
-    startTimerHz (timerHz);
+    refresh(); // the 10 Hz refresh starts with setRefreshing (true): the owner shows the bar
+}
+
+void PresetBar::setRefreshing (bool shouldRefresh)
+{
+    if (shouldRefresh == isTimerRunning())
+        return;
+
+    if (shouldRefresh)
+    {
+        refresh();
+        startTimerHz (timerHz);
+    }
+    else
+    {
+        stopTimer();
+    }
 }
 
 PresetBar::~PresetBar()
@@ -106,10 +121,16 @@ void PresetBar::pressNext()
 
 std::optional<PresetInfo> PresetBar::getCurrentUserPreset() const
 {
+    // By the PresetManager's identity, not by name: a user preset may carry a factory preset's name (review 0.4
+    // R2-6). Only a project (setCurrent: name only) falls back to the name.
+    if (presets.isCurrentFactory())
+        return std::nullopt;
+
+    const auto file = presets.getCurrentUserFile();
     const auto name = presets.getCurrentName();
 
     for (const auto& info : presets.getPresets())
-        if (! info.isFactory && info.name == name)
+        if (! info.isFactory && (file != juce::File() ? info.file == file : info.name == name))
             return info;
 
     return std::nullopt;
@@ -130,7 +151,8 @@ juce::PopupMenu PresetBar::createMenu()
     for (int i = 0; i < menuPresets.size(); ++i)
     {
         const auto& info = menuPresets.getReference (i);
-        const bool ticked = info.name == current && (info.isFactory != currentUser.has_value());
+        const bool ticked = currentUser.has_value() ? (! info.isFactory && info.file == currentUser->file)
+                                                    : (info.isFactory && info.name == current);
         juce::PopupMenu::Item item (info.name);
         item.itemID = presetItemBase + i;
         item.isTicked = ticked;

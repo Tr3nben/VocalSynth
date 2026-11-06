@@ -316,6 +316,34 @@ TEST_CASE ("WavetableWorker: embedded data - hash recomputed, broken data, data 
     CHECK (worker.getStatus().errorSlot == 1);
 }
 
+TEST_CASE ("WavetableWorker: a shared user table is reused only for the same PCM, not for the same hash alone "
+           "(review 0.4 R2-8)",
+           "[plugin][synth][worker]")
+{
+    WavetableStore store;
+    WavetableWorker worker (store);
+    juce::String error;
+    const auto a = testdata::makeUserData (2, 801, "A.wav");
+    const auto b = testdata::makeUserData (2, 802, "B.wav");
+    REQUIRE (a->hash != b->hash);
+    REQUIRE (worker.loadEmbeddedNow (0, a, error));
+    const auto tableA = store.getSlot (0).table;
+    REQUIRE (tableA != nullptr);
+
+    // An FNV-1a collision (B's hash names A's table in the process-wide map), simulated by registering it
+    WavetableStore::addShared ("user:" + b->hash, tableA);
+    REQUIRE (worker.loadEmbeddedNow (1, b, error));
+    const auto tableB = store.getSlot (1).table;
+    REQUIRE (tableB != nullptr);
+    CHECK (tableB != tableA);
+    CHECK (tableB->getNumFrames() == 2);
+
+    // The same PCM again (another instance, a project) still shares the table
+    REQUIRE (worker.loadEmbeddedNow (0, std::make_shared<UserTableData> (*b), error));
+    CHECK (store.getSlot (0).table == tableB);
+    worker.stop();
+}
+
 TEST_CASE ("WavetableWorker: the default table stays built process-wide", "[plugin][synth][worker]")
 {
     {

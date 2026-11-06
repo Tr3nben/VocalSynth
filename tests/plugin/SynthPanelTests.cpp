@@ -317,6 +317,19 @@ TEST_CASE ("SynthPanel: every synth parameter has exactly one attached control",
 
     CHECK (hasPitch);
     CHECK (dynamic_cast<ui::SectionPanel*> (f.panel->findControlFor ("synthOn")->getParentComponent())->getTitle() == "MASTER");
+
+    // Reserved mod sources (review 0.4 R2-1): in the list with their release, not selectable in the menu
+    auto* source = dynamic_cast<ui::ChoiceChip*> (f.panel->findControlFor ("mod1Source"));
+    REQUIRE (source != nullptr);
+    auto* box = source->getComboBox();
+    REQUIRE (box->getNumItems() == synth::numModSources);
+    CHECK (box->getItemText (static_cast<int> (synth::ModSource::voicePitch)) == "Voice Pitch");
+    CHECK (box->isItemEnabled (static_cast<int> (synth::ModSource::voicePitch) + 1));
+    CHECK (box->getItemText (static_cast<int> (synth::ModSource::vowelX)) == "Vowel X (0.5)");
+    CHECK (box->getItemText (static_cast<int> (synth::ModSource::vowelWeight3)) == "Vowel Weight 3 (0.6)");
+
+    for (int i = static_cast<int> (synth::firstReservedModSource); i < synth::numModSources; ++i)
+        CHECK_FALSE (box->isItemEnabled (i + 1));
 }
 
 TEST_CASE ("SynthPanel: layout at 75 / 100 / 150 / 200 % keeps every control inside and apart", "[plugin][editor][synthpanel]")
@@ -548,7 +561,7 @@ TEST_CASE ("SynthPanel: WAV import path, errors and the frame-size question", "[
 
     // Good import: requested at once, published by the worker, shown with the file name
     const auto good = writeFile (folder, "My Table.wav", testdata::makeWav16 (testdata::morphFrames (8, 2)));
-    CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (good)); // 8 x 2048
+    CHECK (ui::SynthPanel::needsFrameSizeChoice (good)); // 8 x 2048 without clm: could be 64 x 256 (review 0.4 R2-3)
     f.panel->importTable (0, good);
     CHECK (f.presets.isModified());
     REQUIRE (f.worker.waitUntilIdle (10000));
@@ -587,7 +600,7 @@ TEST_CASE ("SynthPanel: WAV import path, errors and the frame-size question", "[
 
     CHECK (ui::SynthPanel::needsFrameSizeChoice (ambiguous));
     CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (single));
-    CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (stereo2048));
+    CHECK (ui::SynthPanel::needsFrameSizeChoice (stereo2048)); // 3 x 2048 sample frames, no clm
     CHECK (ui::SynthPanel::needsFrameSizeChoice (serum)); // 1000 is not a valid clm frame size
     CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (serumOk));
     CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (broken));
@@ -599,6 +612,109 @@ TEST_CASE ("SynthPanel: WAV import path, errors and the frame-size question", "[
     f.panel->runTimerTickForTests();
     CHECK (f.store.getSlot (1).reference.kind == WavetableReference::Kind::user);
     CHECK (f.panel->getTableButtonText (1) == "long.wav");
+}
+
+TEST_CASE ("SynthPanel: a WAV of several 2048-sample lengths without clm asks for the frame size (review 0.4 R2-3)",
+           "[plugin][editor][synthpanel]")
+{
+    testdata::ScopedTempFolder temp;
+    const auto wavOf = [&temp] (const juce::String& name, int numSamples)
+    {
+        std::vector<float> samples (static_cast<std::size_t> (numSamples));
+
+        for (std::size_t i = 0; i < samples.size(); ++i)
+            samples[i] = 0.5f * std::sin (6.2831853f * static_cast<float> (i % 256) / 256.0f);
+
+        const auto file = temp.folder.getChildFile (name);
+        const auto data = testdata::makeWav16 (samples);
+        REQUIRE (file.replaceWithData (data.getData(), data.getSize()));
+        return file;
+    };
+
+    // Ambiguous without a clm chunk: WaveEdit 64 x 256 = 16384, a 4096 single cycle, 2 x 2048, 3 x 2048
+    CHECK (ui::SynthPanel::needsFrameSizeChoice (wavOf ("waveedit.wav", 64 * 256)));
+    CHECK (ui::SynthPanel::needsFrameSizeChoice (wavOf ("cycle4096.wav", 4096)));
+    CHECK (ui::SynthPanel::needsFrameSizeChoice (wavOf ("two.wav", 2 * 2048)));
+    CHECK (ui::SynthPanel::needsFrameSizeChoice (wavOf ("three.wav", 3 * 2048)));
+    CHECK (ui::SynthPanel::needsFrameSizeChoice (wavOf ("long odd.wav", 20000))); // > 8192, no multiple (as before)
+
+    // Clear: one cycle up to 2048 samples, a single cycle that is no multiple of 2048, a clm chunk
+    CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (wavOf ("one.wav", 2048)));
+    CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (wavOf ("short.wav", 600)));
+    CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (wavOf ("cycle3000.wav", 3000)));
+    std::vector<float> clmSamples (16384, 0.1f);
+    const auto clm = temp.folder.getChildFile ("clm.wav");
+    const auto clmData = withClmChunk (testdata::makeWav16 (clmSamples), "<!>256 00000000 wavetable");
+    REQUIRE (clm.replaceWithData (clmData.getData(), clmData.getSize()));
+    CHECK_FALSE (ui::SynthPanel::needsFrameSizeChoice (clm));
+
+    // The question offers 256 .. 4096 with 2048 (the automatic choice) ticked
+    auto menu = ui::SynthPanel::createFrameSizeMenu ("waveedit.wav");
+    juce::StringArray sizes;
+    int ticked = 0;
+
+    for (juce::PopupMenu::MenuItemIterator it (menu); it.next();)
+        if (it.getItem().itemID > 0)
+        {
+            sizes.add (juce::String (it.getItem().itemID));
+            ticked += it.getItem().isTicked ? it.getItem().itemID : 0;
+        }
+
+    CHECK (sizes.joinIntoString (",") == "256,512,1024,2048,4096");
+    CHECK (ticked == 2048);
+}
+
+TEST_CASE ("PresetBar: the current user preset is the loaded file, not a preset with the same name (review 0.4 R2-6)",
+           "[plugin][editor][synthpanel]")
+{
+    PanelFixture f;
+    auto& bar = f.panel->getPresetBar();
+    juce::String error;
+    const auto voiceLead = f.presets.getPresets()[1];
+    REQUIRE (voiceLead.isFactory);
+    REQUIRE (f.presets.saveUserPreset (voiceLead.name, PresetCategory::lead, error)); // a user preset, same name
+    const auto userFile = f.presets.getUserPresetFile (voiceLead.name);
+    REQUIRE (userFile.existsAsFile());
+
+    // The factory preset is loaded: no user preset is current (rename / delete / save act on nothing of the user)
+    REQUIRE (f.presets.loadFactory (voiceLead.factoryIndex));
+    CHECK_FALSE (bar.getCurrentUserPreset().has_value());
+    auto menu = bar.createMenu();
+    auto* rename = findItem (menu, [] (const juce::PopupMenu::Item& i) { return i.itemID == ui::PresetBar::renameItem; });
+    REQUIRE (rename != nullptr);
+    CHECK_FALSE (rename->isEnabled);
+    int ticked = 0;
+    bool factoryTicked = false;
+
+    for (juce::PopupMenu::MenuItemIterator it (menu, true); it.next();)
+        if (it.getItem().isTicked)
+        {
+            ++ticked;
+            factoryTicked = it.getItem().text == voiceLead.name && it.getItem().shortcutKeyDescription.isEmpty();
+        }
+
+    CHECK (ticked == 1);
+    CHECK (factoryTicked);
+
+    // Save suggests a new name, not the user file
+    juce::String suggested;
+    bar.askSaveDetails = [&] (const juce::String& name, PresetCategory, std::function<void (const juce::String&, PresetCategory)>)
+    { suggested = name; };
+    bar.pressSave();
+    CHECK (suggested == voiceLead.name + " (User)");
+
+    // The user file loaded: it is current
+    for (const auto& info : f.presets.getPresets())
+        if (! info.isFactory && info.file == userFile)
+            REQUIRE (f.presets.load (info));
+
+    REQUIRE (bar.getCurrentUserPreset().has_value());
+    CHECK (bar.getCurrentUserPreset()->file == userFile);
+
+    // A project only knows the name: the user preset of that name counts (as before)
+    f.presets.setCurrent (voiceLead.name, false);
+    REQUIRE (bar.getCurrentUserPreset().has_value());
+    CHECK (bar.getCurrentUserPreset()->file == userFile);
 }
 
 TEST_CASE ("SynthPanel: destroying the panel while the worker builds is safe", "[plugin][editor][synthpanel]")

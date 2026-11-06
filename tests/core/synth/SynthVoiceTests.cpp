@@ -413,6 +413,36 @@ TEST_CASE ("SynthVoice: steal fades out over 2 ms, then starts the pending note 
     CHECK (peakOf (o2.left, 1000 + 96, 3000) == 0.0);
 }
 
+TEST_CASE ("SynthVoice: a start or steal after the pending note's release inside a steal fade starts after the fade "
+           "(review 0.4 R1-3)",
+           "[synth][voice]")
+{
+    // steal 72 at 1000 (fade 1000..1096 at 48 kHz), release 72 at 1030 (the fade now ends in silence)
+    const int64_t fadeEnd = 1000 + static_cast<int64_t> (std::ceil (VoiceAllocator::stealFadeSeconds * 48000.0));
+    const auto [second, at, expectedNote, expectedHz] = GENERATE_COPY (
+        // the same note again inside the fade: the allocator sends start (the voice still sounds)
+        std::make_tuple (VoiceCommandType::start, int64_t { 1060 }, 72, 523.25),
+        // after the fade end, before the tick that ends it: a new steal must not restart a fade from gain 0
+        std::make_tuple (VoiceCommandType::steal, fadeEnd + 4, 74, 587.33));
+    CAPTURE (static_cast<int> (second), at);
+
+    Rig rig;
+    rig.commands = { { 0, command (VoiceCommandType::start, 60) },
+                     { 1000, command (VoiceCommandType::steal, 72) },
+                     { 1030, command (VoiceCommandType::release, 72) },
+                     { at, command (second, expectedNote) } };
+    const auto out = rig.run (9600);
+
+    CHECK (rig.voice.isActive());
+    CHECK (rig.voice.getNote() == expectedNote);
+    CHECK (rmsOf (out.left, 4800, 9600) > 0.3);
+    CHECK_THAT (zeroCrossingFrequency (out.left, 4800, 9600, 48000.0), WithinAbs (expectedHz, 0.3));
+
+    // The fade itself still ends in silence before the new note starts (no jump back to the old note)
+    for (auto i = fadeEnd; i < fadeEnd + 4; ++i)
+        CHECK (out.left[static_cast<std::size_t> (i)] == 0.0f);
+}
+
 TEST_CASE ("SynthVoice: exact 0 and inactive after the release", "[synth][voice]")
 {
     const auto rate = GENERATE (44100.0, 96000.0);

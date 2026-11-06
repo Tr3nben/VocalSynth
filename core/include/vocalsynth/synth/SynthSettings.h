@@ -126,7 +126,10 @@ constexpr double tempoDivisionQuarterNotes (TempoDivision d, double quarterNotes
 
 /** Mod-matrix sources (docs/SYNTH-DESIGN.md 9). Value ranges: env 0..1, LFO -1..1, velocity 0..1,
     note (key - 60) / 60 (-1..1 over the MIDI range, clamped), random per note -1..1, voice level /
-    brightness / noisiness 0..1, voice pitch -1..1 (= -100..+100 cents). 0.5 appends vowelX, vowelY. */
+    brightness / noisiness 0..1, voice pitch -1..1 (= -100..+100 cents).
+    The list is FROZEN in length from 0.4.0 (host automation stores index / (n - 1); docs/SYNTH-DESIGN.md 24.4):
+    the sources planned for later releases are reserved now and are 0 until they exist - vowelX / vowelY
+    (0.5, vowel tracker) and vowelWeight1..3 (0.6, calibrated vowel morph weights). */
 enum class ModSource
 {
     off = 0,
@@ -140,9 +143,23 @@ enum class ModSource
     voiceLevel,
     voiceBrightness,
     voiceNoisiness,
-    voicePitch
+    voicePitch,
+    vowelX,       ///< reserved (0.5): 0 in 0.4
+    vowelY,       ///< reserved (0.5): 0 in 0.4
+    vowelWeight1, ///< reserved (0.6): 0 in 0.4
+    vowelWeight2, ///< reserved (0.6): 0 in 0.4
+    vowelWeight3  ///< reserved (0.6): 0 in 0.4
 };
-inline constexpr int numModSources = 12;
+inline constexpr int numModSources = 17;
+
+/** First reserved source: sources from here on have no value yet in this release (always 0). */
+inline constexpr ModSource firstReservedModSource = ModSource::vowelX;
+
+constexpr bool isReservedModSource (ModSource source) noexcept
+{
+    return static_cast<int> (source) >= static_cast<int> (firstReservedModSource)
+           && static_cast<int> (source) < numModSources;
+}
 
 /** Mod-matrix destinations (docs/SYNTH-DESIGN.md 9, scaling per destination there and in modDestScale()). */
 enum class ModDest

@@ -62,7 +62,6 @@ private:
 
     // Cache
     juce::Path strokePath, fillPath;
-    const synth::Wavetable* cachedTable = nullptr;
     float cachedPosition = -1.0f;
     juce::Rectangle<float> cachedArea;
     bool cacheValid = false;

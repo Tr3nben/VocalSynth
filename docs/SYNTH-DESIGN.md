@@ -203,7 +203,7 @@ background; estimate ~0.3 ms per frame for the 11 inverse FFTs), any factory tab
   256 x 4096 sample frames: `tooLong`. Clean errors (`WavReadError`, `describeWavReadError`) for everything else;
   no exception except `std::bad_alloc`, no read outside the span (fuzz test). The plugin reads the file with
   `juce::File::loadFileAsData` (Unicode paths, spaces, umlauts) and passes the bytes; the core does no file IO.
-- Frame size (`chooseFrameSize`): import-dialog override (256 / 512 / 1024 / 2048 / 4096) if the file holds at
+- Frame size (`chooseFrameSize`; the import asks first for ambiguous files, 24.4 R2-3): import-dialog override (256 / 512 / 1024 / 2048 / 4096) if the file holds at
   least one such frame; else the `clm ` size; else 2048 if the length is a positive multiple of 2048; else 0 =
   single cycle if the file has at most `maxSingleCycleSamples` = 8192 samples (AKWF-style single cycles are
   256..4096); else 2048 (a long recording without `clm ` is not one giant cycle: no 1M x 1023 DFT). Leftover
@@ -324,7 +324,7 @@ ms, linear 0 -> 1) restarts there in any case. S&H / smooth random: xorshift32 s
 
 ## 9. Mod matrix (`ModMatrix.h`)
 
-### 9.1 Sources (append only; 0.5 adds Vowel X, Vowel Y)
+### 9.1 Sources (length frozen from 0.4.0; the planned sources are reserved, 24.4)
 
 | Source | Value | Scope |
 |---|---|---|
@@ -336,8 +336,9 @@ ms, linear 0 -> 1) restarts there in any case. S&H / smooth random: xorshift32 s
 | Random | uniform -1..1, new at every start, steal and legato command, kept by a correction | voice |
 | Voice Level, Voice Brightness, Voice Noisiness | 0..1 (16) | global |
 | Voice Pitch | pitchCents / 100, -1..1 | global |
+| Vowel X, Vowel Y (reserved for 0.5), Vowel Weight 1..3 (reserved for 0.6) | 0 in 0.4 | global |
 
-### 9.2 Destinations and scaling (append only)
+### 9.2 Destinations and scaling (length frozen from 0.4.0, 24.4)
 
 Amount ±100 % times the source value times the scale below; summed per destination; never written back into a
 parameter.
@@ -382,7 +383,8 @@ over the tick like every other target.
   second steal during the fade replaces the pending note, which then has no voice: its note-off is ignored).
   With the monophonic pipeline every note change overlaps the old note's release on a second voice (both
   orders: the old voice is still active when the new note-on is allocated).
-- `releaseAll()`: `release` for every voice holding a note (flush, bypass is a reset, play-mode change).
+- `releaseAll()`: `release` for every voice holding a note (flush, the bypass fade, play-mode change); the
+  engine's bend goes back to the centre with it (24.4 R1-1).
 - Invariants: <= 16 voices, every started note gets a release on its last note-off, unknown note-offs ignored,
   never more than `VoiceCommandList::capacity` (64) commands per group.
 
@@ -513,7 +515,8 @@ the slot keeps its table (async) or gets the default table (sync), the UI shows 
 ### 12.3 Sharing and memory
 
 Process-wide map key -> `weak_ptr<const Wavetable>` (`findShared` / `addShared`, mutex, never the audio
-thread): `factory:<id>` and `user:<hash>`. The default table (`factory:basic-shapes`) is additionally held by a
+thread): `factory:<id>` and `user:<hash>`; a `user:` table is reused only when the shared data under that hash
+holds the same PCM (the hash alone proves nothing, 24.4 R2-8). The default table (`factory:basic-shapes`) is additionally held by a
 process-wide strong reference once built, so constructing instances (plugin scan, pluginval, the plugin tests'
 hundreds of processors) builds it only once. Per instance at most 2 current + 2 crossfading + retired tables
 (~4 x 23 MB worst case with two different 256-frame user tables mid-crossfade; typical: one or two 64-frame
@@ -687,7 +690,7 @@ logarithmic mapping, "skew c" = `setSkewForCentre (c)`.
 | 93–98 | delayOn, delayTime, delaySync, delayFeedback, delayPingPong, delayMix | Delay … | bool; 1..2000 ms log; 15 divisions; 0..95; bool; 0..100 | off, 375, Off, 35, off, 25 | | |
 | 99–102 | reverbOn, reverbSize, reverbDamping, reverbMix | Reverb … | bool; 0..100; 0..100; 0..100 | off, 50, 50, 25 | | |
 
-Choice lists (append only): LFO shapes Sine, Triangle, Saw Up, Saw Down, Square, S&H, Smooth Random; divisions
+Choice lists (length frozen from 0.4.0, 24.4): LFO shapes Sine, Triangle, Saw Up, Saw Down, Square, S&H, Smooth Random; divisions
 Off, 1/32, 1/16T, 1/16, 1/16D, 1/8T, 1/8, 1/8D, 1/4T, 1/4, 1/4D, 1/2, 1 Bar, 2 Bars, 4 Bars (a bar follows the
 host time signature, 4 quarter notes if the host gives none, 8.2); sources and destinations as in 9.1 / 9.2. Value texts: integers for %, cents, ms >= 100, Hz >= 100;
 one decimal for dB and ms < 100; two decimals for Hz < 10. Not parameters: table choice (SYNTH state), preset
@@ -695,7 +698,10 @@ name. `isPresetParameter()`: all synth parameters except synthOn, synthVolume, d
 
 Range check (critique): every range is final for 0.4 (saved automation): glide 2 s, envelope times 10 s, LFO
 0.01..30 Hz, delay 1..2000 ms (synced times are clamped to it), detune 0..100 ct total spread, drive 0..24 dB,
-cutoff 20 Hz..20 kHz, amp gain -24..+12 dB. Choice lists only grow at the end (ModDest got "Pitch" appended).
+cutoff 20 Hz..20 kHz, amp gain -24..+12 dB. **Choice lists are frozen in length from 0.4.0** (review 0.4, 24.4:
+host automation stores index / (n - 1), so a longer list moves every saved automation point); entries planned for
+later releases are reserved now (mod sources Vowel X / Y, Vowel Weight 1..3: 0, shown dimmed with their release);
+later additions need a new parameter. (Before 0.4.0 ModDest got "Pitch" appended.)
 
 ## 16. Expression
 
@@ -772,8 +778,8 @@ DspLoadMeter synthLoad;` + accessors for the editor (`getPresetManager`, `getWav
 - Instrument: the analysis input stays the sidechain (decision E5): the synth plays from the sidechain mic; the
   dry sidechain is never in the output; `dryLevel` / `muteDry` have no effect.
 - FX on the mic insert: unchanged path, the synth is added after the dry gain.
-- `processBlockBypassed`: as today + `setWavetable (acquire)` for both slots, `synthEngine.reset()` (silent;
-  nothing hangs) + `release` of the in-use tables (the block counter must keep running while bypassed, or
+- `processBlockBypassed`: as today + `setWavetable (acquire)` for both slots, a 10 ms fade-out of a sounding
+  synth on entering bypass, then `synthEngine.reset()` (nothing hangs; 24.4 R1-4) + `release` of the in-use tables (the block counter must keep running while bypassed, or
   retired tables pile up); Instrument output stays silent, FX passes the dry voice.
 - `prepareToPlay`: `synthEngine.prepare (rate, maxChunkSamples)`, then `wavetableStore.releaseAllRetired()`;
   `releaseResources`: `synthEngine.reset()`, then `releaseAllRetired()` (12.1: never free with a stale engine
@@ -781,7 +787,7 @@ DspLoadMeter synthLoad;` + accessors for the editor (`getPresetManager`, `getWav
 - Constructor: `synthOn = synthOnForNewInstances`, then `wavetableWorker.loadFactoryNow (s, "basic-shapes")`
   for both slots (synchronous, shared process-wide after the first instance).
 - `getTailLengthSeconds()` stays 0 (the synth only sounds from MIDI that the plugin itself creates; FL keeps
-  processing an effect on a mixer insert). Latency stays 0.
+  processing an effect on a mixer insert; reviewed and kept, 24.4 R1-5). Latency stays 0.
 - State: 13.1. Presets: CLAP `updateHostDisplay (programChanged)` after a preset load.
 - DSP display: analysis and synth separately (`synthLoad` measures the engine calls).
 - Editor: fourth page "Synth" (`ui::SynthPanel`, tab after Voice / Test & Routing / Capture; the editor still
@@ -905,13 +911,15 @@ rounded frame, optional header component such as the oscillator's on switch).
 
 ### 20.4 WavetableView
 2D frame at the current position (+ position marker; level 0 = 8192 samples, decimated to the view width),
-path cached, rebuilt when table / position change (> 0.5 %), 30 Hz from the panel's timer; table from
+path cached, rebuilt when the table changes (any `setTable` with another table, 24.4 R2-5) or the position
+changes (> 0.5 %), 30 Hz from the panel's timer (only while the Synth page is shown, 24.4 R2-4); table from
 `WavetableStore::getSlot` (`shared_ptr`, never the audio pointer), redrawn when `getGeneration()` changes.
 3D stack in 0.5.
 
 ### 20.5 PresetBar
 [<] [name * — menu by category, User, Init] [>] [Save] (async AlertWindow: name + category). IDs `presetPrev`,
-`presetName`, `presetNext`, `presetSave`.
+`presetName`, `presetNext`, `presetSave`. The current user preset is PresetManager's tracked file (name only after a
+project load); the 10 Hz refresh runs while the owner shows the bar (`setRefreshing`; 24.4 R2-4, R2-6).
 
 ### 20.6 SynthPanel (1100 x 670 design pixels)
 
@@ -1183,3 +1191,24 @@ block end: `release`, `expressionPublisher.publish`, `synthLoad.addBlock`. `proc
 `tests/plugin/SynthProcessorTests.cpp` (21 Processor row) and the fixtures `tests/data/state-0.4.0-{fx,instrument}`
 (FX: Warm Pad modified, osc A `formant-vowel`, osc B an embedded 4-frame user table with an umlaut in its name,
 scale 125 %, dry -3 dB; Instrument: Acid Bass, osc A `fm-2op`, synth off, scale 150 %).
+
+### 24.4 Review fixes (0.4.0)
+
+Two reviews of the finished 0.4.0 (review 1: audio path, review 2: off-thread code, UI and docs). Every fix has a
+regression test that failed before the fix (tests whose name ends in "(review 0.4 Rn-k)").
+
+| # | Finding | Fix | Test |
+|---|---|---|---|
+| R1-1 (high) | A flush / source switch sends the MIDI port note-offs and a centre bend, the engine only got `releaseAll()`: its `bendRaw` kept the old value and every later note played out of tune (Test Pattern "Pitch Bend" -> Voice: +1.64 st) | `SynthEngine::releaseAll()` also sets `bendRaw = 0`; the releasing tails slide back with the 5 ms smoother (10.1) | `SynthEngine: releaseAll() centres the pitch bend (flush / source switch, review 0.4 R1-1)`; processor: `SynthProcessor: after Test Pattern "Pitch Bend" the Voice source plays the sung pitch (review 0.4 R1-1)` |
+| R1-2 | synthOn off -> on inside the 10 ms fade: note-offs were dropped while fading out, the note hung (and came back in Legato) | while `fadingOut`, `handleGroup` passes the note-offs to the allocator and drops only the note-ons (chosen over a `releaseAll` on the fadingOut -> running transition: a note that is really still held keeps sounding) | `SynthEngine: synthOn off -> on inside the 10 ms fade leaves no hung note (review 0.4 R1-2)` |
+| R1-3 | Poly: a note stolen onto a voice, released and started again inside the 2 ms steal fade was retriggered inside the fade and then deactivated with it - silent while held. Same root: a steal arriving between the fade end and its tick restarted a fade from gain 0 (fadeStep 0: the old note came back at full level, the pending note never started) | `SynthVoice::apply`: a `start` on an active voice with a steal fade (`fadeStep > 0`) becomes the pending start (starts clean at the fade end); a `steal` starts a new fade only when no fade runs (`fadeStep <= 0` instead of `stealFadeSamples <= 0`) | `SynthVoice: a start or steal after the pending note's release inside a steal fade starts after the fade (review 0.4 R1-3)`; `SynthEngine: Poly - a note released and restarted inside its steal fade sounds (review 0.4 R1-3)` |
+| R1-4 | Host bypass cut a sounding synth at once (click) | `processBlockBypassed` (after the bypassed audio is in the buffer): the first `ceil (10 ms) + 2 ticks` bypassed samples after a processed block render the synth with `releaseAll()` and `synthOn` forced off (the engine's own fade, decided at its ticks, so any bypassed block split gives the same samples) and add it to the output (FX: dry input + fading synth, Instrument: only the fading synth); then `synthEngine.reset()`. Every `processBlock` re-arms it; `prepareToPlay` / `releaseResources` disarm it. Bypassed blocks publish rest expression (`ExpressionFrame {}`) as before. A bypass on a silent synth is exactly the dry input / silence as before | `SynthProcessor: bypass fades a sounding synth out over 10 ms instead of cutting it (review 0.4 R1-4)` (bypassed blocks 7 / 64 / 512 / 4096; the "nothing hangs" test checks the second bypassed block) |
+| R1-5 | `getTailLengthSeconds()` = 0 although release / reverb tails ring up to ~10 s | kept: on FL's mixer insert the plugin is processed anyway; a non-zero tail would need `updateHostDisplay` on every synthOn / reverb change. Documented for the user (SYNTH-TESTING 7: export with *Leave remainder*, no *Smart disable*) | - (unchanged; `a new instance plays the synth ...` still checks 0) |
+| R2-1 | Choice lists that grow later move saved host automation (normalised index / (n - 1)) | **Rule: choice lists are frozen in length from 0.4.0; later additions need a new parameter** (9.1, 9.2, 15). ROADMAP 0.5 / 0.6 plan additions only for the mod sources: Vowel X, Vowel Y (0.5) and three calibrated vowel morph weights (0.6) - appended now as `ModSource::vowelX, vowelY, vowelWeight1..3` (17 sources, `isReservedModSource`, value 0, never written by the engine), names "Vowel X", "Vowel Y", "Vowel Weight 1..3". The Synth page lists them dimmed as "Vowel X (0.5)" ... "Vowel Weight 3 (0.6)" and not selectable (`params::modSourceReleaseHint`); the modulation rings ignore them. Destinations, LFO shapes, filter modes, divisions, play / glide / sub modes: nothing planned (0.5 adds new parameters such as `vowelRange`, 0.6 chord / CC parameters), lengths unchanged. Parameter values, presets, golden data and the 0.4.0 fixtures are unchanged (the fixture writer reproduces them byte for byte) | `Synth choice lists have their final length from 0.4.0 (saved automation, review 0.4 R2-1)`; `SynthEngine: the mod sources reserved for 0.5 / 0.6 contribute 0 (review 0.4 R2-1)`; the reserved items in `SynthPanel: every synth parameter has exactly one attached control` |
+| R2-2 | SYNTH-TESTING step 6 described a right-click menu the knobs do not have | FL's way: move the knob, *Tools -> Last tweaked -> Create automation clip*; alternative *Browse parameters* (unconfirmed) | doc |
+| R2-3 | A WAV without `clm ` whose length is a multiple of 2048 (WaveEdit 64 x 256, 1024 frames, a 4096 single cycle) was cut into 2048 frames without asking | `SynthPanel::needsFrameSizeChoice` also asks for every multiple of 2048 longer than 2048 (no `clm `); the question is `SynthPanel::createFrameSizeMenu` with 2048 ticked as the default; `chooseFrameSize` (5.4) is unchanged for the automatic case | `SynthPanel: a WAV of several 2048-sample lengths without clm asks for the frame size (review 0.4 R2-3)` (+ the import test's expectations for 8 x 2048 and 3 x 2048) |
+| R2-4 | The Synth page's 30 Hz timer ran while hidden from editor creation until the first visit; the preset bar's 10 Hz timer always | the panel's timers start only via `visibilityChanged()` (constructor: only if visible); `PresetBar::setRefreshing` (off after construction), driven by the panel's `visibilityChanged()` | `Editor: the Synth page and its preset bar tick only while the page is shown (review 0.4 R2-4)` |
+| R2-5 | `WavetableView`'s path cache was keyed by a raw pointer that a new table can reuse after the old one is freed | `setTable` with another table invalidates the cache; the raw pointer is gone | `UiFoundation: WavetableView redraws a new table that reuses a freed table's address (review 0.4 R2-5)` |
+| R2-6 | The preset bar took a user preset with a factory preset's name as current (rename / delete / save acted on the user file while the factory preset played) | `PresetManager::isCurrentFactory / getCurrentUserFile`; `PresetBar::getCurrentUserPreset` matches by that file, by name only after a project load; the menu ticks by the same identity | `PresetBar: the current user preset is the loaded file, not a preset with the same name (review 0.4 R2-6)` |
+| R2-7 | SYNTH-TESTING said Legato glides; the default glide time is 0 | "läuft ohne neuen Anschlag weiter; mit Glide > 0 gleitet er" | doc |
+| R2-8 | User tables were shared by the 64-bit FNV-1a hash alone | `findSharedUserTable`: the shared `user:<hash>` table is reused only when the process-wide shared data under that hash holds the same PCM (embedded loads and imports); otherwise the table is built and shared under the hash | `WavetableWorker: a shared user table is reused only for the same PCM, not for the same hash alone (review 0.4 R2-8)` |

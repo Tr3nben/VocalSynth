@@ -163,12 +163,26 @@ std::shared_ptr<const UserTableData> prepareEmbedded (std::shared_ptr<const User
     return data;
 }
 
-/** The table of validated user data: shared by hash, else built from the PCM16 frames. */
+/** The process-wide table of this PCM, if one exists. The 64-bit FNV-1a hash names the table but proves
+    nothing (it is not collision-resistant; a crafted preset could otherwise swap another instance's table):
+    the table is reused only when the shared data under that hash holds the same PCM (review 0.4 R2-8). */
+std::shared_ptr<const Wavetable> findSharedUserTable (const UserTableData& data)
+{
+    const auto shared = SharedUserData::get().find (data.hash);
+
+    if (shared == nullptr || (shared.get() != &data && shared->pcm != data.pcm))
+        return nullptr;
+
+    return WavetableStore::findShared ("user:" + data.hash);
+}
+
+/** The table of validated user data: shared when the same PCM is shared already, else built from the PCM16
+    frames (and shared under its hash). */
 std::shared_ptr<const Wavetable> getUserTable (const UserTableData& data, const std::atomic<bool>* cancel)
 {
     const auto key = "user:" + data.hash;
 
-    if (auto shared = WavetableStore::findShared (key))
+    if (auto shared = findSharedUserTable (data))
         return shared;
 
     auto result = WavetableBuilder::buildFromPcm16 (data.name.toStdString(), data.pcm, data.numFrames, cancel);
@@ -176,7 +190,7 @@ std::shared_ptr<const Wavetable> getUserTable (const UserTableData& data, const 
     if (! result.ok())
         return nullptr;
 
-    if (auto shared = WavetableStore::findShared (key))
+    if (auto shared = findSharedUserTable (data))
         return shared;
 
     std::shared_ptr<const Wavetable> built = std::move (result.table);
@@ -268,7 +282,7 @@ ImportResult importFile (const juce::File& file, int frameSizeOverride, const st
     data->hash = toHash (WavetableBuilder::fnv1a64 (data->pcm));
 
     const auto key = "user:" + data->hash;
-    r.table = WavetableStore::findShared (key);
+    r.table = findSharedUserTable (*data);
 
     if (r.table == nullptr)
     {

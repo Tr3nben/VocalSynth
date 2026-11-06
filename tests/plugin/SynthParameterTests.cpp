@@ -122,6 +122,41 @@ TEST_CASE ("Synth choice lists match the core enums", "[plugin][parameters][synt
     CHECK (tempoDivisionChoices[static_cast<int> (synth::TempoDivision::bars4)] == "4 Bars");
 }
 
+TEST_CASE ("Synth choice lists have their final length from 0.4.0 (saved automation, review 0.4 R2-1)",
+           "[plugin][parameters][synth]")
+{
+    // Host automation stores index / (n - 1): a list that grows later moves every automation point. The lengths
+    // below are frozen (docs/SYNTH-DESIGN.md 15, 24.4); later additions need a new parameter.
+    using namespace vocalsynth::params;
+
+    CHECK (playModeChoices.size() == 3);
+    CHECK (glideModeChoices.size() == 2);
+    CHECK (subOctaveChoices.size() == 2);
+    CHECK (subShapeChoices.size() == 3);
+    CHECK (filterModeChoices.size() == 5);
+    CHECK (lfoShapeChoices.size() == 7);
+    CHECK (tempoDivisionChoices.size() == 15);
+    CHECK (modSourceChoices.size() == 17);
+    CHECK (modDestChoices.size() == 22);
+
+    // The planned sources are reserved now (0.5: vowel tracker; 0.6: calibrated vowel weights)
+    CHECK (modSourceChoices[12] == "Vowel X");
+    CHECK (modSourceChoices[13] == "Vowel Y");
+    CHECK (modSourceChoices[14] == "Vowel Weight 1");
+    CHECK (modSourceChoices[15] == "Vowel Weight 2");
+    CHECK (modSourceChoices[16] == "Vowel Weight 3");
+
+    // The real parameters carry the full lists
+    VocalSynthProcessor p (Variant::fx);
+
+    for (const auto& ids : modParameters)
+    {
+        auto* choice = dynamic_cast<juce::AudioParameterChoice*> (p.getParameters().getParameter (ids.source.getParamID()));
+        REQUIRE (choice != nullptr);
+        CHECK (choice->choices.size() == 17);
+    }
+}
+
 TEST_CASE ("Presets set every synth parameter except the mix", "[plugin][parameters][synth]")
 {
     using namespace vocalsynth::params;

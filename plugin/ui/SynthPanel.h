@@ -108,10 +108,15 @@ public:
     /** Requests an import (async) and marks the preset modified. */
     void importTable (int slot, const juce::File& file, int frameSizeOverride = 0);
 
-    /** True if the WAV's frame size cannot be decided from the file (no clm chunk, more than
-        WavetableBuilder::maxSingleCycleSamples sample frames and not a multiple of 2048): the import asks.
-        Reads only the chunk headers. */
+    /** True if the WAV's frame size cannot be decided from the file: no clm chunk and either a multiple of 2048
+        sample frames longer than 2048 (64 x 256, 16 x 1024 and a 4096 single cycle look like n x 2048), or more
+        than WavetableBuilder::maxSingleCycleSamples sample frames and no multiple of 2048. The import then asks
+        (createFrameSizeMenu). Reads only the chunk headers. */
     static bool needsFrameSizeChoice (const juce::File& wavFile);
+
+    /** The frame-size question: 256 / 512 / 1024 / 2048 / 4096 samples (item ID = size), 2048 ticked as the
+        default (what the import picks without a choice). */
+    static juce::PopupMenu createFrameSizeMenu (const juce::String& fileName);
 
     /** Runs one timer tick now (tests). */
     void runTimerTickForTests() { timerCallback(); }

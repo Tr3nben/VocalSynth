@@ -16,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <memory>
+#include <optional>
 
 using namespace vocalsynth;
 using Catch::Approx;
@@ -342,6 +343,36 @@ TEST_CASE ("UiFoundation: WavetableView draws the frame at the position and cach
     view.setMessage ("Not a WAV file", true);
     CHECK (view.getMessage() == "Not a WAV file");
     CHECK (countPixels (render (view, f.lookAndFeel), ui::theme::warning, 30) > 5);
+}
+
+TEST_CASE ("UiFoundation: WavetableView redraws a new table that reuses a freed table's address (review 0.4 R2-5)",
+           "[plugin][editor][ui]")
+{
+    ParamFixture f;
+    ui::WavetableView view;
+    view.setBounds (0, 0, 320, 60);
+
+    auto first = synth::FactoryWavetables::build (synth::FactoryTable::basicShapes);
+    auto second = synth::FactoryWavetables::build (synth::FactoryTable::pwm);
+    auto third = synth::FactoryWavetables::build (synth::FactoryTable::harmonicSweep);
+    REQUIRE ((first.table != nullptr && second.table != nullptr && third.table != nullptr));
+
+    // One storage place for table 1 and table 3: the second table object gets the first one's address, as an
+    // allocator may hand out a freed block again (the view never owned these, the deleters do nothing)
+    std::optional<synth::Wavetable> place;
+    const auto noDelete = [] (const synth::Wavetable*) {};
+    place.emplace (*first.table);
+    view.setTable (std::shared_ptr<const synth::Wavetable> (&*place, noDelete));
+    render (view, f.lookAndFeel);
+    const auto rebuilds = view.getPathRebuildCount();
+
+    view.setTable (std::shared_ptr<const synth::Wavetable> (std::move (second.table))); // not painted (hidden page)
+    place.reset();
+    place.emplace (*third.table);
+    view.setTable (std::shared_ptr<const synth::Wavetable> (&*place, noDelete));
+    render (view, f.lookAndFeel);
+    CHECK (view.getPathRebuildCount() == rebuilds + 1);
+    view.setTable (nullptr);
 }
 
 TEST_CASE ("UiFoundation: VsLookAndFeel draws the old pages' widgets", "[plugin][editor][ui]")

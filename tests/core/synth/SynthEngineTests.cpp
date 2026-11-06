@@ -1043,6 +1043,127 @@ TEST_CASE ("SynthEngine: a play-mode change and releaseAll() release every voice
     }
 }
 
+TEST_CASE ("SynthEngine: releaseAll() centres the pitch bend (flush / source switch, review 0.4 R1-1)", "[synth][engine]")
+{
+    // The processor's flush sends note-offs AND a centre bend to the MIDI port; the restarted sources do not
+    // send a bend again (Bend Mode Off). The next note must play its own pitch, not the old bend.
+    const double sr = 48000.0;
+    const auto range = GENERATE (2, 12);
+    CAPTURE (range);
+    auto settings = sineSettings();
+    settings.bendRangeSemitones = range;
+
+    Scene s;
+    s.sr = sr;
+    s.length = s.at (1.0);
+    s.settings = { { 0, settings } };
+    s.bend (0.0, 8191);
+    s.on (0.0, 69);
+    s.releaseAllAt = { s.at (0.2) };
+    s.on (0.5, 69); // no bend event: the source starts from the centre
+    s.sortEvents();
+    const auto out = render (s, 480);
+
+    CHECK (std::abs (st::cents (zeroCrossingHz (out.left, sr, 0.1, 0.2), 440.0 * std::exp2 (range * 8191.0 / 8192.0 / 12.0))) < 2.0);
+    CHECK (std::abs (st::cents (zeroCrossingHz (out.left, sr, 0.6, 0.95), 440.0)) < 1.0);
+}
+
+TEST_CASE ("SynthEngine: synthOn off -> on inside the 10 ms fade leaves no hung note (review 0.4 R1-2)", "[synth][engine]")
+{
+    const double sr = 48000.0;
+    const auto block = GENERATE (1, 64, 480);
+    CAPTURE (block);
+    auto on = sineSettings();
+    on.env[0].releaseMs = 50.0f;
+    auto off = on;
+    off.synthOn = false;
+
+    Scene s;
+    s.sr = sr;
+    s.length = s.at (2.0);
+    s.settings = { { 0, on }, { s.at (0.1), off }, { s.at (0.106), on } }; // a 6 ms off pulse (automation)
+    s.on (0.0, 60);
+    s.off (0.103, 60); // the singer stops while the synth fades out
+    s.on (1.0, 64);
+    s.off (1.2, 64);   // Legato: must not fall back to the "held" 60
+    s.sortEvents();
+    SynthEngine engine;
+    engine.prepare (sr, SynthEngine::maxChunkSamples);
+    const auto out = render (engine, s, block);
+
+    CHECK (rmsOf (out.left, sr, 0.3, 1.0) == 0.0);
+    CHECK (rmsOf (out.left, sr, 1.05, 1.2) > 0.1);
+    CHECK (rmsOf (out.left, sr, 1.5, 2.0) == 0.0);
+    CHECK (engine.getStats().activeVoices == 0);
+}
+
+TEST_CASE ("SynthEngine: Poly - a note released and restarted inside its steal fade sounds (review 0.4 R1-3)", "[synth][engine]")
+{
+    const double sr = 48000.0;
+    auto settings = sineSettings();
+    settings.playMode = PlayMode::poly;
+
+    Scene s;
+    s.sr = sr;
+    s.length = s.at (1.2);
+    s.settings = { { 0, settings } };
+
+    for (int i = 0; i < SynthEngine::maxVoices; ++i)
+        s.on (0.0, 40 + i); // every voice busy
+
+    // Note 80 steals a voice, ends after 0.5 ms and starts again after 1 ms: both inside the 2 ms fade
+    s.events.push_back ({ s.at (0.1), VsEvent::makeNoteOn (0, 1, 80, 100), 0 });
+    s.events.push_back ({ s.at (0.1) + 24, VsEvent::makeNoteOff (0, 1, 80), 0 });
+    s.events.push_back ({ s.at (0.1) + 48, VsEvent::makeNoteOn (0, 1, 80, 100), 0 });
+
+    for (int i = 0; i < SynthEngine::maxVoices; ++i)
+        s.off (0.2, 40 + i);
+
+    s.sortEvents();
+    SynthEngine engine;
+    engine.prepare (sr, SynthEngine::maxChunkSamples);
+    const auto out = render (engine, s, 128);
+
+    // Only note 80 is held after the chord's release tails (5 ms)
+    CHECK (engine.getStats().activeVoices == 1);
+    CHECK (rmsOf (out.left, sr, 0.4, 1.2) > 0.1);
+    CHECK (std::abs (st::cents (zeroCrossingHz (out.left, sr, 0.4, 1.2), 830.61)) < 2.0);
+}
+
+TEST_CASE ("SynthEngine: the mod sources reserved for 0.5 / 0.6 contribute 0 (review 0.4 R2-1)", "[synth][engine]")
+{
+    CHECK (numModSources == 17);
+    CHECK_FALSE (isReservedModSource (ModSource::voicePitch));
+
+    for (const auto reserved : { ModSource::vowelX, ModSource::vowelY, ModSource::vowelWeight1, ModSource::vowelWeight2,
+                                 ModSource::vowelWeight3 })
+    {
+        CAPTURE (static_cast<int> (reserved));
+        CHECK (isReservedModSource (reserved));
+        auto settings = busySettings();
+        auto withReserved = settings;
+        withReserved.mod[1] = { reserved, ModDest::filterCutoff, 100.0f };
+        withReserved.mod[2] = { reserved, ModDest::pitch, -100.0f };
+        settings.mod[1] = {};
+        settings.mod[2] = {};
+
+        const auto scene = [] (const SynthSettings& s)
+        {
+            Scene sc;
+            sc.length = sc.at (0.4);
+            sc.settings = { { 0, s } };
+            sc.on (0.0, 60);
+            sc.on (0.1, 67);
+            sc.off (0.3, 60);
+            sc.off (0.3, 67);
+            sc.sortEvents();
+            return sc;
+        };
+
+        requireEqual (render (scene (withReserved), 512), render (scene (settings), 512));
+    }
+}
+
 TEST_CASE ("SynthEngine: LFO retrigger on note starts (square LFO -> Amp Level)", "[synth][engine]")
 {
     // LFO 1 square at 1 Hz, retrigger on, -100 % to Amp Level: +1 in the first half cycle -> gain 0, then 2

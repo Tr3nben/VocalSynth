@@ -314,6 +314,16 @@ void SynthVoice::apply (const VoiceCommand& command, const VoiceContext& context
                 pendingStart = command; // the note of the running steal fade starts again: take the newest
             else if (! active)
                 startFromSilence (command, context);
+            else if (fadeStep > 0.0f)
+            {
+                // A steal fade whose pending note was released (or that ended, waiting for its tick) runs to
+                // silence: the note starts clean after it instead of being retriggered inside it and then
+                // deactivated with the fade end (review 0.4 R1-3)
+                pendingStart = command;
+                hasPendingStart = true;
+                released = false;
+                changed = false;
+            }
             else
                 changeNote (command, context, true, true);
             break;
@@ -331,7 +341,7 @@ void SynthVoice::apply (const VoiceCommand& command, const VoiceContext& context
                 pendingStart = command;
                 pendingStart.type = VoiceCommandType::start;
 
-                if (! hasPendingStart && stealFadeSamples <= 0)
+                if (! hasPendingStart && fadeStep <= 0.0f) // no fade running or ended without its tick yet
                 {
                     stealFadeSamples = stealFadeLength;
                     fadeStep = fadeGain / static_cast<float> (stealFadeLength);

@@ -339,6 +339,11 @@ private:
     void acquireWavetables() noexcept;
     void releaseWavetables() noexcept;
 
+    /** processBlockBypassed's synth part (after the bypassed audio is in the buffer): the first bypassed samples
+        after a processed block render the synth with every voice released and synthOn forced off (its 10 ms
+        fade, added to the output), then the engine is reset (review 0.4 R1-4, docs/SYNTH-DESIGN.md 24.4). */
+    void fadeOutSynthBypassed (juce::AudioBuffer<float>& buffer, const TransportInfo& transportInfo) noexcept;
+
     /** Voice mode: rescales the pitch bends in events for MonitorSynth (see monitorBendFor()). */
     void prepareMonitorEvents (int bendRangeSemitones) noexcept;
 
@@ -364,6 +369,8 @@ private:
     std::vector<float> synthLeft, synthRight;   ///< maxChunkSamples each, allocated in the constructor
     DryGain dryGain;                            ///< FX: dryLevel (audio thread)
     DspLoadMeter synthLoad;                     ///< the engine calls only
+    int synthBypassFadeSamples = 0;             ///< synthOn fade + 2 ticks at the prepared rate (audio thread)
+    int synthBypassFadeLeft = 0;                ///< bypass fade still to render; re-armed by every processBlock
     std::atomic<int> editorScale { 100 };
     std::atomic<float>* muteDryParam = nullptr;
     std::atomic<float>* dryLevelParam = nullptr;

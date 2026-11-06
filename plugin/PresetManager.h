@@ -85,6 +85,13 @@ public:
     bool deleteUserPreset (const PresetInfo& preset, juce::String& errorMessage);
 
     juce::String getCurrentName() const;
+
+    /** Identity of the current preset (review 0.4 R2-6): true after a factory load; the user preset file after
+        a user load / save / rename (empty otherwise). Both unknown (false, empty) after setCurrent() (a project
+        knows only the name) and after the current user file was deleted. Message thread. */
+    bool isCurrentFactory() const;
+    juce::File getCurrentUserFile() const;
+
     /** True if a preset parameter differs from the snapshot (see class comment) or setCurrent() said so. */
     bool isModified() const;
 

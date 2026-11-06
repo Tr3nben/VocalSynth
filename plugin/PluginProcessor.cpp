@@ -404,6 +404,9 @@ void VocalSynthProcessor::prepareToPlay (double sampleRate, int maximumExpectedS
     // tables can all go now (docs/SYNTH-DESIGN.md 12.1, 17)
     synthEngine.prepare (sampleRate, maxChunkSamples); // allocates (allowed here)
     wavetableStore.releaseAllRetired();
+    synthBypassFadeSamples = static_cast<int> (std::ceil (synth::SynthEngine::synthOnFadeSeconds * sampleRate))
+                             + 2 * synth::controlTickSamples;
+    synthBypassFadeLeft = 0; // prepare() silenced the engine
     synthLoad.prepare (sampleRate);
     dryGain.prepare (sampleRate);
 
@@ -428,6 +431,7 @@ void VocalSynthProcessor::releaseResources()
     // Never free a table the engine still points at: reset first (docs/SYNTH-DESIGN.md 12.1, critique F2)
     synthEngine.reset();
     wavetableStore.releaseAllRetired();
+    synthBypassFadeLeft = 0;
 }
 
 void VocalSynthProcessor::reset()
@@ -473,6 +477,9 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     // No MIDI is allowed in a 0-sample block; a pending flush waits for the next real block
     if (numSamples <= 0)
         return;
+
+    // The synth may sound after this block: a following bypass fades it out (fadeOutSynthBypassed)
+    synthBypassFadeLeft = synthBypassFadeSamples;
 
     // Settings are plain values built from the raw atomics: no locks, no allocation
     const auto source = getSource();
@@ -694,10 +701,12 @@ void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer
     virtualMidiPort.setEnabled (virtualMidiOutParam->load (std::memory_order_relaxed) >= 0.5f);
     currentTestNote.store (-1, std::memory_order_relaxed);
 
+    const auto transportInfo = makeTransportInfo (getPlayHead());
+
     if (numSamples >= 1)
     {
         // Capture: a bypassed block is recorded as silence (markers bypassOn / bypassOff), no events
-        captureTap.beginBlock (makeTransportInfo (getPlayHead()),
+        captureTap.beginBlock (transportInfo,
                                makeCaptureBlockSettings (getSource(), getVoiceSettings(), getTestPatternSettings(), true));
 
         // Nothing may hang while bypassed. Repeated bypassed blocks emit nothing (nothing is active
@@ -711,13 +720,6 @@ void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer
         monitorSynth.reset();
         flushPending.store (false, std::memory_order_relaxed);
         lastSource = getSource(); // everything is flushed already
-
-        // Synth: silent at once, nothing hangs. The store protocol still runs (acquire / release in every
-        // block, so the block counter keeps moving and retired tables can go; docs/SYNTH-DESIGN.md 12.1, 17).
-        acquireWavetables();
-        synthEngine.reset();
-        releaseWavetables();
-        expressionPublisher.publish (synthEngine.getCurrentExpression());
     }
 
     // Audio: the FX passes the voice through, the Instrument is silent
@@ -726,6 +728,53 @@ void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer
 
     if (variant == Variant::instrument)
         buffer.clear();
+
+    if (numSamples >= 1)
+        fadeOutSynthBypassed (buffer, transportInfo);
+}
+
+void VocalSynthProcessor::fadeOutSynthBypassed (juce::AudioBuffer<float>& buffer, const TransportInfo& transportInfo) noexcept
+{
+    // Synth: nothing hangs and nothing clicks. The first bypassed samples after a processed block render the
+    // synth with every voice released and synthOn forced off - the engine's 10 ms fade, decided at its ticks,
+    // so any bypassed block split gives the same samples - added to the bypassed output; then the engine is
+    // reset. The store protocol still runs (acquire / release in every block, so the block counter keeps
+    // moving and retired tables can go; docs/SYNTH-DESIGN.md 12.1, 17, 24.4).
+    const auto numSamples = buffer.getNumSamples();
+    acquireWavetables();
+
+    if (synthBypassFadeLeft > 0)
+    {
+        synthEngine.releaseAll(); // un-bypass inside the fade: no note the flushed sources forgot stays held
+        auto synth = synthSettings.build();
+        synth.synthOn = false;
+        const auto synthTransport = synthTransportFor (transportInfo);
+        const auto length = juce::jmin (numSamples, synthBypassFadeLeft);
+        const auto numToneChannels = juce::jmin (getTotalNumOutputChannels(), buffer.getNumChannels(), maxToneChannels);
+        std::array<float*, maxToneChannels> channels {};
+        juce::int64 synthTicks = 0;
+        events.clear();
+        eventTimings.clear();
+        expressionFrames.clear();
+
+        for (int start = 0; start < length; start += maxChunkSamples)
+        {
+            const auto n = juce::jmin (maxChunkSamples, length - start);
+
+            for (int ch = 0; ch < numToneChannels; ++ch)
+                channels[static_cast<std::size_t> (ch)] = buffer.getWritePointer (ch, start);
+
+            renderSynth (synth, synthTransport, false, channels.data(), numToneChannels, n, synthTicks);
+        }
+
+        synthBypassFadeLeft -= length;
+    }
+
+    if (synthBypassFadeLeft <= 0)
+        synthEngine.reset();
+
+    releaseWavetables();
+    expressionPublisher.publish (ExpressionFrame {}); // bypassed: the meters rest
 }
 
 //==============================================================================

@@ -14,7 +14,8 @@ namespace vocalsynth::ui
 /** Preset bar (docs/SYNTH-DESIGN.md 20.5): [<] [name (* when modified) - click: menu by category] [>]
     [Save]. The menu lists the factory presets grouped by category, then "User" with the user presets, then
     "Init". Save asks for a name and category (AlertWindow, async) and calls
-    PresetManager::saveUserPreset. Refreshes the name with a 10 Hz timer (modified flag). Component IDs:
+    PresetManager::saveUserPreset. Refreshes the name with a 10 Hz timer (modified flag) while the owner says so
+    (setRefreshing). Component IDs:
     "presetPrev", "presetName", "presetNext", "presetSave". Message thread. Owner: agent E.
 
     Details (agent E): menu = "Init" on top, a "Factory" header with one sub-menu per category, a "User"
@@ -72,7 +73,8 @@ public:
     /** Save flow after the name dialog: empty name -> message; existing file -> askConfirm; then save. */
     void saveAs (const juce::String& name, PresetCategory category);
 
-    /** The user preset that is current (same name as the current preset), if any. */
+    /** The user preset that is current, if any: the file PresetManager loaded / saved last (never a user preset
+        that only shares a factory preset's name); after a project load (name only) the user preset of that name. */
     std::optional<PresetInfo> getCurrentUserPreset() const;
 
     /** The name button's text ("Voice Lead *"). */
@@ -80,6 +82,11 @@ public:
 
     /** Timer tick now (tests). */
     void refresh();
+
+    /** Starts (with a refresh at once) or stops the 10 Hz refresh. Off after construction: the owner turns it on
+        while the bar can be seen (SynthPanel: while its page is shown; review 0.4 R2-4). */
+    void setRefreshing (bool shouldRefresh);
+    bool isRefreshing() const noexcept { return isTimerRunning(); }
 
     static constexpr int timerHz = 10;
 

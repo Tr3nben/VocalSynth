@@ -543,8 +543,12 @@ TEST_CASE ("SynthProcessor: nothing hangs on bypass, flush and source change", "
     juce::AudioBuffer<float> buffer (2, 512);
     juce::MidiBuffer midi;
 
-    // 1. Bypass while a note sounds: bypassed blocks are dry / silent at once, afterwards silence stays silent
+    // 1. Bypass while a note sounds: the synth fades out within the first bypassed block (10 ms + 2 ticks =
+    //    512 samples at 48 kHz, review 0.4 R1-4), further bypassed blocks are dry / silent, afterwards silence
+    //    stays silent
     (void) run (p, held, 512);
+    buffer.clear();
+    p.processBlockBypassed (buffer, midi);
     buffer.clear();
     p.processBlockBypassed (buffer, midi);
     CHECK (buffer.getMagnitude (0, 512) == 0.0f);
@@ -572,6 +576,138 @@ TEST_CASE ("SynthProcessor: nothing hangs on bypass, flush and source change", "
     p.prepareToPlay (sr, 128);
     out = run (p, silence, 128);
     CHECK (rms (out.left) == 0.0);
+    p.releaseResources();
+}
+
+TEST_CASE ("SynthProcessor: bypass fades a sounding synth out over 10 ms instead of cutting it (review 0.4 R1-4)",
+           "[plugin][synth][processor]")
+{
+    const auto variant = GENERATE (Variant::fx, Variant::instrument);
+    const auto bypassBlock = GENERATE (7, 64, 512, 4096);
+    CAPTURE (variant == Variant::fx ? "fx" : "instrument", bypassBlock);
+    const double sr = 48000.0;
+    VocalSynthProcessor p (variant);
+    p.prepareToPlay (sr, 4096);
+
+    const auto input = sungPhrase (sr);
+    const std::vector<float> held (input.begin(), input.begin() + static_cast<std::ptrdiff_t> (0.3 * sr)); // inside note 1
+    const auto before = run (p, held, 480);
+    const auto synthBefore = variant == Variant::fx ? difference (before.left, held) : before.left;
+    const auto lastLevel = rms (synthBefore, synthBefore.size() - 480);
+    REQUIRE (lastLevel > 0.01);
+
+    // Bypassed blocks with the voice going on: the output is the dry input (FX) / silence (Instrument) plus a
+    // synth part that starts where it was and is 0 after 10 ms + 2 control ticks
+    const auto fadeSamples = static_cast<int> (std::ceil (synth::SynthEngine::synthOnFadeSeconds * sr)) + 2 * synth::controlTickSamples;
+    const auto total = 4096 + 1024;
+    std::vector<float> synthPart;
+    juce::AudioBuffer<float> buffer (2, 4096);
+    juce::MidiBuffer midi;
+
+    for (int pos = 0; pos < total; pos += bypassBlock)
+    {
+        const auto n = std::min (bypassBlock, total - pos);
+        juce::AudioBuffer<float> view (buffer.getArrayOfWritePointers(), 2, n);
+        const auto* dry = input.data() + held.size() + static_cast<std::size_t> (pos);
+
+        for (int ch = 0; ch < 2; ++ch)
+            juce::FloatVectorOperations::copy (view.getWritePointer (ch), dry, n);
+
+        midi.clear();
+        p.processBlockBypassed (view, midi);
+
+        for (int i = 0; i < n; ++i)
+            synthPart.push_back (view.getSample (0, i) - (variant == Variant::fx ? dry[i] : 0.0f));
+    }
+
+    // No cut: the first 5 ms still carry the synth (gain 1 -> 0.5), more than the next 5 ms (0.5 -> 0)
+    CHECK (rms (synthPart, 0, 240) > 0.4 * lastLevel);
+    CHECK (rms (synthPart, 0, 240) > rms (synthPart, 240, 480));
+    CHECK (rms (synthPart, static_cast<std::size_t> (fadeSamples)) == 0.0);
+
+    // Un-bypass: nothing hangs (the fade released every voice)
+    const auto out = run (p, std::vector<float> (static_cast<std::size_t> (0.3 * sr), 0.0f), 512);
+    CHECK (rms (out.left) == 0.0);
+    p.releaseResources();
+}
+
+TEST_CASE ("SynthProcessor: after Test Pattern \"Pitch Bend\" the Voice source plays the sung pitch (review 0.4 R1-1)",
+           "[plugin][synth][processor]")
+{
+    const double sr = 48000.0;
+    const int block = 480;
+    VocalSynthProcessor p (Variant::instrument);
+    p.getPresetManager().setUserFolder (juce::File());
+    setPlain (p, params::oscParameters[0].position.getParamID(), 0.0f); // basic-shapes frame 0 = sine
+    setPlain (p, params::source.getParamID(), static_cast<float> (params::Source::testPattern));
+    setPlain (p, params::testPattern.getParamID(), static_cast<float> (TestPattern::pitchBend));
+    p.prepareToPlay (sr, block);
+
+    juce::AudioBuffer<float> buffer (2, block);
+    juce::MidiBuffer midi;
+    midi.ensureSize (8192);
+    int lastPatternBend = 8192;
+
+    for (int b = 0; b < 130; ++b) // 1.3 s of the pitch-bend pattern: it ends far off the centre
+    {
+        buffer.clear();
+        midi.clear();
+        p.processBlock (buffer, midi);
+
+        for (const auto m : midi)
+            if (m.getMessage().isPitchWheel())
+                lastPatternBend = m.getMessage().getPitchWheelValue();
+    }
+
+    REQUIRE (std::abs (lastPatternBend - 8192) > 2000);
+
+    // Source -> Voice (Bend Mode Off, range 2), sung A3 = 220 Hz
+    setPlain (p, params::source.getParamID(), static_cast<float> (params::Source::voice));
+    std::vector<float> out;
+    int noteOn = -1;
+    double phase = 0.0;
+
+    for (int b = 0; b < 200; ++b)
+    {
+        for (int i = 0; i < block; ++i)
+        {
+            const auto v = static_cast<float> (0.3 * std::sin (phase));
+            phase += juce::MathConstants<double>::twoPi * 220.0 / sr;
+            buffer.setSample (0, i, v);
+            buffer.setSample (1, i, v);
+        }
+
+        midi.clear();
+        p.processBlock (buffer, midi);
+
+        for (const auto m : midi)
+            if (m.getMessage().isNoteOn())
+                noteOn = m.getMessage().getNoteNumber();
+
+        if (b >= 100)
+            for (int i = 0; i < block; ++i)
+                out.push_back (buffer.getSample (0, i));
+    }
+
+    CHECK (noteOn == 57);
+
+    // Pitch of the synth from the positive zero crossings
+    double first = -1.0, last = -1.0;
+    int count = 0;
+
+    for (std::size_t i = 1; i < out.size(); ++i)
+        if (out[i - 1] < 0.0f && out[i] >= 0.0f)
+        {
+            const auto t = static_cast<double> (i - 1) + static_cast<double> (out[i - 1] / (out[i - 1] - out[i]));
+            count += first < 0.0 ? 0 : 1;
+            first = first < 0.0 ? t : first;
+            last = t;
+        }
+
+    REQUIRE (count > 100);
+    const auto hz = sr * count / (last - first);
+    CAPTURE (lastPatternBend, hz);
+    CHECK (std::abs (1200.0 * std::log2 (hz / 220.0)) < 5.0);
     p.releaseResources();
 }
 

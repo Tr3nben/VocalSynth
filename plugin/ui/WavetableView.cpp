@@ -20,7 +20,10 @@ void WavetableView::setTable (std::shared_ptr<const synth::Wavetable> newTable)
     if (newTable == table)
         return;
 
+    // A new table always rebuilds the path: an old table's address can come back for another table once the
+    // old one is freed, so the cached pointer alone proves nothing (review 0.4 R2-5)
     table = std::move (newTable);
+    cacheValid = false;
     repaint();
 }
 
@@ -80,12 +83,10 @@ void WavetableView::rebuildPathIfNeeded()
 {
     const auto area = getWaveArea();
 
-    if (cacheValid && cachedTable == table.get() && cachedArea == area
-        && std::abs (position - cachedPosition) <= positionTolerance)
+    if (cacheValid && cachedArea == area && std::abs (position - cachedPosition) <= positionTolerance)
         return;
 
     cacheValid = true;
-    cachedTable = table.get();
     cachedArea = area;
     cachedPosition = position;
     ++pathRebuilds;

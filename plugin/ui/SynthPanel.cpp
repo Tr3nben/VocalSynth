@@ -319,7 +319,12 @@ SynthPanel::SynthPanel (const SynthPanelContext& c)
     buildControls();
     layoutContent();
     timerCallback();
-    startTimerHz (timerHz);
+
+    // The editor adds the panel hidden (addChildComponent): the timers start with visibilityChanged() when the
+    // page is shown (review 0.4 R2-4). A panel made visible before this point never existed, so this is only
+    // for owners that show it at once.
+    if (isVisible())
+        visibilityChanged();
 }
 
 SynthPanel::~SynthPanel()
@@ -532,6 +537,15 @@ void SynthPanel::buildControls()
             slot.source->getComboBox()->getProperties().set ("vsCompact", true);
             slot.dest->getComboBox()->getProperties().set ("vsCompact", true);
 
+            // Sources reserved for later releases (frozen list length, docs/SYNTH-DESIGN.md 24.4): listed with
+            // their release and not selectable; automation that selects one shows it like that and adds 0
+            for (int i = static_cast<int> (synth::firstReservedModSource); i < synth::numModSources; ++i)
+            {
+                auto* box = slot.source->getComboBox();
+                box->changeItemText (i + 1, params::modSourceChoices[i] + " (" + params::modSourceReleaseHint (i) + ")");
+                box->setItemEnabled (i + 1, false);
+            }
+
             auto& label = p.modNumbers[m];
             label.setText (n, juce::dontSendNotification);
             label.setFont (theme::font (theme::fontSmall, true));
@@ -626,6 +640,9 @@ void SynthPanel::resized()
 
 void SynthPanel::visibilityChanged()
 {
+    // The preset bar's timer follows the page too (a child gets no visibilityChanged() of its parent)
+    presetBar.setRefreshing (isVisible());
+
     if (isVisible())
     {
         timerCallback();
@@ -946,7 +963,8 @@ void SynthPanel::updateModulationRings()
         const auto dest = juce::roundToInt (p.rawModDest[m]->load (std::memory_order_relaxed));
         const auto amount = p.rawModAmount[m]->load (std::memory_order_relaxed) / 100.0f;
 
-        if (source <= 0 || source >= synth::numModSources || dest <= 0 || dest >= synth::numModDests || amount == 0.0f)
+        if (source <= 0 || source >= synth::numModSources || dest <= 0 || dest >= synth::numModDests || amount == 0.0f
+            || synth::isReservedModSource (static_cast<synth::ModSource> (source)))
             continue;
 
         const auto s = static_cast<synth::ModSource> (source);
@@ -1148,12 +1166,7 @@ void SynthPanel::launchImport (int slot)
                                 }
 
                                 // Ambiguous file: ask for the frame size in a second step
-                                juce::PopupMenu menu;
-                                menu.addSectionHeader ("Frame size of " + file.getFileName());
-
-                                for (const auto size : { 256, 512, 1024, 2048, 4096 })
-                                    menu.addItem (size, juce::String (size) + " samples" + (size == 2048 ? " (default)" : ""));
-
+                                auto menu = createFrameSizeMenu (file.getFileName());
                                 auto& button = safeThis->parts->tableButtons[static_cast<std::size_t> (slot)];
                                 menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&button),
                                                     [safeThis, slot, file] (int size)
@@ -1162,6 +1175,20 @@ void SynthPanel::launchImport (int slot)
                                                             safeThis->importTable (slot, file, size);
                                                     });
                             });
+}
+
+juce::PopupMenu SynthPanel::createFrameSizeMenu (const juce::String& fileName)
+{
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("Frame size of " + fileName);
+
+    for (const auto size : { 256, 512, 1024, 2048, 4096 })
+    {
+        const bool isDefault = size == synth::Wavetable::frameSize; // what the import picks without a choice
+        menu.addItem (size, juce::String (size) + " samples" + (isDefault ? " (default)" : ""), true, isDefault);
+    }
+
+    return menu;
 }
 
 bool SynthPanel::needsFrameSizeChoice (const juce::File& wavFile)
@@ -1221,9 +1248,16 @@ bool SynthPanel::needsFrameSizeChoice (const juce::File& wavFile)
     if (hasClm || blockAlign <= 0 || dataBytes < 0)
         return false;
 
+    // Ambiguous without a clm chunk (review 0.4 R2-3): more than one 2048-sample frame that is a multiple of 2048
+    // (64 x 256, 16 x 1024 or a 4096 single cycle look the same as n x 2048), or a long file that is no multiple
+    // of 2048 at all. Up to 2048 samples, and single cycles up to 8192 that are no multiple of 2048, are clear.
     const auto frames = dataBytes / blockAlign;
-    return frames > static_cast<juce::int64> (synth::WavetableBuilder::maxSingleCycleSamples)
-           && frames % synth::Wavetable::frameSize != 0;
+    const auto frameSize = static_cast<juce::int64> (synth::Wavetable::frameSize);
+
+    if (frames % frameSize == 0)
+        return frames > frameSize;
+
+    return frames > static_cast<juce::int64> (synth::WavetableBuilder::maxSingleCycleSamples);
 }
 
 } // namespace vocalsynth::ui

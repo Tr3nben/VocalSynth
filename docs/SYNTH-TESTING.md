@@ -65,8 +65,9 @@ ein Preset deutlich leiser oder lauter wirkt, ist das ein Befund – bitte notie
 
 ## 3. Die Seite „Synth“ in zwei Minuten
 
-- **Mode** (Bereich *VOICE*): **Legato** (Standard) – eine Stimme, beim Notenwechsel läuft der Ton weiter
-  und gleitet (Glide). **Mono** – jede Note setzt neu an (gut für „gezupfte“ Bässe). **Poly** – bis 16 Stimmen;
+- **Mode** (Bereich *VOICE*): **Legato** (Standard) – eine Stimme, beim Notenwechsel läuft der Ton ohne neuen
+  Anschlag weiter; mit **Glide** > 0 gleitet er zur neuen Note (bei *Init* steht Glide auf 0, also kein Gleiten).
+  **Mono** – jede Note setzt neu an (gut für „gezupfte“ Bässe). **Poly** – bis 16 Stimmen;
   beim Singen klingen alte Noten aus, während die neue schon spielt (Flächen, Keys).
 - **Vier Anzeigen** (*EXPRESSION* im Bereich *VOICE*): **Level** (wie laut du singst), **Bright** (hell „ii“ ↔
   dunkel „uu“), **Noise** (Hauchen, Zischen, „sch“), **Pitch** (wie weit du neben der Note liegst, z. B. Vibrato).
@@ -156,11 +157,18 @@ Bitte die Punkte der Reihe nach, Ergebnis jeweils mit **ok / nicht ok / überspr
 4. **Stimm-Modulation:** Preset **Vowel Morph** und **Talking Saw**: lauter/leiser, hell/dunkel („ii“ vs. „uu“),
    Zischen/Hauchen (**Breathy Voice**) – hört man es? Bewegen sich die vier Anzeigen (*EXPRESSION*)?
 5. **Eigene Wavetable:** Bei OSC A *Import WAV* wählen und eine WAV laden (selbst erzeugt oder mit klarer
-   Lizenz, z. B. ein Single-Cycle oder eine Serum-artige 2048er-Tabelle). **Position** drehen – ändert sich der
+   Lizenz, z. B. ein Single-Cycle oder eine Serum-artige 2048er-Tabelle). Hat die Datei keine Serum-Kennung und
+   lässt sich die Frame-Größe nicht sicher erkennen (z. B. Länge 4096, 16384 …), fragt VocalSynth nach der
+   **Frame-Größe**: Serum-/Vital-Tabellen → **2048** (vorausgewählt), WaveEdit-Tabellen (64 × 256) → **256**,
+   ein einzelner Zyklus mit 4096 Samples → **4096**. Klingt die Tabelle Oktaven zu hoch, war die Größe falsch –
+   noch einmal mit einer kleineren Größe importieren. **Position** drehen – ändert sich der
    Klang? Projekt speichern, FL schließen, Projekt wieder öffnen → Tabelle und Klang wieder da?
-6. **Automation:** In FL für **Filter Cutoff** und **Osc A Position** einen Automation-Clip anlegen (Rechtsklick
-   auf den Regler → *Create automation clip*), abspielen und dabei singen (oder Test-Pattern). Folgt der Klang
-   ohne Knacken?
+6. **Automation:** In FL für **Filter Cutoff** und **Osc A Position** je einen Automation-Clip anlegen. Ein
+   Rechtsklick auf einen VocalSynth-Regler öffnet **kein** FL-Menü (das ist so). FLs Weg: den Regler im Plugin
+   kurz bewegen, dann im FL-Hauptmenü **Tools → Last tweaked → Create automation clip**. Alternativ
+   (unbestätigt): im Plugin-Fenster oben links auf das Menü-Symbol des FL-Wrappers → *Browse parameters*, dann im
+   Browser Rechtsklick auf den Parameter → *Create automation clip*. Abspielen und dabei singen (oder
+   Test-Pattern). Folgt der Klang ohne Knacken?
 7. **CPU:** Puffergröße in FL (Audio-Einstellungen) auf **128** und **256**. Preset **Warm Pad** (Poly, zugleich
    das rechenintensivste Preset) und **Space Drift** spielen, eine Melodie mit vielen überlappenden Tönen singen.
    Wert der Anzeige **Synth DSP** (Reiter *Synth*) und **VocalSynth DSP** (Reiter *Voice*) sowie die CPU-Anzeige
@@ -170,8 +178,9 @@ Bitte die Punkte der Reihe nach, Ergebnis jeweils mit **ok / nicht ok / überspr
 9. **Externer Synth und Capture:** Wie bisher einen externen Synth über den MIDI-Port spielen (`FL-ROUTING.md`,
    T1/T2) – geht es noch? Einen Take im Reiter *Capture* aufnehmen und per Drag & Drop in FL ziehen – unverändert?
 10. **Bypass und Entfernen:** Eine Note lang halten (oder Test-Pattern laufen lassen) und dabei das Plugin
-    **bypassen**, wieder einschalten, dann das Plugin aus dem Slot **entfernen**. Hängt irgendein Ton? Puffergröße
-    **während der Wiedergabe** ändern – stürzt etwas ab, hängt etwas?
+    **bypassen** (der Synth blendet in 10 ms aus – knackt es?), wieder einschalten, dann das Plugin aus dem Slot
+    **entfernen**. Hängt irgendein Ton? Puffergröße **während der Wiedergabe** ändern – stürzt etwas ab, hängt
+    etwas?
 11. **Fenster-Skalierung:** Fenster an der Ecke unten rechts größer/kleiner ziehen bzw. im Skalierungs-Menü
     oben rechts (zeigt „100 %“) 75 / 100 / 125 / 150 / 200 % wählen. Wird die Größe mit dem Projekt gespeichert? Bleibt alles lesbar und **scharf** (besonders auf einem HiDPI-/4K-Monitor)?
 
@@ -204,3 +213,8 @@ die Hälfte der Presets „brauchbar“; den Rest stimmen wir in 0.4.1 nach dein
 - Sehr schnelle, abwärts gleitende Töne können ganz oben im Spektrum (über ca. 7 kHz) minimal knistern – bitte
   melden, falls du es hörst.
 - Die Vokal-Erkennung (Vowel X/Y als Mod-Quellen) kommt erst in 0.5; *Brightness* ist bis dahin der beste Ersatz.
+  Die Quellen-Liste der Mod-Matrix zeigt sie schon jetzt grau als „Vowel X (0.5)“, „Vowel Y (0.5)“ und
+  „Vowel Weight 1–3 (0.6)“ (damit gespeicherte Automation später nicht verrutscht); in 0.4 bewirken sie nichts.
+- VocalSynth meldet FL keine Ausklingzeit (Tail 0). Auf dem Mikro-Insert ist das egal. Beim **Export** am Songende
+  kann ein langer Hall-/Release-Ausklang abgeschnitten werden – im Export-Dialog *Leave remainder* wählen
+  (unbestätigt), und *Smart disable* für VocalSynth nicht einschalten.
