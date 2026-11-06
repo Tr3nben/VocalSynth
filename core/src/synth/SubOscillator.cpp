@@ -35,7 +35,9 @@ std::vector<float> cycleFromSineSeries (const std::vector<double>& b)
 
     std::vector<double> time (n);
     fft.inverse (bins, time);
-    return { time.begin(), time.end() };
+    std::vector<float> cycle (time.size());
+    std::transform (time.begin(), time.end(), cycle.begin(), [] (double v) { return static_cast<float> (v); });
+    return cycle;
 }
 
 std::unique_ptr<Wavetable> buildShape (SubShape shape)

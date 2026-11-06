@@ -638,7 +638,7 @@ void VocalSynthEditor::setScalePercent (int percent)
 void VocalSynthEditor::updateScaleBox()
 {
     const auto percent = getScalePercent();
-    const auto* listed = std::find (scaleMenuPercents.begin(), scaleMenuPercents.end(), percent);
+    const auto listed = std::find (scaleMenuPercents.begin(), scaleMenuPercents.end(), percent);
 
     if (listed != scaleMenuPercents.end())
         zoomBox.setSelectedId (percent, juce::dontSendNotification);
