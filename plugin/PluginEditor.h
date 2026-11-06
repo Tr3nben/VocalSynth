@@ -4,11 +4,14 @@
 #include "FileDragSource.h"
 #include "PluginProcessor.h"
 #include "TunerDisplayModel.h"
+#include "ui/SynthPanel.h"
+#include "ui/VsLookAndFeel.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -16,8 +19,12 @@
 namespace vocalsynth
 {
 
-/** M2 UI (docs/M2-DESIGN.md 4.3) + M3 Capture tab (docs/M3-DESIGN.md 14), for FX and Instrument alike.
-    Three pages:
+/** M2 UI (docs/M2-DESIGN.md 4.3) + M3 Capture tab (docs/M3-DESIGN.md 14) + the 0.4 Synth page
+    (docs/SYNTH-DESIGN.md 17, 20), for FX and Instrument alike. Design size 1100 x 700: a 30 px top row (page
+    tabs, plugin name / version / format, scale menu) and a 1100 x 670 page area. Everything lives on a content
+    component at the design size; the editor scales it with a transform (75-200 %, fixed aspect ratio, corner
+    resizer or the scale menu; the scale is saved in the project, SYNTH editorScale). VsLookAndFeel for the
+    whole editor. Four pages:
 
     - "Voice" (default): tuner (note name in FL convention C5 = 60, cents needle, Hz, confidence bar +
       voiced LED; calmed by TunerDisplayModel), sounding note, the voice settings (Source, Voice Range,
@@ -28,6 +35,9 @@ namespace vocalsynth
       test pattern, MIDI channel, tempo, CC, monitor tone, virtual MIDI, mute dry, sent counters,
       DSP load, block-size histogram, drag sources for the test clips.
     - "Capture" (M3): the CapturePanel (take list, drag handles for MIDI / WAV, export options).
+    - "Synth" (0.4): ui::SynthPanel (preset bar, oscillators, filter, envelopes, LFOs, mod matrix, voice, FX,
+      master: Synth On / Volume / Dry).
+    The editor opens on Voice; the page names are those of FL-ROUTING.md / LIESMICH.txt.
 
     Runs on the message thread; reads the processor only through atomics/accessors from a Timer. */
 class VocalSynthEditor final : public juce::AudioProcessorEditor,
@@ -41,14 +51,20 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
 
-    static constexpr int defaultWidth = 940;
-    static constexpr int defaultHeight = 470;
+    /** Design size (= the editor size at 100 %). */
+    static constexpr int defaultWidth = 1100;
+    static constexpr int defaultHeight = 700;
+    static constexpr int tabRowHeight = 30;
+
+    /** Entries of the scale menu (percent); dragging the corner gives any scale in between. */
+    static constexpr std::array<int, 5> scaleMenuPercents { 75, 100, 125, 150, 200 };
 
     enum class Page
     {
         voice,
         testAndRouting,
-        capture
+        capture,
+        synth
     };
 
     /** Shows one page and hides the others' controls (also used by the tests). */
@@ -90,6 +106,25 @@ public:
     /** "VocalSynth DSP: avg 2.1 % / peak 5.3 % of the block time" */
     static juce::String formatDspLoad (const DspLoadMeter::Reading& reading);
 
+    /** Short text of the Synth page's top row: "Synth DSP avg 0.6 % U+00B7 peak 1.2 %" (empty reading: "Synth DSP -"). */
+    static juce::String formatSynthDspLoad (const DspLoadMeter::Reading& reading);
+
+    /** Voice page line about the internal synth (decision E4: new instances play it; an external-synth user
+        switches it off on the Synth page). */
+    static juce::String synthHintText (bool synthOn);
+
+    /** The component that holds every page at the design size (scaled by a transform; for the tests). */
+    juce::Component& getContentComponent() noexcept { return content; }
+
+    /** The Synth page (for the tests). */
+    ui::SynthPanel& getSynthPanel() noexcept { return synthPanel; }
+
+    /** Current scale in percent (editor width / design width). */
+    int getScalePercent() const noexcept;
+
+    /** Resizes the editor to the scale (clamped 75..200 %), as the scale menu does. */
+    void setScalePercent (int percent);
+
     /** Current calm tuner values (for the tests). */
     const TunerDisplayModel::State& getTunerState() const noexcept { return tunerModel.getState(); }
 
@@ -102,10 +137,21 @@ public:
     /** The Capture tab (for the tests). */
     CapturePanel& getCapturePanel() noexcept { return capturePanel; }
 
-    /** Header line under the plugin name: "Version 0.3.1 - M3 capture   |   Format: VST3" (en dash). */
+    /** Header text in the top row: "Version 0.4.0 - wavetable synth   |   Format: VST3" (en dash). */
     juce::String getVersionText() const;
 
 private:
+    /** Holds every page at the design size; paints the editor background and the old pages' drawings. */
+    class Content final : public juce::Component
+    {
+    public:
+        explicit Content (VocalSynthEditor& e) : editor (e) {}
+        void paint (juce::Graphics& g) override { editor.paintContent (g); }
+
+    private:
+        VocalSynthEditor& editor;
+    };
+
     /** Tuner: note name, Hz, cents needle (-50..+50), confidence bar and voiced LED. Painted from the
         TunerDisplayModel state the editor's timer hands it; repaints only the parts whose pixels change. */
     class TunerDisplay final : public juce::Component
@@ -161,6 +207,10 @@ private:
     };
 
     void timerCallback() override;
+    void paintContent (juce::Graphics& g);
+    void layoutContent();
+    void updateScaleBox();
+    void updateSynthHint();
     void updateStatusTexts();
     void updateVoiceTexts (const VoiceAnalysisSnapshot& snapshot, double elapsedMs);
     void updateLatencyTexts (const VoiceSettings& voiceSettings);
@@ -171,14 +221,22 @@ private:
     void paintInputMeter (juce::Graphics& g);
     void paintHistogram (juce::Graphics& g);
 
+    // Declared first: destroyed after every component that uses it (docs/SYNTH-DESIGN.md 20.2)
+    ui::VsLookAndFeel lookAndFeel;
+
     VocalSynthProcessor& vsProcessor;
     const juce::String formatName;
     Page currentPage = Page::voice;
+
+    // Declared before the pages' components: they are its children
+    Content content { *this };
 
     // Page switch
     juce::TextButton voicePageButton { "Voice" };
     juce::TextButton testPageButton { "Test & Routing" };
     juce::TextButton capturePageButton { "Capture" };
+    juce::TextButton synthPageButton { "Synth" };
+    juce::ComboBox zoomBox; ///< editor scale menu
 
     //==============================================================================
     // Voice page
@@ -212,6 +270,7 @@ private:
 
     juce::Label soundingNoteLabel;
     juce::Label voiceHintLabel;
+    juce::Label synthHintLabel;     ///< synthHintText() (E4)
     juce::Label meterCaptionLabel;
 
     // Latency / DSP load box (below the dropdowns and sliders)
@@ -252,6 +311,10 @@ private:
     // Capture page (M3)
     CapturePanel capturePanel;
 
+    //==============================================================================
+    // Synth page (0.4)
+    ui::SynthPanel synthPanel;
+
     /** Components of each page (shown/hidden by showPage()). */
     std::vector<juce::Component*> voicePageComponents;
     std::vector<juce::Component*> testPageComponents;
@@ -263,6 +326,8 @@ private:
     std::vector<std::unique_ptr<ComboBoxAttachment>> comboBoxAttachments;
     std::vector<std::unique_ptr<SliderAttachment>> sliderAttachments;
     std::vector<std::unique_ptr<ButtonAttachment>> buttonAttachments;
+
+    std::atomic<float>* synthOnParam = nullptr;
 
     juce::TooltipWindow tooltipWindow { this, 600 };
 

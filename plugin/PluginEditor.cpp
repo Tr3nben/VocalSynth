@@ -1,8 +1,11 @@
 #include "PluginEditor.h"
 
 #include "Parameters.h"
+#include "SynthParameters.h"
 #include "TestClipExporter.h"
+#include "ui/Theme.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace vocalsynth
@@ -11,9 +14,11 @@ namespace vocalsynth
 namespace
 {
 constexpr int margin = 16;
-constexpr int headerHeight = 52;
-constexpr int pageButtonHeight = 28;
-constexpr int pageButtonWidth = 150;
+constexpr int pageButtonHeight = 24;
+constexpr int pageButtonWidth = 132;
+constexpr int zoomBoxWidth = 84;
+constexpr int voicePageHeight = 420; // the old pages' layouts have fixed sizes: not stretched to the page height
+constexpr int testPageHeight = 440;
 constexpr int rowHeight = 30;
 constexpr int voiceRowHeight = 32;
 constexpr int labelWidth = 100;
@@ -28,12 +33,15 @@ constexpr float voiceMeterFloorDb = -70.0f; // lowest gate threshold
 constexpr int histogramRowHeight = 12;
 constexpr int pageRadioGroup = 4711;
 
-const juce::Colour backgroundColour { 0xff15171c };
-const juce::Colour panelColour { 0xff2a2e36 };
-const juce::Colour accentColour { 0xff3ddc97 };
-const juce::Colour warnColour { 0xffffa53d };
-const juce::Colour textColour { 0xffd8dbe0 };
-const juce::Colour dimTextColour { 0xff8a9099 };
+// The 0.4 theme (docs/SYNTH-DESIGN.md 20.1): the old pages keep their layout and only change colours.
+// References, not copies: a copy of another header's dynamically initialised constant could be made before
+// that constant is initialised (static initialisation order).
+const juce::Colour& backgroundColour = ui::theme::background;
+const juce::Colour& panelColour = ui::theme::panel;
+const juce::Colour& accentColour = ui::theme::accent;
+const juce::Colour& warnColour = ui::theme::modulation; // amber
+const juce::Colour& textColour = ui::theme::text;
+const juce::Colour& dimTextColour = ui::theme::textDim;
 
 juce::String formatCount (uint64_t value)
 {
@@ -326,6 +334,24 @@ juce::String VocalSynthEditor::formatDspLoad (const DspLoadMeter::Reading& readi
            + juce::String (100.0f * reading.peakProportion, 1) + " % of the block time";
 }
 
+juce::String VocalSynthEditor::formatSynthDspLoad (const DspLoadMeter::Reading& reading)
+{
+    if (! reading.valid)
+        return "Synth DSP -";
+
+    return "Synth DSP avg " + juce::String (100.0f * reading.averageProportion, 1) + " %" + dotSeparator() + "peak "
+           + juce::String (100.0f * reading.peakProportion, 1) + " %";
+}
+
+juce::String VocalSynthEditor::synthHintText (bool synthOn)
+{
+    if (synthOn)
+        return "Internal synth: ON " + emDash() + " it plays what you sing (page Synth). Using another synth via "
+               "the MIDI port? Switch Synth On off there.";
+
+    return "Internal synth: off " + emDash() + " page Synth, Synth On plays your voice without MIDI routing.";
+}
+
 VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
     : AudioProcessorEditor (p),
       vsProcessor (p),
@@ -333,40 +359,69 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
       midiDragSource ("Drag test MIDI",
                       [&p] { return TestClipExporter::exportMidi (p.getTestPatternSettings()); }),
       wavDragSource ("Drag test WAV", [] { return TestClipExporter::exportWav(); }),
-      capturePanel (p)
+      capturePanel (p),
+      synthPanel (ui::SynthPanelContext { p.getParameters(), p.getPresetManager(), p.getWavetableStore(),
+                                          p.getWavetableWorker(), p.getExpressionPublisher(),
+                                          [this] { return formatSynthDspLoad (vsProcessor.getSynthDspLoad()); },
+                                          [this] { vsProcessor.notifyPresetLoaded(); } })
 {
+    // First: every component below (and the Synth page) draws with the 0.4 look
+    setLookAndFeel (&lookAndFeel);
+
     auto& apvts = p.getParameters();
+    synthOnParam = apvts.getRawParameterValue (params::synthOn.getParamID());
+    jassert (synthOnParam != nullptr);
+
+    content.setOpaque (true); // paintContent fills it
+    addAndMakeVisible (content);
 
     // --- Page switch ---
-    for (auto* button : { &voicePageButton, &testPageButton, &capturePageButton })
+    for (auto* button : { &voicePageButton, &testPageButton, &capturePageButton, &synthPageButton })
     {
         button->setClickingTogglesState (false);
         button->setRadioGroupId (pageRadioGroup, juce::dontSendNotification);
-        button->setColour (juce::TextButton::buttonOnColourId, accentColour.darker (0.6f));
-        addAndMakeVisible (*button);
+        content.addAndMakeVisible (*button);
     }
+
+    // --- Scale menu (docs/SYNTH-DESIGN.md 17): 75 .. 200 %, the corner resizer gives anything in between ---
+    for (const auto percent : scaleMenuPercents)
+        zoomBox.addItem (juce::String (percent) + " %", percent);
+
+    zoomBox.setTooltip ("Window size (also: drag the bottom-right corner). Saved with the project");
+    zoomBox.setEditableText (false);
+    zoomBox.onChange = [this]
+    {
+        if (const auto id = zoomBox.getSelectedId(); id > 0)
+            setScalePercent (id);
+    };
+    content.addAndMakeVisible (zoomBox);
 
     voicePageButton.setTooltip ("Tuner and the voice -> MIDI settings");
     testPageButton.setTooltip ("M1 test pattern, MIDI channel, Monitor Tone, virtual port, diagnostics");
     capturePageButton.setTooltip ("Takes of what you sang: drag them into FL Studio as MIDI or WAV");
+    synthPageButton.setTooltip ("The internal wavetable synth: presets, oscillators, filter, modulation, effects");
     voicePageButton.onClick = [this] { showPage (Page::voice); };
     testPageButton.onClick = [this] { showPage (Page::testAndRouting); };
     capturePageButton.onClick = [this] { showPage (Page::capture); };
+    synthPageButton.onClick = [this] { showPage (Page::synth); };
 
     // --- Capture page (M3) ---
-    addChildComponent (capturePanel);
+    content.addChildComponent (capturePanel);
+
+    // --- Synth page (0.4): shown / hidden with setVisible (its timers follow the visibility) ---
+    content.addChildComponent (synthPanel);
 
     const auto addCombo = [this] (juce::ComboBox& box, const juce::StringArray& items, const juce::String& tooltip)
     {
         box.addItemList (items, 1); // item ID = choice index + 1 (the attachment maps them)
         box.setTooltip (tooltip);
-        addChildComponent (box);
+        content.addChildComponent (box);
     };
 
     const auto addCaption = [this] (juce::Label& label, std::vector<juce::Component*>& page)
     {
         styleCaptionLabel (label);
-        addChildComponent (label);
+        content.addChildComponent (label);
         page.push_back (&label);
     };
 
@@ -374,11 +429,11 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
     {
         slider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, sliderTextWidth, 22);
         slider.setTooltip (tooltip);
-        addChildComponent (slider);
+        content.addChildComponent (slider);
     };
 
     // --- Voice page ---
-    addChildComponent (tuner);
+    content.addChildComponent (tuner);
     voicePageComponents.push_back (&tuner);
 
     addCombo (sourceBox, params::sourceChoices, "Voice: your singing makes the MIDI. Test Pattern: the M1 test MIDI");
@@ -399,7 +454,7 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
     octaveSlider.setIncDecButtonsMode (juce::Slider::incDecButtonsDraggable_Vertical);
 
     legatoButton.setTooltip ("On: the new note starts before the old one ends (for legato/glide synths)");
-    addChildComponent (legatoButton);
+    content.addChildComponent (legatoButton);
 
     const std::pair<juce::Label*, juce::Component*> voiceRows[] = {
         { &sourceLabel, &sourceBox },         { &voiceRangeLabel, &voiceRangeBox },
@@ -418,17 +473,23 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
 
     voicePageComponents.push_back (&legatoButton);
 
-    for (auto* label : { &soundingNoteLabel, &voiceHintLabel, &meterCaptionLabel, &latencyLabel, &totalLatencyLabel,
-                         &bufferWarningLabel, &dspLoadVoiceLabel })
+    for (auto* label : { &soundingNoteLabel, &voiceHintLabel, &synthHintLabel, &meterCaptionLabel, &latencyLabel,
+                         &totalLatencyLabel, &bufferWarningLabel, &dspLoadVoiceLabel })
     {
         styleValueLabel (*label);
-        addChildComponent (*label);
+        content.addChildComponent (*label);
         voicePageComponents.push_back (label);
     }
 
     voiceHintLabel.setFont (juce::FontOptions (13.0f));
     voiceHintLabel.setColour (juce::Label::textColourId, dimTextColour);
     meterCaptionLabel.setColour (juce::Label::textColourId, dimTextColour);
+    synthHintLabel.setFont (juce::FontOptions (13.0f));
+    synthHintLabel.setColour (juce::Label::textColourId, dimTextColour);
+    synthHintLabel.setJustificationType (juce::Justification::topLeft);
+    synthHintLabel.setMinimumHorizontalScale (1.0f);
+    synthHintLabel.setTooltip ("New instances play the internal synth (with the dry voice). Synth On, Volume and Dry "
+                               "are at the bottom right of page Synth; old projects keep it off");
     latencyLabel.setTooltip ("Analysis: worst-case delay from the start of a sung note to its note-on (analysis "
                              "window + hops) for the selected voice range. Buffer: the largest audio block FL "
                              "sent in the last 1-2 seconds (= the ASIO buffer length)");
@@ -478,12 +539,12 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
     for (auto* c : std::initializer_list<juce::Component*> { &monitorToneButton, &virtualMidiButton, &restartButton,
                                                              &resetHistogramButton, &midiDragSource, &wavDragSource })
     {
-        addChildComponent (c);
+        content.addChildComponent (c);
         testPageComponents.push_back (c);
     }
 
     // The instrument never outputs the dry voice, so the switch only matters for the FX
-    addChildComponent (muteDryButton);
+    content.addChildComponent (muteDryButton);
     if (p.getVariant() == Variant::fx)
         testPageComponents.push_back (&muteDryButton);
 
@@ -491,7 +552,7 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
                          &sentCountsLabel, &dspLoadTestLabel, &histogramSummaryLabel })
     {
         styleValueLabel (*label);
-        addChildComponent (*label);
+        content.addChildComponent (*label);
         testPageComponents.push_back (label);
     }
 
@@ -537,8 +598,21 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
     updateStatusTexts();
     updateVoiceTexts (vsProcessor.getVoiceSnapshot(), 0.0);
     updateDspLoadTexts();
+    updateSynthHint();
 
-    setSize (defaultWidth, defaultHeight);
+    // Fixed aspect ratio 1100 : 700, 75 .. 200 % (docs/SYNTH-DESIGN.md 17); the saved scale of the project (read
+    // first: setResizeLimits resizes the editor, and every resize stores its scale in the processor)
+    const auto percent = p.getEditorScalePercent();
+    setResizeLimits (defaultWidth * VocalSynthProcessor::minEditorScalePercent / 100,
+                     defaultHeight * VocalSynthProcessor::minEditorScalePercent / 100,
+                     defaultWidth * VocalSynthProcessor::maxEditorScalePercent / 100,
+                     defaultHeight * VocalSynthProcessor::maxEditorScalePercent / 100);
+    getConstrainer()->setFixedAspectRatio ((double) defaultWidth / (double) defaultHeight);
+    setResizable (true, true);
+
+    content.setBounds (0, 0, defaultWidth, defaultHeight);
+    layoutContent();
+    setSize (defaultWidth * percent / 100, defaultHeight * percent / 100);
     showPage (Page::voice);
     startTimerHz (refreshHz);
 }
@@ -546,6 +620,36 @@ VocalSynthEditor::VocalSynthEditor (VocalSynthProcessor& p)
 VocalSynthEditor::~VocalSynthEditor()
 {
     stopTimer();
+    setLookAndFeel (nullptr);
+}
+
+int VocalSynthEditor::getScalePercent() const noexcept
+{
+    return juce::roundToInt (100.0 * (double) getWidth() / (double) defaultWidth);
+}
+
+void VocalSynthEditor::setScalePercent (int percent)
+{
+    const auto p = juce::jlimit (VocalSynthProcessor::minEditorScalePercent, VocalSynthProcessor::maxEditorScalePercent,
+                                 percent);
+    setSize (juce::roundToInt (defaultWidth * p / 100.0), juce::roundToInt (defaultHeight * p / 100.0));
+}
+
+void VocalSynthEditor::updateScaleBox()
+{
+    const auto percent = getScalePercent();
+    const auto* listed = std::find (scaleMenuPercents.begin(), scaleMenuPercents.end(), percent);
+
+    if (listed != scaleMenuPercents.end())
+        zoomBox.setSelectedId (percent, juce::dontSendNotification);
+    else
+        zoomBox.setText (juce::String (percent) + " %", juce::dontSendNotification);
+}
+
+void VocalSynthEditor::updateSynthHint()
+{
+    synthHintLabel.setText (synthHintText (synthOnParam->load (std::memory_order_relaxed) >= 0.5f),
+                            juce::dontSendNotification);
 }
 
 void VocalSynthEditor::showPage (Page page)
@@ -559,26 +663,42 @@ void VocalSynthEditor::showPage (Page page)
         c->setVisible (page == Page::testAndRouting);
 
     capturePanel.setVisible (page == Page::capture);
+    synthPanel.setVisible (page == Page::synth);
 
     voicePageButton.setToggleState (page == Page::voice, juce::dontSendNotification);
     testPageButton.setToggleState (page == Page::testAndRouting, juce::dontSendNotification);
     capturePageButton.setToggleState (page == Page::capture, juce::dontSendNotification);
-    repaint();
+    synthPageButton.setToggleState (page == Page::synth, juce::dontSendNotification);
+    content.repaint();
 }
 
 void VocalSynthEditor::paint (juce::Graphics& g)
 {
+    // Only visible around the content when the host gives a size off the aspect ratio
+    g.fillAll (backgroundColour);
+}
+
+void VocalSynthEditor::paintContent (juce::Graphics& g)
+{
     g.fillAll (backgroundColour);
 
-    auto header = getLocalBounds().reduced (margin, 0).withTrimmedTop (8).removeFromTop (headerHeight);
+    // Top row: tabs (left), plugin name, version and format, scale menu (right)
+    auto row = content.getLocalBounds().removeFromTop (tabRowHeight);
+    g.setColour (ui::theme::panelHeader);
+    g.fillRect (row);
+    g.setColour (ui::theme::panelOutline);
+    g.fillRect (row.removeFromBottom (1));
 
+    auto text = row.withTrimmedLeft (4 * (pageButtonWidth + 6) + 16).withTrimmedRight (zoomBoxWidth + 16);
+    const auto name = vsProcessor.getName();
+    const auto nameFont = juce::Font (juce::FontOptions (14.0f, juce::Font::bold));
+    const auto nameWidth = juce::roundToInt (juce::GlyphArrangement::getStringWidth (nameFont, name)) + 12;
     g.setColour (juce::Colours::white);
-    g.setFont (juce::FontOptions (20.0f, juce::Font::bold));
-    g.drawText (vsProcessor.getName(), header.removeFromTop (26), juce::Justification::centredLeft);
-
+    g.setFont (nameFont);
+    g.drawText (name, text.removeFromLeft (nameWidth), juce::Justification::centredLeft);
     g.setColour (dimTextColour);
-    g.setFont (juce::FontOptions (13.0f));
-    g.drawText (getVersionText(), header.removeFromTop (18), juce::Justification::centredLeft);
+    g.setFont (juce::FontOptions (12.0f));
+    g.drawText (getVersionText(), text, juce::Justification::centredLeft, true);
 
     if (currentPage == Page::voice)
     {
@@ -594,7 +714,7 @@ void VocalSynthEditor::paint (juce::Graphics& g)
 
 juce::String VocalSynthEditor::getVersionText() const
 {
-    return "Version " VOCALSYNTH_VERSION_STRING " " + enDash() + " M3 capture   |   Format: " + formatName;
+    return "Version " VOCALSYNTH_VERSION_STRING " " + enDash() + " wavetable synth   |   Format: " + formatName;
 }
 
 void VocalSynthEditor::paintInputMeter (juce::Graphics& g)
@@ -680,22 +800,49 @@ void VocalSynthEditor::paintHistogram (juce::Graphics& g)
 
 void VocalSynthEditor::resized()
 {
-    auto area = getLocalBounds().reduced (margin, 0);
-    area.removeFromTop (8 + headerHeight + 4);
+    // The content keeps the design size; a transform scales it to the editor (aspect kept, centred if the host
+    // gives a size off the ratio). The scale is saved with the project.
+    const auto scale = juce::jmin ((float) getWidth() / (float) defaultWidth, (float) getHeight() / (float) defaultHeight);
 
-    auto tabs = area.removeFromTop (pageButtonHeight);
-    voicePageButton.setBounds (tabs.removeFromLeft (pageButtonWidth));
-    tabs.removeFromLeft (6);
-    testPageButton.setBounds (tabs.removeFromLeft (pageButtonWidth));
-    tabs.removeFromLeft (6);
-    capturePageButton.setBounds (tabs.removeFromLeft (pageButtonWidth));
-    area.removeFromTop (12);
+    if (scale > 0.0f)
+    {
+        const auto x = 0.5f * ((float) getWidth() - scale * (float) defaultWidth);
+        const auto y = 0.5f * ((float) getHeight() - scale * (float) defaultHeight);
+        content.setTransform (juce::AffineTransform::scale (scale).translated (x, y));
+        vsProcessor.setEditorScalePercent (juce::roundToInt (100.0f * scale));
+    }
+
+    updateScaleBox();
+}
+
+void VocalSynthEditor::layoutContent()
+{
+    auto area = content.getLocalBounds();
+
+    // Top row: page tabs, scale menu
+    auto tabs = area.removeFromTop (tabRowHeight).reduced (margin / 2, (tabRowHeight - 1 - pageButtonHeight) / 2);
+    zoomBox.setBounds (tabs.removeFromRight (zoomBoxWidth));
+
+    for (auto* button : { &voicePageButton, &testPageButton, &capturePageButton, &synthPageButton })
+    {
+        button->setBounds (tabs.removeFromLeft (pageButtonWidth));
+        tabs.removeFromLeft (6);
+    }
+
+    // Synth page: the whole 1100 x 670 page area (docs/SYNTH-DESIGN.md 20.6)
+    synthPanel.setBounds (area);
+
+    // The old pages keep their layout (fixed sizes) inside the page area
+    area.reduce (margin, 0);
+    area.removeFromTop (14);
     area.removeFromBottom (margin);
 
-    // All pages are laid out; only one is visible (showPage)
-    layoutVoicePage (area);
-    layoutTestPage (area);
-    capturePanel.setBounds (area);
+    const auto centred = [&area] (int height)
+    { return area.withSizeKeepingCentre (area.getWidth(), juce::jmin (area.getHeight(), height)); };
+
+    layoutVoicePage (centred (voicePageHeight));
+    layoutTestPage (centred (testPageHeight));
+    capturePanel.setBounds (area); // the take list uses the height
 }
 
 void VocalSynthEditor::layoutVoicePage (juce::Rectangle<int> area)
@@ -715,6 +862,8 @@ void VocalSynthEditor::layoutVoicePage (juce::Rectangle<int> area)
     meterCaptionLabel.setBounds (left.removeFromTop (20));
     left.removeFromTop (3);
     voiceMeterBounds = left.removeFromTop (16);
+    left.removeFromTop (15 + 18); // meter scale
+    synthHintLabel.setBounds (left.removeFromTop (72));
 
     const auto layoutRow = [] (juce::Rectangle<int>& column, juce::Label& label, juce::Component& control, int width)
     {
@@ -938,6 +1087,7 @@ void VocalSynthEditor::timerCallback()
     // Label::setText only repaints when the text actually changes
     updateStatusTexts();
     updateVoiceTexts (vsProcessor.getVoiceSnapshot(), elapsedMs);
+    updateSynthHint();
 
     sinceDspTextMs += elapsedMs;
     if (sinceDspTextMs >= dspTextIntervalMs)
@@ -957,8 +1107,8 @@ void VocalSynthEditor::timerCallback()
         return;
     }
 
-    // The Capture tab updates itself (CapturePanel's own 10 Hz timer)
-    if (currentPage == Page::capture)
+    // The Capture and Synth tabs update themselves (their own timers)
+    if (currentPage == Page::capture || currentPage == Page::synth)
         return;
 
     repaint (testMeterBounds);

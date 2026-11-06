@@ -2,6 +2,7 @@
 
 #include "Parameters.h"
 #include "PluginEditor.h"
+#include "SynthState.h"
 
 #include <cmath>
 
@@ -17,6 +18,90 @@ int16_t monitorBendFor (int16_t bend, int rangeSemitones) noexcept
     const auto scaled = static_cast<double> (bend) * static_cast<double> (rangeSemitones)
                         / MonitorSynth::bendRangeSemitones;
     return static_cast<int16_t> (juce::jlimit (-8192L, 8191L, std::lround (scaled)));
+}
+
+synth::SynthTransport synthTransportFor (const TransportInfo& info) noexcept
+{
+    synth::SynthTransport t;
+
+    if (info.hasBpm && std::isfinite (info.bpm) && info.bpm > 0.0)
+        t.bpm = info.bpm;
+
+    if (info.hasTimeSignature && info.timeSigNumerator > 0 && info.timeSigDenominator > 0)
+        t.quarterNotesPerBar = static_cast<double> (info.timeSigNumerator) * 4.0 / static_cast<double> (info.timeSigDenominator);
+
+    return t;
+}
+
+//==============================================================================
+float DryGain::gainForDb (float db) noexcept
+{
+    if (! (db > silentDb))
+        return 0.0f;
+
+    return db >= 0.0f ? 1.0f : juce::Decibels::decibelsToGain (db, silentDb);
+}
+
+void DryGain::prepare (double sampleRate) noexcept
+{
+    rampSamples = juce::jmax (1, (int) std::lround ((sampleRate > 0.0 ? sampleRate : 48000.0) * rampSeconds));
+    remaining = 0;
+    step = 0.0f;
+    jumpPending = true;
+}
+
+void DryGain::apply (float* const* channels, int numChannels, int numSamples, float targetDb) noexcept
+{
+    const auto newTarget = gainForDb (targetDb);
+
+    if (jumpPending)
+    {
+        jumpPending = false;
+        gain = target = newTarget;
+        remaining = 0;
+    }
+    else if (! juce::exactlyEqual (newTarget, target))
+    {
+        // A new ramp from wherever the gain is now, over the full ramp time
+        target = newTarget;
+        remaining = rampSamples;
+        step = (target - gain) / static_cast<float> (rampSamples);
+    }
+
+    if (remaining == 0 && gain == 1.0f)
+        return; // 0 dB: the dry voice is not touched (bit-identical to 0.3.1)
+
+    int i = 0;
+
+    while (i < numSamples)
+    {
+        if (remaining > 0)
+        {
+            // Ramp: the gain advances per sample, so any block split gives the same samples
+            const auto n = juce::jmin (remaining, numSamples - i);
+
+            for (int k = 0; k < n; ++k)
+            {
+                gain += step;
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    channels[ch][i + k] *= gain;
+            }
+
+            i += n;
+            remaining -= n;
+
+            if (remaining == 0)
+                gain = target; // exact end value (no float drift)
+
+            continue;
+        }
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            juce::FloatVectorOperations::multiply (channels[ch] + i, gain, numSamples - i);
+
+        break;
+    }
 }
 
 //==============================================================================
@@ -197,6 +282,7 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
     static_assert (static_cast<int> (TestPattern::all) == 4, "testPattern choice index == TestPattern");
 
     muteDryParam = apvts.getRawParameterValue (params::muteDry.getParamID());
+    dryLevelParam = apvts.getRawParameterValue (params::dryLevel.getParamID());
     testPatternParam = apvts.getRawParameterValue (params::testPattern.getParamID());
     midiChannelParam = apvts.getRawParameterValue (params::midiChannel.getParamID());
     testTempoParam = apvts.getRawParameterValue (params::testTempo.getParamID());
@@ -204,7 +290,7 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
     monitorToneParam = apvts.getRawParameterValue (params::monitorTone.getParamID());
     virtualMidiOutParam = apvts.getRawParameterValue (params::virtualMidiOut.getParamID());
 
-    jassert (muteDryParam != nullptr && testPatternParam != nullptr && midiChannelParam != nullptr
+    jassert (muteDryParam != nullptr && dryLevelParam != nullptr && testPatternParam != nullptr && midiChannelParam != nullptr
              && testTempoParam != nullptr && ccNumberParam != nullptr && monitorToneParam != nullptr
              && virtualMidiOutParam != nullptr);
 
@@ -250,10 +336,35 @@ VocalSynthProcessor::VocalSynthProcessor (Variant v)
     lastSource = getSource();
 
     midiOutput.setVirtualPort (&virtualMidiPort);
+
+    // 0.4 synth (docs/SYNTH-DESIGN.md 13.3, 17). The parameter default of synthOn is off (old projects load
+    // with the synth off); a NEW instance plays the synth at once (decisions E4 / E5).
+    if (auto* synthOn = apvts.getParameter (params::synthOn.getParamID()))
+        synthOn->setValueNotifyingHost (params::synthOnForNewInstances ? 1.0f : 0.0f);
+
+    // Never resized: the engine renders chunks of at most maxChunkSamples
+    synthLeft.assign ((size_t) maxChunkSamples, 0.0f);
+    synthRight.assign ((size_t) maxChunkSamples, 0.0f);
+
+    // The default table for both oscillators, synchronously (shared process-wide after the first instance), so
+    // a new instance never starts on the engine's fallback sine; then the Init preset as the current one.
+    for (int s = 0; s < WavetableStore::numSlots; ++s)
+    {
+        juce::String error;
+        wavetableWorker.loadFactoryNow (s, WavetableReference::defaultFactory().id, error);
+    }
+
+    presetManager.setCurrent ("Init", false);
 }
 
 VocalSynthProcessor::~VocalSynthProcessor()
 {
+    // Synth: no table is built or published any more, the engine forgets its pointers, then every retired
+    // table goes (docs/SYNTH-DESIGN.md 12.1)
+    wavetableWorker.stop();
+    synthEngine.reset();
+    wavetableStore.releaseAllRetired();
+
     // The worker joins within one bounded step (an unfinished WAV job is aborted), then the instance
     // folder (MIDI exports, WAV cache) goes; WAVs moved to the takes folder stay (docs/M3-DESIGN.md 12, 15)
     captureWorker.stop();
@@ -280,6 +391,13 @@ void VocalSynthProcessor::prepareToPlay (double sampleRate, int maximumExpectedS
     recentBlockSize.prepare (sampleRate);
     dspLoad.prepare (sampleRate);
 
+    // Synth: the engine forgets every table pointer (the next block acquires them again), so the retired
+    // tables can all go now (docs/SYNTH-DESIGN.md 12.1, 17)
+    synthEngine.prepare (sampleRate, maxChunkSamples); // allocates (allowed here)
+    wavetableStore.releaseAllRetired();
+    synthLoad.prepare (sampleRate);
+    dryGain.prepare (sampleRate);
+
     // Capture (docs/M3-DESIGN.md 15): the worker drains and parks while the tap's rings are (re)allocated;
     // the first call starts the worker thread. The history survives a prepare at the same rate.
     captureWorker.suspend();
@@ -297,6 +415,10 @@ void VocalSynthProcessor::prepareToPlay (double sampleRate, int maximumExpectedS
 void VocalSynthProcessor::releaseResources()
 {
     flushPending.store (true, std::memory_order_relaxed);
+
+    // Never free a table the engine still points at: reset first (docs/SYNTH-DESIGN.md 12.1, critique F2)
+    synthEngine.reset();
+    wavetableStore.releaseAllRetired();
 }
 
 void VocalSynthProcessor::reset()
@@ -363,8 +485,16 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     // One load of captureEnabled / captureAudio per block: the tap's audio state and the mono pointer
     // below must agree (the host or the UI may change the parameters at any time)
     const auto captureBlock = makeCaptureBlockSettings (source, voiceSettings, settings, false);
-    captureTap.beginBlock (makeTransportInfo (getPlayHead()), captureBlock);
+    const auto transportInfo = makeTransportInfo (getPlayHead());
+    captureTap.beginBlock (transportInfo, captureBlock);
     const bool captureAudio = captureBlock.captureEnabled && captureBlock.captureAudio;
+
+    // Synth (docs/SYNTH-DESIGN.md 17): settings, tempo and the tables of this block. The tables are acquired
+    // in EVERY block and released at its end (WavetableStore protocol, 12.1).
+    auto synth = synthSettings.build();
+    synth.bendRangeSemitones = voiceMode ? bendRangeSemitones (voiceSettings.bendRange) : 2;
+    const auto synthTransport = synthTransportFor (transportInfo);
+    acquireWavetables();
 
     if (flushPending.exchange (false, std::memory_order_relaxed) || sourceChanged)
     {
@@ -379,6 +509,7 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         // 60 ms or is retuned by the restarted pattern's first note-on, without a click.
         // After prepareToPlay the synth is already silent (prepare() resets it).
         monitorSynth.releaseAll();
+        synthEngine.releaseAll(); // the same for the synth: its voices release, the FX tails ring out
     }
 
     const auto numInputs = getTotalNumInputChannels();
@@ -397,15 +528,18 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     for (int ch = numInputs; ch < buffer.getNumChannels(); ++ch)
         buffer.clear (ch, 0, numSamples);
 
-    // FX: the voice passes through unless muted. Instrument: the monitor tone is its only output.
-    // The buffer is cleared per chunk, after the chunk's input has been downmixed for the analysis.
+    // FX: the voice passes through (times dryLevel) unless muted. Instrument: only the synth and the monitor
+    // tone are heard, never the dry sidechain. The buffer is cleared per chunk, after the chunk's input has
+    // been downmixed for the analysis.
     const bool muteDry = muteDryParam->load (std::memory_order_relaxed) >= 0.5f;
     const bool clearAudio = variant == Variant::instrument || muteDry;
+    const auto dryLevelDb = dryLevelParam->load (std::memory_order_relaxed);
 
     // Output layouts are mono or stereo (isBusesLayoutSupported)
     const auto numToneChannels = juce::jmin (numOutputs, maxToneChannels);
     std::array<float*, maxToneChannels> channels {};
     const auto monitorBendRange = bendRangeSemitones (voiceSettings.bendRange);
+    juce::int64 synthTicks = 0;
 
     for (int start = 0; start < numSamples; start += maxChunkSamples)
     {
@@ -413,18 +547,24 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
         events.clear();
         eventTimings.clear();
+        expressionFrames.clear();
 
         // FX: main input bus. Instrument: its only input bus is the sidechain (M1, T3). Also downmixed in
         // Test Pattern mode while the capture records the voice.
         const float* mono = voiceMode || captureAudio ? downmixInput (buffer, numInputChannels, start, length) : nullptr;
 
         if (voiceMode)
-            voicePipeline.process (mono, length, voiceSettings, events, eventTimings);
+            voicePipeline.process (mono, length, voiceSettings, events, eventTimings, expressionFrames);
         else
             generator.process (length, settings, events);
 
+        for (int ch = 0; ch < numToneChannels; ++ch)
+            channels[(size_t) ch] = buffer.getWritePointer (ch, start);
+
         if (clearAudio)
             buffer.clear (start, length);
+        else
+            dryGain.apply (channels.data(), numToneChannels, length, dryLevelDb);
 
         midiOutput.write (events, length, midi, start);
 
@@ -432,8 +572,8 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         captureTap.processChunk (captureAudio ? mono : nullptr, length, events.view(),
                                  voiceMode ? eventTimings.view() : std::span<const VsEventTiming> {});
 
-        for (int ch = 0; ch < numToneChannels; ++ch)
-            channels[(size_t) ch] = buffer.getWritePointer (ch, start);
+        // The synth plays the same events as the MIDI output, added after the dry gain
+        renderSynth (synth, synthTransport, voiceMode, channels.data(), numToneChannels, length, synthTicks);
 
         // The monitor tone follows whatever the source sends. MonitorSynth bends +-2 semitones; the
         // test patterns assume that, the voice bends use the selected Bend Range.
@@ -448,7 +588,57 @@ void VocalSynthProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         }
     }
 
+    releaseWavetables();
+    expressionPublisher.publish (synthEngine.getCurrentExpression());
+    synthLoad.addBlock (static_cast<double> (synthTicks) * secondsPerTick, numSamples);
     currentTestNote.store (voiceMode ? -1 : generator.currentNote(), std::memory_order_relaxed);
+}
+
+void VocalSynthProcessor::renderSynth (const synth::SynthSettings& synth, const synth::SynthTransport& transport,
+                                       bool voiceMode, float* const* channels, int numChannels, int length,
+                                       juce::int64& synthTicks) noexcept
+{
+    auto* left = synthLeft.data();
+    auto* right = synthRight.data();
+    const auto startTicks = juce::Time::getHighResolutionTicks();
+
+    // Voice mode: the pipeline's timings (correction flags) and expression frames. Test Pattern: no timings,
+    // rest expression (docs/SYNTH-DESIGN.md 16.4).
+    synthEngine.process (events.view(), voiceMode ? eventTimings.view() : std::span<const VsEventTiming> {},
+                         voiceMode ? &expressionFrames : nullptr, synth, transport, left, right, length);
+
+    synthTicks += juce::Time::getHighResolutionTicks() - startTicks;
+
+    // A silent synth (off, or nothing sounding) adds nothing: the output stays bit-identical to 0.3.1
+    // (adding +0.0 would turn a -0.0 sample of the dry voice into +0.0)
+    const auto rangeL = juce::FloatVectorOperations::findMinAndMax (left, length);
+    const auto rangeR = juce::FloatVectorOperations::findMinAndMax (right, length);
+
+    if (rangeL.getStart() == 0.0f && rangeL.getEnd() == 0.0f && rangeR.getStart() == 0.0f && rangeR.getEnd() == 0.0f)
+        return;
+
+    if (numChannels >= 2)
+    {
+        juce::FloatVectorOperations::add (channels[0], left, length);
+        juce::FloatVectorOperations::add (channels[1], right, length);
+    }
+    else if (numChannels == 1)
+    {
+        // Mono layout: (L + R) / 2
+        for (int i = 0; i < length; ++i)
+            channels[0][i] += 0.5f * (left[i] + right[i]);
+    }
+}
+
+void VocalSynthProcessor::acquireWavetables() noexcept
+{
+    for (int s = 0; s < WavetableStore::numSlots; ++s)
+        synthEngine.setWavetable (s, wavetableStore.acquire (s));
+}
+
+void VocalSynthProcessor::releaseWavetables() noexcept
+{
+    wavetableStore.release (synthEngine.getTablesInUse (0), synthEngine.getTablesInUse (1));
 }
 
 const float* VocalSynthProcessor::downmixInput (const juce::AudioBuffer<float>& buffer, int numInputChannels,
@@ -512,6 +702,13 @@ void VocalSynthProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer
         monitorSynth.reset();
         flushPending.store (false, std::memory_order_relaxed);
         lastSource = getSource(); // everything is flushed already
+
+        // Synth: silent at once, nothing hangs. The store protocol still runs (acquire / release in every
+        // block, so the block counter keeps moving and retired tables can go; docs/SYNTH-DESIGN.md 12.1, 17).
+        acquireWavetables();
+        synthEngine.reset();
+        releaseWavetables();
+        expressionPublisher.publish (synthEngine.getCurrentExpression());
     }
 
     // Audio: the FX passes the voice through, the Instrument is silent
@@ -742,10 +939,28 @@ juce::AudioProcessorEditor* VocalSynthProcessor::createEditor()
 
 void VocalSynthProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // Parameters + the non-parameter capture settings as child CAPTURE; takes are never saved (decision 4)
+    // Parameters + the non-parameter capture settings as child CAPTURE (takes are never saved, decision 4) + the
+    // synth state as child SYNTH (tables incl. embedded user data, preset name, editor scale) and stateVersion 4
+    // (docs/SYNTH-DESIGN.md 13.1). Any non-audio thread: every accessor below is thread-safe.
     auto state = apvts.copyState();
     state.removeChild (state.getChildWithName (CaptureState::treeType), nullptr);
+    SynthState::removeFromState (state);
     state.appendChild (getCaptureState().toValueTree(), nullptr);
+
+    SynthState synthState;
+
+    // The newest REQUESTED table per slot (not the last published one): a save right after a request keeps it
+    for (int s = 0; s < WavetableStore::numSlots; ++s)
+    {
+        const auto info = wavetableWorker.getRequestedReference (s);
+        synthState.tables[(size_t) s] = { info.reference, info.userData };
+    }
+
+    synthState.presetName = presetManager.getCurrentName();
+    synthState.presetModified = presetManager.isModified();
+    synthState.editorScalePercent = getEditorScalePercent();
+    state.appendChild (synthState.toValueTree(), nullptr);
+    state.setProperty (SynthState::stateVersionProperty, SynthState::currentStateVersion, nullptr);
 
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
@@ -761,16 +976,40 @@ void VocalSynthProcessor::setStateInformation (const void* data, int sizeInBytes
 
             // The capture settings are not parameters: read them, then take the child out of the tree, or
             // the APVTS state would keep it and every save would append one more (docs/M3-DESIGN.md 13).
-            // Old projects have none: defaults.
+            // Old projects have none: defaults. The same for the synth state (SYNTH, 0.4).
             const auto capture = CaptureState::fromValueTree (state.getChildWithName (CaptureState::treeType));
+            const auto synthState = SynthState::fromValueTree (state.getChildWithName (SynthState::treeType));
 
             for (auto child = state.getChildWithName (CaptureState::treeType); child.isValid();
                  child = state.getChildWithName (CaptureState::treeType))
                 state.removeChild (child, nullptr);
 
+            SynthState::removeFromState (state);
+
+            // A 0.3.x state has no synth parameters: migrateState gives them their defaults, synthOn = off
+            // (docs/SYNTH-DESIGN.md 13.3), so an old project sounds exactly as before
             migrateState (state, AudioProcessor::getParameters());
             apvts.replaceState (state);
             setCaptureState (capture);
+
+            // Tables: synchronously, so they are published when this returns (playback, offline render and an
+            // immediate getStateInformation see them; docs/SYNTH-DESIGN.md 12.2). A user TABLE always carries
+            // data after fromValueTree (embedded, or a hash-only entry the worker looks up among the tables of
+            // this process); missing / broken -> the default table, the worker status names the error.
+            for (int s = 0; s < WavetableStore::numSlots; ++s)
+            {
+                const auto& table = synthState.tables[(size_t) s];
+                juce::String error;
+
+                if (table.reference.kind == WavetableReference::Kind::user)
+                    wavetableWorker.loadEmbeddedNow (s, table.embedded, error);
+                else
+                    wavetableWorker.loadFactoryNow (s, table.reference.id, error);
+            }
+
+            // After replaceState: the snapshot of the preset parameters is taken from the loaded values
+            presetManager.setCurrent (synthState.presetName, synthState.presetModified);
+            setEditorScalePercent (synthState.editorScalePercent);
 
             // The values changed outside any host automation: tell the host to re-read them.
             // CLAP maps this to params->rescan (CLAP_PARAM_RESCAN_VALUES), which the CLAP spec
@@ -779,6 +1018,25 @@ void VocalSynthProcessor::setStateInformation (const void* data, int sizeInBytes
             updateHostDisplay (ChangeDetails().withProgramChanged (true));
         }
     }
+}
+
+//==============================================================================
+void VocalSynthProcessor::setEditorScalePercent (int percent) noexcept
+{
+    editorScale.store (juce::jlimit (minEditorScalePercent, maxEditorScalePercent, percent), std::memory_order_relaxed);
+}
+
+void VocalSynthProcessor::notifyPresetLoaded()
+{
+    // CLAP: params->rescan of the values (as after a state load); VST3 / Standalone ignore it
+    updateHostDisplay (ChangeDetails().withProgramChanged (true));
+}
+
+synth::SynthSettings VocalSynthProcessor::getSynthSettings() const noexcept
+{
+    auto s = synthSettings.build();
+    s.bendRangeSemitones = getSource() == params::Source::voice ? bendRangeSemitones (getVoiceSettings().bendRange) : 2;
+    return s;
 }
 
 } // namespace vocalsynth

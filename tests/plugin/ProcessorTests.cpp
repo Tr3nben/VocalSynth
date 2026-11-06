@@ -2,6 +2,7 @@
 #include "CaptureTestUtils.h"
 #include "Parameters.h"
 #include "PluginProcessor.h"
+#include "SynthParameters.h"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -30,6 +31,14 @@ void setParameter (VocalSynthProcessor& p, const juce::ParameterID& id, float no
     param->setValueNotifyingHost (normalisedValue);
 }
 
+/** These tests check the 0.3.1 audio path (dry voice, Mute Dry, monitor tone). A 0.4 instance plays its own
+    synth from the start (synthOn on, docs/SYNTH-DESIGN.md 13.3); the helpers that prepare a processor switch it
+    off, so the checks keep their 0.3.1 meaning. The processor with the synth: SynthProcessorTests.cpp. */
+void useOldAudioPath (VocalSynthProcessor& p)
+{
+    setParameter (p, vocalsynth::params::synthOn, 0.0f);
+}
+
 /** The M1 tests check the test pattern, which only runs with source = Test Pattern (M2 default: Voice). */
 void useTestPatternSource (VocalSynthProcessor& p)
 {
@@ -56,6 +65,7 @@ struct RunResult
 
 RunResult runSine (VocalSynthProcessor& p, double sampleRate, int blockSize)
 {
+    useOldAudioPath (p);
     p.setRateAndBufferSizeDetails (sampleRate, blockSize);
     p.prepareToPlay (sampleRate, blockSize);
 
@@ -284,6 +294,7 @@ public:
     HostRunner (VocalSynthProcessor& processor, double sampleRate, int maxBlockSize)
         : p (processor), rate (sampleRate)
     {
+        useOldAudioPath (p);
         p.setRateAndBufferSizeDetails (sampleRate, maxBlockSize);
         p.prepareToPlay (sampleRate, maxBlockSize);
         buffer.setSize (2, maxBlockSize);

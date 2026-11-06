@@ -31,8 +31,9 @@ Zeitbedarf: Kurztest (Abschnitt 2 + Probehör-Auswahl) ca. 20 Minuten, ganze Che
 - **24 Factory-Presets** (Init + 23 Klänge), eigene Presets speichern (Ordner `Dokumente\VocalSynth\Presets`).
 - **14 eingebaute Wavetables** und **Import eigener WAV-Wavetables** (die Tabelle wird im Projekt gespeichert,
   das Projekt klingt also auch auf einem anderen Rechner gleich).
-- **Neue Instanzen:** Synth **an**, trockene Stimme **an** – du hörst sofort etwas.
-  **Alte 0.3-Projekte:** Synth **aus**, alles klingt wie vorher.
+- **Neue Instanzen:** Synth **an**, trockene Stimme **an** – du hörst sofort etwas. Der Reiter *Voice* sagt es
+  unten links („Internal synth: ON …“); wer weiter einen externen Synth über den MIDI-Port spielt, schaltet
+  *Synth On* (Reiter *Synth*, Bereich *MASTER*) aus. **Alte 0.3-Projekte:** Synth **aus**, alles klingt wie vorher.
 - Das Fenster ist skalierbar (75–200 %).
 
 ---
@@ -48,8 +49,9 @@ Zeitbedarf: Kurztest (Abschnitt 2 + Probehör-Auswahl) ca. 20 Minuten, ganze Che
    - **Synth On** – Synth an/aus.
    - **Volume** – Lautstärke des Synths (Standard −6 dB). Presets ändern diesen Regler nie.
    - **Dry** – Lautstärke deiner trockenen Stimme (0 dB = unverändert, ganz links = stumm).
-     **Mute Dry** (Reiter *Voice*) schaltet die Stimme wie bisher hart stumm.
-   - Oben in der Leiste: **DSP** – wie viel Rechenzeit der Synth braucht.
+     **Mute Dry** (Reiter *Test & Routing*) schaltet die Stimme wie bisher hart stumm.
+   - Oben rechts neben **Save**: **Synth DSP** – wie viel Rechenzeit der Synth braucht (Durchschnitt und
+     Spitze). Die Anzeige *VocalSynth DSP* im Reiter *Voice* zeigt das ganze Plugin (Analyse + Synth).
 6. Mit den Pfeilen **< >** neben dem Preset-Namen durch die Presets schalten, oder auf den Namen klicken
    (Menü nach Kategorie).
 
@@ -161,7 +163,8 @@ Bitte die Punkte der Reihe nach, Ergebnis jeweils mit **ok / nicht ok / überspr
    ohne Knacken?
 7. **CPU:** Puffergröße in FL (Audio-Einstellungen) auf **128** und **256**. Preset **Warm Pad** (Poly, zugleich
    das rechenintensivste Preset) und **Space Drift** spielen, eine Melodie mit vielen überlappenden Tönen singen.
-   Wert der Anzeige **DSP** im Plugin und die CPU-Anzeige von FL notieren. Knackser?
+   Wert der Anzeige **Synth DSP** (Reiter *Synth*) und **VocalSynth DSP** (Reiter *Voice*) sowie die CPU-Anzeige
+   von FL notieren. Knackser?
 8. **Instrument-Variante:** VocalSynth Instrument mit Sidechain-Mikro wie in `FL-ROUTING.md`, T3. Spielt der
    Synth, wenn du singst? (Wenn T3 bei dir nicht klappt: überspringen.)
 9. **Externer Synth und Capture:** Wie bisher einen externen Synth über den MIDI-Port spielen (`FL-ROUTING.md`,
@@ -169,8 +172,8 @@ Bitte die Punkte der Reihe nach, Ergebnis jeweils mit **ok / nicht ok / überspr
 10. **Bypass und Entfernen:** Eine Note lang halten (oder Test-Pattern laufen lassen) und dabei das Plugin
     **bypassen**, wieder einschalten, dann das Plugin aus dem Slot **entfernen**. Hängt irgendein Ton? Puffergröße
     **während der Wiedergabe** ändern – stürzt etwas ab, hängt etwas?
-11. **Fenster-Skalierung:** Fenster am Rand größer/kleiner ziehen bzw. im Skalierungs-Menü 75 / 100 / 150 / 200 %
-    wählen. Bleibt alles lesbar und **scharf** (besonders auf einem HiDPI-/4K-Monitor)?
+11. **Fenster-Skalierung:** Fenster an der Ecke unten rechts größer/kleiner ziehen bzw. im Skalierungs-Menü
+    oben rechts (zeigt „100 %“) 75 / 100 / 125 / 150 / 200 % wählen. Wird die Größe mit dem Projekt gespeichert? Bleibt alles lesbar und **scharf** (besonders auf einem HiDPI-/4K-Monitor)?
 
 ---
 
@@ -180,7 +183,8 @@ Am hilfreichsten ist eine kurze Notiz pro Problem mit:
 
 - **Was du gemacht hast** (Schritte) und **was passiert ist** vs. **was du erwartet hast**.
 - **Preset-Name** (und ob du etwas verändert hast – dann steht ein `*` hinter dem Namen), Play Mode.
-- FL-Version, Audio-Treiber (z. B. ASIO), **Puffergröße** und **Abtastrate** (44,1 / 48 kHz), Wert der **DSP**-Anzeige.
+- FL-Version, Audio-Treiber (z. B. ASIO), **Puffergröße** und **Abtastrate** (44,1 / 48 kHz), Wert der
+  **Synth DSP**-Anzeige.
 - Bei Klangproblemen: eine kurze **Aufnahme** (z. B. per Capture-Take als WAV + den Synth über FLs Recording
   aufnehmen) oder das **Projekt** (FL: *File → Export → Zipped loop package*, dann sind eigene Wavetables dabei).
 - Bei Anzeige-Problemen: ein **Screenshot** (Windows: Win + Shift + S).

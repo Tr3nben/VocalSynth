@@ -5,6 +5,8 @@ accepted with the recommended options (synth first, native JUCE UI, full scope, 
 Instrument = full synth, 24 presets / default Legato). The scaffold (all headers with frozen public interfaces,
 compiling stubs, parameters, CMake entries, one test file per module, 0.3.1 state fixtures) is in the tree.
 Reviewed by the critique agent on the same day: findings and the resulting changes are listed in 23.
+Implemented in waves 1–3 and integrated on 2026-11-06: the measured numbers are in 18, the final preset names in
+14.3, every departure from this text and every interface addition of the implementation in 24.
 
 Rules for every implementer: `docs/ROADMAP-0.4.md` 3.3 (real time), this document, the doc comments of the
 frozen headers. A public signature, a constant documented as binding, a parameter (ID, range, default, choice
@@ -15,7 +17,8 @@ Contents: 1 scope · 2 signal flow and threads · 3 control tick, block-size inv
 5 wavetables · 6 oscillators · 7 filter · 8 envelopes and LFOs · 9 mod matrix · 10 voices · 11 FX ·
 12 wavetable store and worker · 13 state and migration · 14 presets · 15 parameters · 16 expression ·
 17 processor integration · 18 CPU budget · 19 file ownership · 20 UI foundation · 21 test plan · 22 risks ·
-23 critique log (findings of the critique agent and what changed; read it first if you knew an earlier draft).
+23 critique log (findings of the critique agent and what changed; read it first if you knew an earlier draft) ·
+24 implementation record (departures, interface additions, integration).
 
 ---
 
@@ -218,11 +221,11 @@ builder band-limits anyway):
 | id | name | frames | recipe |
 |---|---|---|---|
 | basic-shapes | Basic Shapes | 64 | keyframes sine, triangle, saw, square, pulse 25 % at 0 / 25 / 50 / 75 / 100 %, linear crossfade of the band-limited spectra between neighbours |
-| pwm | PWM | 64 | pulse width 50 % -> 2 % |
+| pwm | PWM | 64 | pulse width 50 % -> 10 % (implemented; 24) |
 | harmonic-sweep | Harmonic Sweep | 64 | odd harmonics (1/k) crossfading to even-only (1/k) + fundamental |
 | saw-bright-dark | Saw Bright-Dark | 32 | saw with spectral tilt 0 -> -12 dB/oct |
 | formant-vowel | Formant Vowels | 64 | saw spectrum x formant envelope (F1..F3 Gaussian bumps), vowels A E I O U at 0/25/50/75/100 %, f0 reference 130 Hz |
-| sync-sweep | Sync Sweep | 64 | hard-sync saw, slave/master ratio 1 -> 8 (time domain at 16x, then the builder band-limits) |
+| sync-sweep | Sync Sweep | 64 | hard-sync saw, slave/master ratio 1 -> 8 (time domain at 8x, extra roll-off, then the builder band-limits; 24) |
 | fm-2op | FM 2-Op | 64 | sin (p + I sin (2 p)), index I 0 -> 8 |
 | fold | Fold | 64 | sine through a triangle wavefolder, gain 1 -> 8 |
 | organ | Organ | 32 | drawbar registrations (16', 8', 5 1/3', 4', 2 2/3', 2', ...) |
@@ -590,19 +593,43 @@ A preset with a user table embeds its data (as the state does); loading uses the
 
 ### 14.3 Factory presets (`plugin/FactoryPresets.cpp`, agent F)
 
-Data in code: name, category, tags, table A / B ids, the values that differ from the defaults. 24 presets
-(names may be tuned by F):
+Data in code: name, category, tags, table A / B ids, the values that differ from the defaults. 24 presets;
+final names and order (agent F, `FactoryPresets.cpp`; mode Legato unless noted):
 
-| # | Category | Name | Idea (voice sources in bold) |
+| # | Category | Name (tables A / B) | Idea (voice sources in bold) |
 |---|---|---|---|
-| 0 | Init | Init | all defaults (saw at position 50 %, LP24 open, Legato) |
-| 1–6 | Lead | Voice Lead, Smooth Sine, Bright Saw, Square Vibrato, Sync Lead, Whistle | **Level -> cutoff** (Voice Lead); glide; 5x unison; LFO 1 vibrato with fade-in; Env 3 -> sync position; sine + **Noisiness -> noise** (Whistle) |
-| 7–11 | Bass | Sub Bass, Reese, Acid, Pluck Bass, FM Bass | sine + sub; 2 detuned saws; LP24 resonance + Env 2; short Env 2 decay; **Brightness -> FM position** |
-| 12–14 | Pad (Poly) | Warm Pad, Choir Pad, Glass Pad | unison + chorus + reverb; choir table + **Level -> amp**; bell table, long release |
-| 15–17 | Pluck/Keys | Pluck, E-Piano, Organ | short amp env; FM 2-op; organ table, Poly |
-| 18–21 | Vocal | Vowel Morph, Talking Saw, Breathy Voice, Vibrato Wah | **Brightness -> Osc A position** on formant-vowel; **Brightness + Level -> cutoff**; **Noisiness -> noise level**; **Voice Pitch -> cutoff** |
-| 22–23 | FX | Riser, Glitch | LFO -> pitch / delay; digital table, S&H -> position |
+| 0 | Init | Init (basic-shapes / basic-shapes) | all defaults (saw at position 50 %, LP24 open, Legato) |
+| 1 | Lead | Voice Lead (basic-shapes / saw-bright-dark) | warm saw, short glide, **Level + Brightness -> cutoff**, chorus, ping-pong delay |
+| 2 | Lead | Supersaw Lead (basic-shapes / basic-shapes) | 7-voice supersaw + octave, **Brightness -> Osc B level** |
+| 3 | Lead | PWM Lead (pwm / pwm) | slow PWM drift, delayed vibrato (LFO fade), **Level -> cutoff** |
+| 4 | Lead | Sync Lead (sync-sweep / basic-shapes) | Env 3 -> sync position, **Brightness** sharpens |
+| 5 | Lead | Brass Lead (basic-shapes / basic-shapes) | filter swell, **Level -> cutoff** |
+| 6 | Lead | Whistle (basic-shapes / basic-shapes) | sine an octave up, glide, **Noisiness -> noise**, delayed vibrato |
+| 7 | Bass | Sub Bass | sine + sub, **Level** adds growl |
+| 8 | Bass | Reese Bass (basic-shapes / saw-bright-dark) | two detuned saws, **Level -> cutoff** |
+| 9 | Bass | Acid Bass (Mono) | LP24 resonance + Env 2, glide, **Level + Brightness -> cutoff** |
+| 10 | Bass | Pluck Bass (Mono) | short Env 2 decay |
+| 11 | Bass | FM Bass (fm-2op / basic-shapes) | **Brightness -> FM position** |
+| 12 | Pad | Warm Pad (Poly; saw-bright-dark / basic-shapes) | unison, slow attack, chorus + reverb (the heaviest preset, 21) |
+| 13 | Pad | Choir Pad (Poly; choir / formant-vowel) | **Brightness -> vowel**, **Level -> amp** (small), **Noisiness -> noise** |
+| 14 | Pad | Glass Pad (Poly; bell / harmonic-sweep) | long release, delay + reverb, **Brightness** -> shimmer |
+| 15 | Pluck/Keys | Poly Pluck (Poly) | short amp envelope, delay |
+| 16 | Pluck/Keys | FM E-Piano (Poly; fm-2op / basic-shapes) | bright attack that softens |
+| 17 | Pluck/Keys | Drawbar Organ (Poly; organ / basic-shapes) | fast chorus, **Brightness -> registration** |
+| 18 | Vocal | Vowel Morph (formant-vowel / saw-bright-dark) | **Brightness -> Osc A position** |
+| 19 | Vocal | Talking Saw | **Brightness + Level -> cutoff** (wah) |
+| 20 | Vocal | Breathy Voice (formant-vowel / basic-shapes) | **Noisiness -> noise level** |
+| 21 | Vocal | Vibrato Wah (basic-shapes / pwm) | **Voice Pitch -> cutoff** |
+| 22 | FX | Space Drift (Poly; spectral-random / fold) | evolving pad, long delay, big reverb, **Noisiness -> noise** |
+| 23 | FX | Glitch (digital / square-stack) | S&H -> position at 1/16, synced delay, **Noisiness -> delay mix** |
 
+Changes against the draft list: Smooth Sine, Bright Saw, Square Vibrato, Riser dropped; Supersaw Lead, PWM Lead,
+Brass Lead, Space Drift added; Reese / Acid / Pluck / Organ / E-Piano renamed (Reese Bass, Acid Bass, Pluck Bass,
+Drawbar Organ, FM E-Piano, Poly Pluck). Loudness: -18 LUFS +-1 LU (max momentary, K-weighted, held C4 velocity
+100, expression level 0.7 / brightness 0.5 / noisiness 0.2, synthVolume -6 dB, 48 kHz), Init exempt (about
+-16.5); peak <= -1 dBFS incl. a 4-note chord on the Poly presets (hidden test `[.][presetmeasure]`). Listening
+selection for the user (SYNTH-TESTING.md): Init, Voice Lead, Supersaw Lead, Reese Bass, Acid Bass, Warm Pad,
+Choir Pad, Vowel Morph, Talking Saw.
 At least 8 presets use voice sources (above: 9). Every preset: peak <= -1 dBFS, no DC, not silent (golden test).
 
 ### 14.4 Loading rules
@@ -781,6 +808,41 @@ DspLoadMeter synthLoad;` + accessors for the editor (`getPresetManager`, `getWav
 | Silence (all inactive, tails ended) | | <= 0.5 % | |
 
 Typical = Legato, 2 osc x 4 unison, LP24, chorus + delay + reverb. Worst = Poly 16 x 2 osc x 8 unison, all FX.
+
+**Measured** (Release, clang, Linux VM; benchmarks of the implementers on a 2.8 GHz Xeon, processor level by the
+integration on a 2.1 GHz Xeon; min of 9 runs for the micro benchmarks):
+
+| Module / case | Target | Measured |
+|---|---|---|
+| WavetableOscillator, 8 voices, 2 frames, incl. tick | <= 6 ns per unison voice per sample | 5.5 ns; 7.9 ns during a table crossfade |
+| Sub / white / pink noise | <= 3 ns per voice per sample | sub 4.8, white 2.3, pink 3.7, sub + noise 8.6 ns (target missed; both only render when their level > 0, so typical patches pay nothing) |
+| SvfFilter LP24 stereo | <= 15 ns per voice per sample | 9–10 ns constant, ~13 ns while ramping; drive +5–6 ns |
+| Voice tick (envelopes, glide, mod, coefficients, mip) | <= 300 ns | ~88 ns; envelope advance ~9 ns |
+| Whole voice (render) | – | 1 osc x 1 LP24 33–35 ns/sample; 2 x 4 + sub + noise 118–126; 2 x 8 + sub + noise ~211 |
+| Chorus / Delay / Reverb | 15 / 10 / 60 ns per sample | 7 / 11 / 26 ns (delay 1 ns over, accepted) |
+| ExpressionTracker | <= 0.5 % | 2.1 µs per 2 ms hop (~0.1 %) |
+| Engine typical (48 kHz / 128) | mean <= 3 % | 14.7 µs per block = 0.55 % |
+| Engine worst (Poly 16 x 2 x 8 unison + sub + noise + LP24 drive + all FX) | <= 12 % | 218 µs per block = 8.2 % -> **no Poly unison cap** (`SynthEngine::polyMaxUnison` = 8) |
+| Engine silence | <= 0.5 % | 2.7 µs = 0.10 % |
+| 256-frame mip build (background) | < 150 ms | 51 ms; factory tables 7–50 ms each |
+| Wavetable memory | – | 90,244 B per frame (32 frames 2.9 MB, 64 frames 5.8 MB, 256 frames 23.1 MB); sub tables 3 x 90 KB per process; all 14 factory tables ~63.5 MB if all were loaded (built on demand, shared) |
+
+Whole `processBlock` (integration, `SynthProcessorTests` `[.cpu]`: FX, Voice mode, a sung phrase of three notes
+with vibrato + 1 s silence, analysis + capture + synth, 48 kHz, block 128, 3 passes; percent of the block time):
+
+| Case | mean | p99 |
+|---|---|---|
+| Synth off (the 0.3.1 path) | 0.47 % | 1.4 % |
+| Init | 0.68 % | 1.8 % |
+| Voice Lead | 0.98 % | 2.2 % |
+| Supersaw Lead | 1.04 % | 2.2 % |
+| Choir Pad | 1.16 % | 2.2 % |
+| Warm Pad (heaviest preset) | 1.43 % | 2.7 % |
+| typical settings (Legato 2 x 4, LP24, chorus + delay + reverb) | 0.98 % | 2.2 % |
+| worst settings (Poly, 2 x 8 unison, sub, noise, drive, all FX, 4 s release) | 2.34 % | 4.2 % |
+
+With the monophonic voice at most a few Poly voices overlap; the 16-voice worst case is the engine benchmark
+above (8.2 %). All well below the 20 % limit for the whole processBlock.
 Whole `processBlock` worst case < 20 % (unchanged). The voice-tick budget needs caching: unison detune
 ratios and pan gains only when their inputs change (6.1), `exp` factors of the envelopes only when a time
 changes (8.1), `tan` of the cutoff once per tick per voice (not per channel / stage). The SSE2 baseline has no
@@ -1024,3 +1086,96 @@ Interface changes the implementation agents must know (all compile in the scaffo
 - F: `ampGain` for levelling; golden spec 21.1; phase-random note (6.1); Voice Level -> Amp note (16.4).
 - Integration: 17 (every block acquire / release, bypass, releaseResources order, constructor sync loads,
   transport bars), 130 parameters, `SynthProcessorTests.cpp`, `docs/STATUS.md` still says 101 parameters.
+
+## 24. Implementation record (integration agent, 2026-11-06)
+
+What the implementation does differently from the text above, and what it added to the frozen interfaces. The
+sections above stay as written where nothing is listed here.
+
+### 24.1 Departures
+
+- **A (wavetables):** (1) `pwm` sweeps 50 % -> 10 % (2 % was mostly silence after band-limiting); (2) `sync-sweep`
+  gets an extra roll-off `k^(-0.11 log2 r)` so high ratios are not harsher than a saw; (3) time-domain recipes are
+  8x oversampled, not 16x (`RealFft` stops at 16384); (4) the factory-table alias measurement is relative to the
+  total harmonic power (not the fundamental: some tables have a weak fundamental); (5) the click test's reference
+  fades harmonics between 0.30 and 0.45 fs like the mip choice; (6) the pink-noise coefficients are refitted per
+  sample rate (<= 0.5 dB from -3 dB/oct); (7) SSE2 Hermite with a C++ fallback; `setTable` on a silent oscillator is
+  immediate; `buildFromPcm16` is bit-identical to the import build; a `fmt ` chunk after `data` is accepted.
+  Alias results: saw sweep -72.1 dB up to 1 kHz and < -102 dB at 1–5 kHz at every rate; factory tables -71.0 ..
+  -71.9 dB. **Finding (accepted for 0.4):** a fast downward glide clicks slightly at a mip band edge because of the
+  0.40 hysteresis: -48 / -53 dB below 0.2 fs (44.1 / 48 kHz), -61 / -63.5 dB below 0.17 fs; the content is above
+  ~7.5 kHz and only on fast downward glides, so the click test checks below 0.17 fs. Revisit if the user hears it
+  (SYNTH-TESTING.md 7 asks for it).
+- **B (voice):** doc comments made precise: an Envelope segment ends at its end point (attack at 1; decay /
+  release at -80 dB of the start distance); `SvfFilter` drive 0 <-> > 0 dB crossfades over one tick; a
+  `SynthVoice` retrigger keeps the oscillator phases and restarts the envelopes from their current values; fresh
+  phases only from silence or after a steal fade.
+- **C (engine):** on deactivation a voice resets its oscillators and takes the newest table set (private
+  `tablesSet`), which fixed a use-after-free the retire test found (a silent voice kept a retired table as
+  "previous"). `RealFft`'s constructor parameter was renamed (no `-Wshadow-field-in-constructor` in plugin code).
+- **Integration (17):**
+  - The FX dry level is the class `DryGain` (`PluginProcessor.h`): dB -> gain (<= -60 dB = 0), per-sample linear
+    20 ms ramp from wherever the gain is, the first block after `prepareToPlay` jumps to the target; at exactly
+    0 dB and not ramping the samples are not touched.
+  - The synth output is added only when it is not exactly silent (min = max = 0 over the chunk): adding +0.0 would
+    turn a -0.0 sample of the dry voice into +0.0, so "0 dB dry, synth silent" stays bit-identical to 0.3.1 even
+    with the synth switched on.
+  - `synthTransportFor (TransportInfo)` (free function) builds `SynthTransport` from the capture's play-head read
+    (one read per block for both).
+  - The Instrument still declares no MIDI input (`acceptsMidi() == false`, unchanged plugin capabilities): it plays
+    the synth from the sidechain mic (E5), not from host MIDI.
+  - `setStateInformation` loads every user TABLE with `loadEmbeddedNow` (after `SynthState::fromValueTree` a user
+    reference always carries data: embedded, or a hash-only entry the worker looks up among the tables of the
+    process), every factory TABLE with `loadFactoryNow`.
+  - The processor constructor sets `synthOn` with `setValueNotifyingHost` (no host yet), then loads
+    `basic-shapes` into both slots synchronously and calls `presetManager.setCurrent ("Init", false)`.
+  - The engine time per block (`synthLoad`) is accumulated over the chunks and added once per block.
+- **Editor (17, 20):** every page lives on a content component of 1100 x 700 that the editor scales with a
+  transform (aspect kept, centred when the host gives a size off the ratio; `setResizeLimits` 825 x 525 ..
+  2200 x 1400 with a fixed-aspect constrainer, corner resizer). The top row (30 px) holds the four page tabs,
+  the plugin name, version and format (the old 52 px header is gone) and the scale menu (75 / 100 / 125 / 150 /
+  200 %; other scales from the corner show as text). Every resize stores the scale in the processor (SYNTH
+  `editorScale`); a new editor opens at the saved scale. The old pages keep their layouts: Voice (420 px) and
+  Test & Routing (440 px) are centred vertically in the 1068 x 640 page area, Capture uses the whole area (its
+  take list grows). Old pages, `CapturePanel` and `FileDragSource` take the theme colours (accent blue instead of
+  the old green); their constants are references to the theme tokens (a copy at static-initialisation time
+  could read an uninitialised token - it did, giving a transparent editor).
+  - **First-run hint (E4):** ROADMAP's first-run setup is 0.5 (4.2). 0.4 shows one line on the Voice page under
+    the input meter: "Internal synth: ON - it plays what you sing (page Synth). Using another synth via the MIDI
+    port? Switch Synth On off there." (or the "off" variant), following `synthOn` at 30 Hz. No new control.
+
+### 24.2 Interface additions (all compile-time checked, used by tests)
+
+- `SynthEngine::polyMaxUnison` (= 8, decision of 18), `Chorus::getNanResetCount`, `FdnReverb::numDiffusers`,
+  `ExpressionTracker` out-of-line constructor / destructor / move (it owns a `unique_ptr<RealFft>`).
+- `PresetManager::getUserPresetFile`, `renameUserPreset`, `deleteUserPreset` (the preset bar's rename / delete).
+- `SynthState::Table::embedded` is non-null for every user reference after `fromValueTree` (13.1 lookup rule).
+- UI (agent E): `SynthPanelContext::onPresetLoaded` (the editor calls `VocalSynthProcessor::notifyPresetLoaded()`
+  = `updateHostDisplay (programChanged)` for CLAP, 14.4); `SynthPanel` getters and test hooks (`getContent`,
+  `getPresetBar`, `getWavetableView`, `getTableButtonText`, `getDspText`, table menu ids, `runTimerTickForTests`);
+  `Knob::Style` rotary / bar; `ChoiceChip` toggle style; `SectionPanel::setSubtitle / setPowerComponent /
+  setHeaderWidth / setActive`; `WavetableView::setMessage`; `PresetBar::onPresetLoaded` and dialog hooks. The
+  voice parameter `bendRange` has a second control on the Synth page (VOICE "Bend") - deliberate.
+- Processor (integration): `getPresetManager`, `getWavetableStore`, `getWavetableWorker`,
+  `getExpressionPublisher`, `getSynthDspLoad`, `getEditorScalePercent` / `setEditorScalePercent` (clamped
+  75..200), `notifyPresetLoaded`, `getSynthSettings` (the settings incl. the bend range of the current source),
+  `synthTransportFor`, `DryGain`. Editor: `Page::synth`, `defaultWidth / defaultHeight` 1100 x 700,
+  `tabRowHeight`, `scaleMenuPercents`, `getContentComponent`, `getSynthPanel`, `getScalePercent`,
+  `setScalePercent`, `formatSynthDspLoad`, `synthHintText`.
+
+### 24.3 Wiring as built (17)
+
+Member order in `VocalSynthProcessor`: `apvts`, `wavetableStore`, `synthEngine`, `synthSettings { apvts }`,
+`expressionFrames`, `expressionPublisher`, `wavetableWorker { wavetableStore }` (starts its thread),
+`presetManager { apvts, wavetableStore, wavetableWorker }`, `synthLeft / synthRight` (4096 each), `dryGain`,
+`synthLoad`, `editorScale`; the 0.3 members follow unchanged. `processBlock`: settings (`build()` + bend range)
+and transport, `acquire` both slots, flush (+ `synthEngine.releaseAll()`), per chunk: pipeline with
+`expressionFrames` (Voice) or pattern -> dry gain or clear -> MIDI out -> capture -> engine (+ add) -> monitor tone;
+block end: `release`, `expressionPublisher.publish`, `synthLoad.addBlock`. `processBlockBypassed`: as 0.3.1 +
+`acquire`, `synthEngine.reset()`, `release`, publish. `prepareToPlay`: `synthEngine.prepare (rate, 4096)`,
+`releaseAllRetired()`; `releaseResources`: `synthEngine.reset()`, `releaseAllRetired()`; destructor:
+`wavetableWorker.stop()`, `synthEngine.reset()`, `releaseAllRetired()`, then the capture worker as before. State:
+13.1 exactly (SYNTH child, `stateVersion` 4; tables from `getRequestedReference`). Tests:
+`tests/plugin/SynthProcessorTests.cpp` (21 Processor row) and the fixtures `tests/data/state-0.4.0-{fx,instrument}`
+(FX: Warm Pad modified, osc A `formant-vowel`, osc B an embedded 4-frame user table with an umlaut in its name,
+scale 125 %, dry -3 dB; Instrument: Acid Bass, osc A `fm-2op`, synth off, scale 150 %).

@@ -3,6 +3,7 @@
 #include "ExportFiles.h"
 #include "Parameters.h"
 #include "PluginProcessor.h"
+#include "ui/Theme.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,14 +13,14 @@ namespace vocalsynth
 
 namespace
 {
-// Same palette as the editor (PluginEditor.cpp)
-const juce::Colour backgroundColour { 0xff15171c };
-const juce::Colour panelColour { 0xff2a2e36 };
-const juce::Colour accentColour { 0xff3ddc97 };
-const juce::Colour warnColour { 0xffffa53d };
+// Same palette as the editor (PluginEditor.cpp): the 0.4 theme tokens (references: no copy before the header's
+// constants are initialised)
+const juce::Colour& panelColour = ui::theme::panel;
+const juce::Colour& accentColour = ui::theme::accent;
+const juce::Colour& warnColour = ui::theme::modulation; // amber
 const juce::Colour recordColour { 0xffd9434a };
-const juce::Colour textColour { 0xffd8dbe0 };
-const juce::Colour dimTextColour { 0xff8a9099 };
+const juce::Colour& textColour = ui::theme::text;
+const juce::Colour& dimTextColour = ui::theme::textDim;
 
 constexpr int gutter = 6;
 constexpr int leftWidth = 440;

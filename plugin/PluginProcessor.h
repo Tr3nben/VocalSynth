@@ -4,15 +4,21 @@
 #include "CaptureWorker.h"
 #include "MidiOutputStage.h"
 #include "Parameters.h"
+#include "PresetManager.h"
+#include "SynthSettingsBuilder.h"
 #include "VirtualMidiPort.h"
+#include "WavetableStore.h"
+#include "WavetableWorker.h"
 #include "vocalsynth/BlockSizeHistogram.h"
 #include "vocalsynth/CaptureTap.h"
 #include "vocalsynth/EventTiming.h"
+#include "vocalsynth/ExpressionFrame.h"
 #include "vocalsynth/MonitorSynth.h"
 #include "vocalsynth/TestPatternGenerator.h"
 #include "vocalsynth/VoicePipeline.h"
 #include "vocalsynth/VoiceSettings.h"
 #include "vocalsynth/VsEvent.h"
+#include "vocalsynth/synth/SynthEngine.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -28,8 +34,8 @@ namespace vocalsynth
 /** Which product this processor instance behaves as. Both are built from the same code. */
 enum class Variant
 {
-    fx,        ///< Audio effect: main audio in/out (the mic), MIDI out.
-    instrument ///< Instrument: sidechain audio in, audio out (internal engine later), MIDI out.
+    fx,        ///< Audio effect: main audio in/out (the mic) + the synth, MIDI out.
+    instrument ///< Instrument: sidechain audio in (the mic), audio out = the synth, MIDI out.
 };
 
 /** Converts a pitch-bend value meant for a synth with a bend range of +-rangeSemitones into the value
@@ -38,6 +44,38 @@ enum class Variant
     (docs/M2-DESIGN.md 3.9). Bends beyond +-2 semitones are clamped (the residual of a held note rarely
     exceeds that; a larger interval starts a new note). */
 int16_t monitorBendFor (int16_t bend, int rangeSemitones) noexcept;
+
+/** The synth's tempo / bar length from the play-head read of the block (docs/SYNTH-DESIGN.md 8.2, 17):
+    bpm (120 if the host gives none), quarterNotesPerBar = numerator * 4 / denominator (4 if none). */
+synth::SynthTransport synthTransportFor (const TransportInfo& info) noexcept;
+
+/** The FX dry level (docs/SYNTH-DESIGN.md 17): dB -> gain (-60 dB and below = 0), applied per sample with a
+    linear 20 ms ramp whenever the target changes. While the gain is exactly 1 and not ramping, the samples are
+    not touched (0 dB = bit-identical to 0.3.1). Audio thread; prepare() is not concurrent with apply(). */
+class DryGain
+{
+public:
+    static constexpr double rampSeconds = 0.020;
+    static constexpr float silentDb = -60.0f;
+
+    static float gainForDb (float db) noexcept;
+
+    /** Jumps to the target of the next apply() (no ramp after a prepare). */
+    void prepare (double sampleRate) noexcept;
+
+    /** Multiplies numSamples samples of each channel (channel pointers offset to the chunk start). */
+    void apply (float* const* channels, int numChannels, int numSamples, float targetDb) noexcept;
+
+    float getCurrentGain() const noexcept { return gain; }
+
+private:
+    int rampSamples = 960;
+    float gain = 1.0f;
+    float target = 1.0f;
+    float step = 0.0f;
+    int remaining = 0;
+    bool jumpPending = true;
+};
 
 /** VocalSynth's own DSP load (v0.2.1): processing time of one processBlock as a share of the block's
     real-time duration (numSamples / sampleRate), so the user can tell VocalSynth apart from the synth
@@ -146,6 +184,31 @@ public:
     //==============================================================================
     Variant getVariant() const noexcept { return variant; }
     juce::AudioProcessorValueTreeState& getParameters() noexcept { return apvts; }
+
+    //==============================================================================
+    // 0.4 synth (docs/SYNTH-DESIGN.md 17): message-thread objects for the editor's Synth page
+
+    PresetManager& getPresetManager() noexcept { return presetManager; }
+    WavetableStore& getWavetableStore() noexcept { return wavetableStore; }
+    WavetableWorker& getWavetableWorker() noexcept { return wavetableWorker; }
+    const ExpressionPublisher& getExpressionPublisher() const noexcept { return expressionPublisher; }
+
+    /** Processing time of the synth engine alone (DspLoadMeter of the engine calls per block). */
+    DspLoadMeter::Reading getSynthDspLoad() const noexcept { return synthLoad.getReading(); }
+
+    /** Editor scale in percent (75..200), saved in the SYNTH child (editorScale). Any thread. */
+    int getEditorScalePercent() const noexcept { return editorScale.load (std::memory_order_relaxed); }
+    void setEditorScalePercent (int percent) noexcept;
+    static constexpr int minEditorScalePercent = 75;
+    static constexpr int maxEditorScalePercent = 200;
+
+    /** After the editor loaded a preset: tells the host the program changed (CLAP rescans the parameter
+        values; docs/SYNTH-DESIGN.md 14.4). Message thread. */
+    void notifyPresetLoaded();
+
+    /** Settings the synth engine gets in this block: the synth parameters + the bend range of the current
+        source (Voice: bendRange, Test Pattern: 2). Any thread, no allocation. */
+    synth::SynthSettings getSynthSettings() const noexcept;
 
     /** Peak level of the incoming voice signal since the last call; read by the UI thread. */
     float takeInputPeak() noexcept { return inputPeak.exchange (0.0f, std::memory_order_relaxed); }
@@ -267,6 +330,15 @@ private:
         nullptr if there is no input channel (Instrument with the sidechain disabled = silence). */
     const float* downmixInput (const juce::AudioBuffer<float>& buffer, int numInputs, int start, int length) noexcept;
 
+    /** Renders this chunk's events with the synth engine and adds the result to the output (stereo: L / R, mono:
+        (L + R) / 2). Measures the engine time into synthTicks. */
+    void renderSynth (const synth::SynthSettings& synth, const synth::SynthTransport& transport, bool voiceMode,
+                      float* const* channels, int numChannels, int length, juce::int64& synthTicks) noexcept;
+
+    /** Block start / end of the wavetable store protocol (docs/SYNTH-DESIGN.md 12.1), in EVERY block. */
+    void acquireWavetables() noexcept;
+    void releaseWavetables() noexcept;
+
     /** Voice mode: rescales the pitch bends in events for MonitorSynth (see monitorBendFor()). */
     void prepareMonitorEvents (int bendRangeSemitones) noexcept;
 
@@ -278,7 +350,23 @@ private:
 
     const Variant variant;
     juce::AudioProcessorValueTreeState apvts;
+
+    // 0.4 synth (docs/SYNTH-DESIGN.md 17). Declaration order matters for destruction: the preset manager and
+    // the worker (thread) go before the engine and the store; the engine (which may still point at tables)
+    // before the store that owns them.
+    WavetableStore wavetableStore;
+    synth::SynthEngine synthEngine;
+    SynthSettingsBuilder synthSettings { apvts };
+    ExpressionBuffer expressionFrames;          ///< Voice mode: this chunk's expression frames (audio thread)
+    ExpressionPublisher expressionPublisher;    ///< audio -> UI meters
+    WavetableWorker wavetableWorker { wavetableStore }; // starts its thread
+    PresetManager presetManager { apvts, wavetableStore, wavetableWorker };
+    std::vector<float> synthLeft, synthRight;   ///< maxChunkSamples each, allocated in the constructor
+    DryGain dryGain;                            ///< FX: dryLevel (audio thread)
+    DspLoadMeter synthLoad;                     ///< the engine calls only
+    std::atomic<int> editorScale { 100 };
     std::atomic<float>* muteDryParam = nullptr;
+    std::atomic<float>* dryLevelParam = nullptr;
     std::atomic<float>* testPatternParam = nullptr;
     std::atomic<float>* midiChannelParam = nullptr;
     std::atomic<float>* testTempoParam = nullptr;

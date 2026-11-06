@@ -1,6 +1,6 @@
 # Projektstand (Übergabe-Notiz)
 
-Stand: 2026-10-21. Diese Datei fasst zusammen, wo das Projekt steht, damit eine neue Sitzung oder ein Agent
+Stand: 2026-11-06. Diese Datei fasst zusammen, wo das Projekt steht, damit eine neue Sitzung oder ein Agent
 ohne den bisherigen Chatverlauf weitermachen kann.
 
 ## Erledigt
@@ -35,9 +35,31 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3, M3 (
 
 - Branch `v0.4-synth` von `m3.1-takes` (0.3.1, Nutzertest offen, noch nicht in `master`). Plan:
   [ROADMAP-0.4.md](ROADMAP-0.4.md) Abschnitt 4.1, Entscheidungen E1–E6 vom Nutzer angenommen (2026-11-03).
-- Phase 0 + Kritik (F1–F30, SYNTH-DESIGN Abschnitt 23) erledigt: [SYNTH-DESIGN.md](SYNTH-DESIGN.md) + eingefrorenes Gerüst (102 Synth-Parameter, Version-Hint 4,
-  0.3.1-State-Fixtures), Verhalten unverändert. Als Nächstes: Wellen A/B, C/D, E/F,
-  Integration, Probehör-ZIP, Review.
+  Verbindliches Design: [SYNTH-DESIGN.md](SYNTH-DESIGN.md) (Abschnitt 24 = was die Umsetzung anders macht,
+  Abschnitt 18 = gemessene CPU-Werte). Testanleitung für den Nutzer: [SYNTH-TESTING.md](SYNTH-TESTING.md)
+  (liegt jetzt auch im Windows-ZIP).
+- **Stand 2026-11-06: alles umgesetzt und integriert**, Version 0.4.0. Phase 0 + Kritik (F1–F30), Wellen A/B
+  (Wavetables, Oszillatoren, Filter, Hüllkurven, LFOs, Mod-Matrix, Stimmen), C/D (Engine, FX, Expression,
+  Store/Worker/State/Presets), E/F (UI-Fundament + Seite „Synth“, 24 Presets + Golden-Fingerabdrücke), dann
+  Integration:
+  - Prozessor: Synth in FX und Instrument (Instrument spielt aus dem Sidechain-Mikro, keine Host-MIDI),
+    `dryLevel` mit 20-ms-Rampe (0 dB bitgleich zu 0.3.1), Wavetable-Store-Protokoll in jedem Block auch im
+    Bypass, State mit Kind `SYNTH` und `stateVersion` 4, neue Instanzen Synth an + Init, alte Projekte Synth aus,
+    CLAP-Programmwechsel nach Preset-Laden.
+  - Editor: 1100 × 700, skalierbar 75–200 % (Menü oben rechts + Ecke, Größe im Projekt), vierter Reiter „Synth“,
+    neues LookAndFeel und Theme-Farben auch auf den alten Seiten, Hinweis zum Synth auf der Voice-Seite (E4; die
+    eigentliche Ersteinrichtung kommt mit 0.5).
+  - 130 Parameter (28 + 102 Synth), Version-Hint 4. State-Fixtures `tests/data/state-0.4.0-{fx,instrument}`.
+- Integration 2026-11-06 (lokal, Linux, clang Release, alle eigenen Quellen neu übersetzt): GATE_RESULTS
+- CPU (ganzer processBlock, 48 kHz / 128, gesungene Phrase): Synth aus 0,47 %, Init 0,68 %, Voice Lead 0,98 %,
+  Warm Pad (schwerstes Preset) 1,43 % im Mittel; Engine allein schlimmster Fall (Poly 16 × 2 × 8 Unison, alle
+  FX) 8,2 % → keine Unison-Begrenzung. Details: SYNTH-DESIGN.md 18.
+- Bekannt / offen: Sub + Noise 8,6 ns statt 3 ns pro Stimme (nur wenn Pegel > 0); bei schnellen abwärts
+  gleitenden Tönen leichtes Knistern über ca. 7,5 kHz (SYNTH-DESIGN 24.1, Nutzer soll melden); Presets ohne
+  Gehör abgestimmt (Lautheit gemessen), Urteil kommt vom Nutzer.
+- **Nächste Schritte:** Review-Agenten (`juce-review`, `audio-dsp-review`, Korrektheit) → Gegenprüfung → Fixes →
+  Commit/Push → CI (Linux + Windows; pluginval-Laufzeit mit 130 Parametern beobachten) → Probehör-ZIP an den
+  Nutzer (Init + 8 Presets, SYNTH-TESTING.md Abschnitt 4) → 0.4.1 Nachstimmen nach Feedback.
 
 ## Davor: M3.1 – Take-Länge, Record-Modus, weniger Zusatznoten (v0.3.1)
 

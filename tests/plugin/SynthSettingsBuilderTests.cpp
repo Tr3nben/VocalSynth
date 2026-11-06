@@ -219,6 +219,11 @@ TEST_CASE ("SynthSettingsBuilder: every synth parameter reaches its own field", 
     for (const auto& id : ids)
         REQUIRE (fields.count (id) == 1);
 
+    // A new instance plays the synth (synthOn on, decision E4, set by the processor constructor); every other
+    // synth parameter is at its default. Back to the parameter default for the comparison below.
+    CHECK (getParameter (p, params::synthOn.getParamID()).getValue() == 1.0f);
+    getParameter (p, params::synthOn.getParamID()).setValueNotifyingHost (0.0f);
+
     CHECK (allFieldsNear (fields, builder.build(), defaults));
 
     for (const auto& id : ids)

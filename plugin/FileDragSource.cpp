@@ -1,15 +1,18 @@
 #include "FileDragSource.h"
 
+#include "ui/Theme.h"
+
 namespace vocalsynth
 {
 
 namespace
 {
-// Same colours as the editor (PluginEditor.cpp)
-const juce::Colour panelColour { 0xff2a2e36 };
-const juce::Colour accentColour { 0xff3ddc97 };
-const juce::Colour textColour { 0xffd8dbe0 };
-const juce::Colour dimTextColour { 0xff8a9099 };
+// Same colours as the editor (PluginEditor.cpp): the 0.4 theme tokens (references: no copy before the header's
+// constants are initialised)
+const juce::Colour& panelColour = ui::theme::control;
+const juce::Colour& accentColour = ui::theme::accent;
+const juce::Colour& textColour = ui::theme::text;
+const juce::Colour& dimTextColour = ui::theme::textDim;
 } // namespace
 
 FileDragSource::FileDragSource (juce::String t, std::function<juce::File()> producer)

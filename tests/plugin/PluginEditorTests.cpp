@@ -1,6 +1,7 @@
 #include "Parameters.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
+#include "SynthParameters.h"
 #include "TunerDisplayModel.h"
 
 #include <catch2/catch_approx.hpp>
@@ -33,15 +34,37 @@ juce::StringArray collectLabelTexts (juce::Component& root)
     return labelTexts;
 }
 
-/** Every visible child lies inside the editor, and visible siblings do not overlap. */
-void checkLayout (juce::Component& editor)
+/** The design-size component that holds the pages (0.4: the editor scales it with a transform). */
+juce::Component& contentOf (juce::AudioProcessorEditor& editor)
+{
+    auto* vsEditor = dynamic_cast<VocalSynthEditor*> (&editor);
+    REQUIRE (vsEditor != nullptr);
+    return vsEditor->getContentComponent();
+}
+
+/** Visible children of the current page (below the top row with the page tabs and the scale menu). */
+std::vector<juce::Component*> visiblePageChildren (juce::AudioProcessorEditor& editor)
 {
     std::vector<juce::Component*> visible;
 
-    for (auto* child : editor.getChildren())
+    for (auto* child : contentOf (editor).getChildren())
+        if (child->isVisible() && child->getY() >= VocalSynthEditor::tabRowHeight)
+            visible.push_back (child);
+
+    return visible;
+}
+
+/** Every visible child lies inside the content (design size), and visible siblings do not overlap. */
+void checkLayout (juce::AudioProcessorEditor& editor)
+{
+    std::vector<juce::Component*> visible;
+    auto& content = contentOf (editor);
+    CHECK (content.getBounds() == juce::Rectangle<int> (VocalSynthEditor::defaultWidth, VocalSynthEditor::defaultHeight));
+
+    for (auto* child : content.getChildren())
         if (child->isVisible() && dynamic_cast<juce::TooltipWindow*> (child) == nullptr)
         {
-            CHECK (editor.getLocalBounds().contains (child->getBounds()));
+            CHECK (content.getLocalBounds().contains (child->getBounds()));
             CHECK_FALSE (child->getBounds().isEmpty());
             visible.push_back (child);
         }
@@ -56,7 +79,7 @@ void checkLayout (juce::Component& editor)
 }
 } // namespace
 
-TEST_CASE ("Editor builds for both variants and shows all three pages", "[editor]")
+TEST_CASE ("Editor builds for both variants and shows all four pages", "[editor]")
 {
     const auto variant = GENERATE (Variant::fx, Variant::instrument);
     CAPTURE (variant == Variant::fx ? "fx" : "instrument");
@@ -94,7 +117,7 @@ TEST_CASE ("Editor builds for both variants and shows all three pages", "[editor
     CHECK (vsEditor->getPage() == VocalSynthEditor::Page::voice); // the main panel comes first
 
     for (const auto page : { VocalSynthEditor::Page::voice, VocalSynthEditor::Page::testAndRouting,
-                             VocalSynthEditor::Page::capture })
+                             VocalSynthEditor::Page::capture, VocalSynthEditor::Page::synth })
     {
         const auto isVoice = page == VocalSynthEditor::Page::voice;
         CAPTURE ((int) page);
@@ -111,7 +134,10 @@ TEST_CASE ("Editor builds for both variants and shows all three pages", "[editor
             dir.isNotEmpty())
         {
             const auto name = juce::String (variant == Variant::fx ? "editor-fx" : "editor-instrument")
-                              + (isVoice ? "-voice.png" : page == VocalSynthEditor::Page::capture ? "-capture.png" : "-test.png");
+                              + (isVoice                                         ? "-voice.png"
+                                 : page == VocalSynthEditor::Page::capture       ? "-capture.png"
+                                 : page == VocalSynthEditor::Page::synth         ? "-synth.png"
+                                                                                 : "-test.png");
             const auto file = juce::File (dir).getChildFile (name);
             file.deleteFile();
             juce::FileOutputStream out (file);
@@ -137,23 +163,22 @@ TEST_CASE ("Editor: the Capture page shows the capture panel only", "[editor][ca
     CHECK_FALSE (panel.isVisible());
     vsEditor->showPage (VocalSynthEditor::Page::capture);
     CHECK (panel.isVisible());
-    CHECK (editor->getLocalBounds().contains (panel.getBounds()));
+    CHECK (contentOf (*editor).getLocalBounds().contains (panel.getBounds()));
     CHECK (panel.getHeight() >= 330);
     CHECK (panel.getStatusText().isNotEmpty());
 
-    // The Voice and Test & Routing controls are hidden on the Capture page
-    for (auto* c : editor->getChildren())
-        if (c != &panel && c->isVisible() && dynamic_cast<juce::TextButton*> (c) == nullptr
-            && dynamic_cast<juce::TooltipWindow*> (c) == nullptr)
+    // The Voice, Test & Routing and Synth controls are hidden on the Capture page
+    for (auto* c : visiblePageChildren (*editor))
+        if (c != &panel)
             FAIL_CHECK ("visible on the Capture page: " << c->getComponentID() << " " << c->getBounds().toString());
 
     vsEditor->showPage (VocalSynthEditor::Page::voice);
     CHECK_FALSE (panel.isVisible());
 
-    // Version text (header): "Version 0.3.1 - M3 capture" (en dash)
-    CHECK (vsEditor->getVersionText().startsWith ("Version 0.3.1 " + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x93"))
-                                                  + " M3 capture"));
-    CHECK (juce::String (VOCALSYNTH_VERSION_STRING) == "0.3.1");
+    // Version text (top row): "Version 0.4.0 - wavetable synth" (en dash)
+    CHECK (vsEditor->getVersionText().startsWith ("Version 0.4.0 " + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x93"))
+                                                  + " wavetable synth"));
+    CHECK (juce::String (VOCALSYNTH_VERSION_STRING) == "0.4.0");
 
     editor.reset();
     processor.releaseResources();
@@ -185,12 +210,12 @@ TEST_CASE ("Editor control labels match the names used in FL-ROUTING.md and LIES
 
     // Toggle buttons and page buttons
     juce::StringArray buttonTexts;
-    for (auto* child : editor->getChildren())
+    for (auto* child : contentOf (*editor).getChildren())
         if (auto* button = dynamic_cast<juce::Button*> (child))
             buttonTexts.add (button->getButtonText());
 
     for (const auto* expected : { "Legato", "Monitor Tone", "Virtual MIDI Out", "Mute Dry", "Restart pattern", "Voice",
-                                  "Test & Routing" })
+                                  "Test & Routing", "Capture", "Synth" })
     {
         CAPTURE (expected);
         CHECK (buttonTexts.contains (expected));
@@ -206,11 +231,8 @@ TEST_CASE ("Every M2 parameter has a control on the Voice page", "[editor]")
     vsEditor->showPage (VocalSynthEditor::Page::voice);
 
     int comboBoxes = 0, sliders = 0, toggles = 0;
-    for (auto* child : editor->getChildren())
+    for (auto* child : visiblePageChildren (*editor))
     {
-        if (! child->isVisible())
-            continue;
-
         comboBoxes += dynamic_cast<juce::ComboBox*> (child) != nullptr ? 1 : 0;
         sliders += dynamic_cast<juce::Slider*> (child) != nullptr ? 1 : 0;
         toggles += dynamic_cast<juce::ToggleButton*> (child) != nullptr ? 1 : 0;
@@ -222,7 +244,7 @@ TEST_CASE ("Every M2 parameter has a control on the Voice page", "[editor]")
 
     // A control changes its parameter (the attachments are connected)
     juce::ComboBox* rangeBox = nullptr;
-    for (auto* child : editor->getChildren())
+    for (auto* child : contentOf (*editor).getChildren())
         if (auto* box = dynamic_cast<juce::ComboBox*> (child); box != nullptr && box->getNumItems() == 7)
             rangeBox = box;
 
@@ -692,4 +714,109 @@ TEST_CASE ("Editor tuner names the note being sent", "[editor][tuner]")
         juce::FileOutputStream out (file);
         juce::PNGImageFormat().writeImageToStream (image, out);
     }
+}
+
+TEST_CASE ("Editor: Synth page, scale menu and the saved scale (0.4)", "[editor][synth]")
+{
+    const auto variant = GENERATE (Variant::fx, Variant::instrument);
+    CAPTURE (variant == Variant::fx ? "fx" : "instrument");
+
+    VocalSynthProcessor processor (variant);
+    processor.prepareToPlay (48000.0, 512);
+    CHECK (processor.getEditorScalePercent() == 100);
+
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+        auto* vsEditor = dynamic_cast<VocalSynthEditor*> (editor.get());
+        REQUIRE (vsEditor != nullptr);
+        CHECK (vsEditor->getPage() == VocalSynthEditor::Page::voice); // still opens on Voice in 0.4
+        CHECK (editor->isResizable());
+
+        // The Synth page: only the SynthPanel below the top row, at its design size
+        auto& panel = vsEditor->getSynthPanel();
+        CHECK_FALSE (panel.isVisible());
+        vsEditor->showPage (VocalSynthEditor::Page::synth);
+        CHECK (panel.isVisible());
+        CHECK (panel.getBounds()
+               == juce::Rectangle<int> (0, VocalSynthEditor::tabRowHeight, ui::SynthPanel::designWidth,
+                                        ui::SynthPanel::designHeight));
+        CHECK (VocalSynthEditor::tabRowHeight + ui::SynthPanel::designHeight == VocalSynthEditor::defaultHeight);
+
+        for (auto* c : visiblePageChildren (*editor))
+            if (c != &panel)
+                FAIL_CHECK ("visible on the Synth page: " << c->getComponentID() << " " << c->getBounds().toString());
+
+        // Every scale of the menu: fixed aspect ratio, the content keeps its design size and is scaled
+        for (const auto percent : VocalSynthEditor::scaleMenuPercents)
+        {
+            CAPTURE (percent);
+            vsEditor->setScalePercent (percent);
+            CHECK (editor->getWidth() == juce::roundToInt (VocalSynthEditor::defaultWidth * percent / 100.0));
+            CHECK (editor->getHeight() == juce::roundToInt (VocalSynthEditor::defaultHeight * percent / 100.0));
+            CHECK (vsEditor->getScalePercent() == percent);
+            CHECK (processor.getEditorScalePercent() == percent);
+            CHECK (vsEditor->getContentComponent().getWidth() == VocalSynthEditor::defaultWidth);
+            const auto scaled = editor->getLocalArea (&vsEditor->getContentComponent(),
+                                                      vsEditor->getContentComponent().getLocalBounds());
+            CHECK (scaled.getWidth() == Catch::Approx (editor->getWidth()).margin (1));
+        }
+
+        // Clamped to 75..200 %; the corner / host can only resize along the aspect ratio
+        vsEditor->setScalePercent (300);
+        CHECK (vsEditor->getScalePercent() == 200);
+        vsEditor->setScalePercent (10);
+        CHECK (vsEditor->getScalePercent() == 75);
+        REQUIRE (editor->getConstrainer() != nullptr);
+        CHECK (editor->getConstrainer()->getFixedAspectRatio()
+               == Catch::Approx ((double) VocalSynthEditor::defaultWidth / VocalSynthEditor::defaultHeight));
+
+        vsEditor->setScalePercent (125);
+        const auto image = editor->createComponentSnapshot (editor->getLocalBounds());
+        CHECK (image.getWidth() == juce::roundToInt (VocalSynthEditor::defaultWidth * 1.25));
+    }
+
+    // The scale is saved with the project (SYNTH editorScale) and the next editor opens with it
+    juce::MemoryBlock state;
+    processor.getStateInformation (state);
+    VocalSynthProcessor restored (variant);
+    restored.setStateInformation (state.getData(), (int) state.getSize());
+    CHECK (restored.getEditorScalePercent() == 125);
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor (restored.createEditor());
+    CHECK (editor->getWidth() == juce::roundToInt (VocalSynthEditor::defaultWidth * 1.25));
+    CHECK (editor->getHeight() == juce::roundToInt (VocalSynthEditor::defaultHeight * 1.25));
+    processor.releaseResources();
+}
+
+TEST_CASE ("Editor: synth hint on the Voice page and the synth DSP text (0.4)", "[editor][synth]")
+{
+    CHECK (VocalSynthEditor::synthHintText (true).contains ("ON"));
+    CHECK (VocalSynthEditor::synthHintText (true).contains ("Synth On"));
+    CHECK (VocalSynthEditor::synthHintText (false).contains ("off"));
+    CHECK (VocalSynthEditor::formatSynthDspLoad ({}) == "Synth DSP -");
+
+    DspLoadMeter::Reading r;
+    r.averageProportion = 0.006f;
+    r.peakProportion = 0.012f;
+    r.valid = true;
+    CHECK (VocalSynthEditor::formatSynthDspLoad (r).startsWith ("Synth DSP avg 0.6 %"));
+    CHECK (VocalSynthEditor::formatSynthDspLoad (r).endsWith ("peak 1.2 %"));
+
+    // A new instance plays the synth: the Voice page says so and follows the switch
+    VocalSynthProcessor processor (Variant::fx);
+    std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+    auto* vsEditor = dynamic_cast<VocalSynthEditor*> (editor.get());
+    REQUIRE (vsEditor != nullptr);
+    CHECK (collectLabelTexts (*editor).contains (VocalSynthEditor::synthHintText (true)));
+
+    auto* synthOn = processor.getParameters().getParameter (params::synthOn.getParamID());
+    REQUIRE (synthOn != nullptr);
+    synthOn->setValueNotifyingHost (0.0f);
+    vsEditor->runTimerTickForTests();
+    CHECK (collectLabelTexts (*editor).contains (VocalSynthEditor::synthHintText (false)));
+
+    // The Synth page's DSP display is the processor's synth load
+    vsEditor->showPage (VocalSynthEditor::Page::synth);
+    vsEditor->getSynthPanel().runTimerTickForTests();
+    CHECK (vsEditor->getSynthPanel().getDspText() == VocalSynthEditor::formatSynthDspLoad (processor.getSynthDspLoad()));
 }

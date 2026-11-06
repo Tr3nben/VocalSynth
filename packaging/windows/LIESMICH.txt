@@ -8,6 +8,7 @@ Inhalt dieses Pakets
   VST3\                      VocalSynth FX.vst3, VocalSynth Instrument.vst3
   CLAP\                      VocalSynth FX.clap, VocalSynth Instrument.clap
   Standalone\                VocalSynth FX.exe (zum Testen ohne DAW)
+  SYNTH-TESTING.md           Anleitung: den eigenen Synth testen (0.4.0)
   M3-TESTING.md              Anleitung: Aufnahme und Drag & Drop testen (0.3.1)
   M2-TESTING.md              Anleitung: Singen -> MIDI in FL Studio testen
   FL-ROUTING.md              Anleitung zum MIDI-Routing-Test (Version 0.1.0)
@@ -29,8 +30,31 @@ Installation
    FL Studio durchsucht auch Unterordner, der Ordner "VocalSynth" wird also
    gefunden.
 
-Was ist das für eine Version? (0.3.1, Meilenstein 3)
-----------------------------------------------------
+Was ist das für eine Version? (0.4.0 "Eigener Klang")
+-----------------------------------------------------
+Neu in 0.4.0: VocalSynth hat einen eigenen Wavetable-Synth. Du singst,
+VocalSynth macht daraus Noten (wie bisher) und spielt sie direkt im
+Plugin - ohne MIDI-Routing, ohne zweites Plugin.
+  - Neuer Reiter "Synth": 2 Wavetable-Oszillatoren mit Unison, Sub,
+    Rauschen, Filter, 3 Hüllkurven, 2 LFOs, Mod-Matrix, Chorus/Delay/
+    Reverb. 24 Presets (Pfeile < > oder Klick auf den Namen), eigene
+    Presets mit "Save" (Ordner Dokumente\VocalSynth\Presets).
+  - Der Synth hört auf deine Stimme: Lautstärke, Helligkeit ("ii"/"uu"),
+    Hauchen und Vibrato steuern den Klang (Presets "Vocal").
+  - Eigene Wavetables: im Tabellenmenü eines Oszillators "Import WAV";
+    die Tabelle wird im Projekt gespeichert.
+  - Neue Instanzen: Synth an, deine Stimme bleibt hörbar (Bereich MASTER
+    im Reiter "Synth": Synth On, Volume, Dry). Wer weiter einen externen
+    Synth über den MIDI-Port spielt, schaltet "Synth On" aus.
+  - Alte 0.3-Projekte laden mit ausgeschaltetem Synth und klingen wie
+    vorher. Achtung: "Reset to default" in FL schaltet den Synth aus.
+  - Fenster skalierbar (75-200 %): Menü oben rechts oder Ecke unten
+    rechts ziehen; die Größe wird mit dem Projekt gespeichert.
+  - Die Instrument-Variante spielt den Synth aus dem Sidechain-Mikrofon
+    (wie in FL-ROUTING.md, T3), nicht über die Piano Roll.
+  Anleitung und Checkliste: SYNTH-TESTING.md (liegt im ZIP).
+
+Bisher (0.3.1, Meilenstein 3):
 Deine Stimme wird zu MIDI (seit 0.2): Du singst oder summst ins Mikrofon,
 VocalSynth erkennt die Tonhöhe und schickt Noten (und auf Wunsch
 Pitchbend) über den MIDI-Port von FL Studio an einen Synth.
@@ -80,7 +104,7 @@ Stimmlage), dann singen. Tipp: ASIO-Puffer zum Live-Spielen auf 128 oder
 Samples kosten allein ca. 46 ms pro Puffer, und der Puffer zählt doppelt
 (Ein- und Ausgang). In der Aufnahme wird diese Verzögerung ausgeglichen.
 
-Das Plugin-Fenster hat drei Reiter (englisch beschriftet):
+Das Plugin-Fenster hat vier Reiter (englisch beschriftet):
   Voice              Stimmgerät (Notenname wie in FL: C5 = Note 60),
                      gesendete Note, Latenz in ms, Eingangspegel mit
                      Gate-Linie und die Einstellungen: Source, Voice
@@ -105,13 +129,19 @@ Das Plugin-Fenster hat drei Reiter (englisch beschriftet):
                      Clean/Raw, Bends, Quantize), Offset (Auto/Manual/
                      Off + Fine), Capture / Capture audio, Free gap.
                      Anleitung dazu: M3-TESTING.md (liegt im ZIP).
+  Synth              Der eigene Synth (seit 0.4.0): Preset-Leiste,
+                     OSC A/B, SUB, NOISE, VOICE (Mode, Glide, die vier
+                     Stimm-Anzeigen), FILTER, ENV 1-3, LFO 1/2, MOD
+                     MATRIX, CHORUS, DELAY, REVERB, MASTER (Synth On,
+                     Volume, Dry). Anleitung: SYNTH-TESTING.md.
 
 Ausprobieren
 ------------
 - VocalSynth FX: im Mixer auf den Insert legen, auf dem dein Mikrofon liegt.
   Der Pegelbalken im Plugin zeigt, ob deine Stimme ankommt.
-- Schnelltest ohne Routing: im Reiter "Test & Routing" "Monitor Tone"
-  einschalten und singen. Du hörst einen Sinuston, der deine Noten spielt.
+- Schnelltest ohne Routing: VocalSynth FX neu laden und singen - der
+  eigene Synth spielt sofort (Reiter "Synth"). Der alte Sinuston
+  ("Monitor Tone" im Reiter "Test & Routing") ist weiter da.
 - VocalSynth Instrument: im Channel Rack als Instrument laden; das
   Mikrofon kommt dann über den Sidechain-Eingang (siehe FL-ROUTING.md, T3).
 - Kopfhörer benutzen, damit der Synth nicht ins Mikrofon zurückläuft.
