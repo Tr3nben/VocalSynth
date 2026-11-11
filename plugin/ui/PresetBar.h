@@ -18,7 +18,9 @@ namespace vocalsynth::ui
     (setRefreshing). Component IDs:
     "presetPrev", "presetName", "presetNext", "presetSave". Message thread. Owner: agent E.
 
-    Details (agent E): menu = "Init" on top, a "Factory" header with one sub-menu per category, a "User"
+    Details (agent E): menu = "Init" on top, a "Factory" header with one sub-menu per category, a "Genres"
+    header with one sub-menu per presetGenres entry (0.4.1: "Trap", "R&B"; the factory presets whose tags name
+    the genre, category on the right, same item IDs as in the category sub-menus), a "User"
     sub-menu (user presets sorted by name, category on the right), then "Save As...", "Rename ...",
     "Delete ..." (current preset, user presets only), "Rescan User Presets", "Show Preset Folder". Saving over
     an existing file asks first. Every load (menu, < >) calls onPresetLoaded afterwards (the integration

@@ -1,4 +1,5 @@
-// FactoryPresets: 24 presets, categories, IDs valid, values in range, >= 8 use voice sources, tables exist.
+// FactoryPresets: 40 presets (24 of 0.4.0 + 16 Trap / R&B of 0.4.1), categories, genre tags, IDs valid, values in
+// range, every preset uses voice sources, tables exist.
 // Test plan: docs/SYNTH-DESIGN.md 14.3, 21. Owner: agent F (Sound / presets).
 
 #include "FactoryPresets.h"
@@ -81,12 +82,29 @@ bool usesVoiceSource (const sy::SynthSettings& s)
 }
 } // namespace
 
-TEST_CASE ("FactoryPresets: 24 presets, index 0 is Init, out-of-range indices clamp", "[plugin][synth][factorypresets]")
+TEST_CASE ("FactoryPresets: 40 presets, index 0 is Init, out-of-range indices clamp", "[plugin][synth][factorypresets]")
 {
-    REQUIRE (FactoryPresets::getNumPresets() == 24);
+    REQUIRE (FactoryPresets::getNumPresets() == 40);
     CHECK (FactoryPresets::getPreset (0).name == "Init");
     CHECK (FactoryPresets::getPreset (-5).name == "Init");
-    CHECK (&FactoryPresets::getPreset (1000) == &FactoryPresets::getPreset (23));
+    CHECK (&FactoryPresets::getPreset (1000) == &FactoryPresets::getPreset (39));
+}
+
+TEST_CASE ("FactoryPresets: the 0.4.0 presets keep their index and name (only appended in 0.4.1)",
+           "[plugin][synth][factorypresets]")
+{
+    // Projects store the preset name, the golden data refer to the order: never reorder, rename or remove
+    constexpr std::array<std::string_view, 24> released {
+        "Init", "Voice Lead", "Supersaw Lead", "PWM Lead", "Sync Lead", "Brass Lead", "Whistle", "Sub Bass",
+        "Reese Bass", "Acid Bass", "Pluck Bass", "FM Bass", "Warm Pad", "Choir Pad", "Glass Pad", "Poly Pluck",
+        "FM E-Piano", "Drawbar Organ", "Vowel Morph", "Talking Saw", "Breathy Voice", "Vibrato Wah", "Space Drift", "Glitch"
+    };
+
+    for (std::size_t i = 0; i < released.size(); ++i)
+    {
+        CAPTURE (i);
+        CHECK (FactoryPresets::getPreset (static_cast<int> (i)).name == released[i]);
+    }
 }
 
 TEST_CASE ("FactoryPresets: names are unique, tags are lower-case lists", "[plugin][synth][factorypresets]")
@@ -113,25 +131,78 @@ TEST_CASE ("FactoryPresets: names are unique, tags are lower-case lists", "[plug
 
 TEST_CASE ("FactoryPresets: categories follow the roadmap split", "[plugin][synth][factorypresets]")
 {
-    // Init 1, Lead 6, Bass 5, Pad 3, Pluck/Keys 3, Vocal 4, FX 2 (ROADMAP 3.2, docs/SYNTH-DESIGN.md 14.3)
-    constexpr std::array<int, vocalsynth::numPresetCategories> expected { 1, 6, 5, 3, 3, 4, 2 };
-    std::array<int, vocalsynth::numPresetCategories> counts {};
-    int previous = 0;
+    // 0.4.0 (ROADMAP 3.2, docs/SYNTH-DESIGN.md 14.3): Init 1, Lead 6, Bass 5, Pad 3, Pluck/Keys 3, Vocal 4, FX 2.
+    // 0.4.1 appends Trap (Lead 2, Bass 2, Pad 1, Pluck/Keys 3) and R&B (Lead 2, Bass 1, Pad 2, Pluck/Keys 2,
+    // Vocal 1). Each block is grouped by category in category order (prev / next walk the list in this order).
+    struct Block
+    {
+        int first, last;
+        std::array<int, vocalsynth::numPresetCategories> expected;
+    };
+    constexpr std::array<Block, 3> blocks { {
+        { 0, 23, { 1, 6, 5, 3, 3, 4, 2 } },
+        { 24, 31, { 0, 2, 2, 1, 3, 0, 0 } },
+        { 32, 39, { 0, 2, 1, 2, 2, 1, 0 } },
+    } };
+    std::array<int, vocalsynth::numPresetCategories> total {};
+
+    for (const auto& block : blocks)
+    {
+        std::array<int, vocalsynth::numPresetCategories> counts {};
+        int previous = 0;
+
+        for (int i = block.first; i <= block.last; ++i)
+        {
+            const auto& p = FactoryPresets::getPreset (i);
+            const auto c = static_cast<int> (p.category);
+            CAPTURE (block.first, p.name, c);
+            REQUIRE (c >= 0);
+            REQUIRE (c < vocalsynth::numPresetCategories);
+            CHECK (c >= previous);
+            previous = c;
+            ++counts[static_cast<std::size_t> (c)];
+            ++total[static_cast<std::size_t> (c)];
+        }
+
+        CAPTURE (block.first);
+        CHECK (counts == block.expected);
+    }
+
+    constexpr std::array<int, vocalsynth::numPresetCategories> expectedTotal { 1, 10, 8, 6, 8, 5, 2 };
+    CHECK (total == expectedTotal);
+    CHECK (FactoryPresets::getPreset (0).category == PresetCategory::init);
+
+    for (int i = 1; i < FactoryPresets::getNumPresets(); ++i)
+        CHECK (FactoryPresets::getPreset (i).category != PresetCategory::init); // only Init is "Init"
+}
+
+TEST_CASE ("FactoryPresets: genre tags (0.4.1): Trap 24..31, R&B 32..39, none on the 0.4.0 presets",
+           "[plugin][synth][factorypresets]")
+{
+    REQUIRE (vocalsynth::presetGenres.size() == 2);
+    CHECK (vocalsynth::presetGenres[0].tag == "trap");
+    CHECK (vocalsynth::presetGenres[0].name == "Trap");
+    CHECK (vocalsynth::presetGenres[1].tag == "rnb");
+    CHECK (vocalsynth::presetGenres[1].name == "R&B");
 
     for (int i = 0; i < FactoryPresets::getNumPresets(); ++i)
     {
         const auto& p = FactoryPresets::getPreset (i);
-        const auto c = static_cast<int> (p.category);
-        CAPTURE (p.name, c);
-        REQUIRE (c >= 0);
-        REQUIRE (c < vocalsynth::numPresetCategories);
-        CHECK (c >= previous); // grouped by category, in category order (the preset menu)
-        previous = c;
-        ++counts[static_cast<std::size_t> (c)];
-    }
+        const auto tags = juce::StringArray::fromTokens (toString (p.tags), ",", "");
+        CAPTURE (p.name, p.tags);
 
-    CHECK (counts == expected);
-    CHECK (FactoryPresets::getPreset (0).category == PresetCategory::init);
+        int genres = 0;
+
+        for (const auto& genre : vocalsynth::presetGenres)
+            genres += tags.contains (toString (genre.tag)) ? 1 : 0;
+
+        CHECK (genres == (i >= 24 ? 1 : 0)); // at most one genre per preset; the 0.4.0 presets have none
+        CHECK (tags.contains ("trap") == (i >= 24 && i <= 31));
+        CHECK (tags.contains ("rnb") == (i >= 32 && i <= 39));
+
+        if (i >= 24)
+            CHECK (tags[0] == (i <= 31 ? "trap" : "rnb")); // the genre first: reads well in a tag list
+    }
 }
 
 TEST_CASE ("FactoryPresets: tables are factory tables", "[plugin][synth][factorypresets]")
@@ -293,4 +364,29 @@ TEST_CASE ("FactoryPresets: PresetManager loads every factory preset with its ta
             CHECK (slot.table != nullptr);
         }
     }
+}
+
+TEST_CASE ("FactoryPresets: the 808s glide in Legato, so a sung slide becomes an 808 slide (0.4.1)",
+           "[plugin][synth][factorypresets]")
+{
+    int num808 = 0;
+
+    for (int i = 0; i < FactoryPresets::getNumPresets(); ++i)
+    {
+        const auto& p = FactoryPresets::getPreset (i);
+
+        if (! juce::StringArray::fromTokens (toString (p.tags), ",", "").contains ("808"))
+            continue;
+
+        const auto s = settingsOf (p);
+        CAPTURE (p.name);
+        ++num808;
+        CHECK (p.category == PresetCategory::bass);
+        CHECK (s.playMode == sy::PlayMode::legato);
+        CHECK (s.glideTimeMs >= 50.0f);
+        CHECK (s.subLevelPercent > 0.0f);
+        CHECK (s.filterDriveDb > 0.0f); // harmonics for small speakers
+    }
+
+    CHECK (num808 == 2);
 }

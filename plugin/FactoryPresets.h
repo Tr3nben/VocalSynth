@@ -43,7 +43,20 @@ struct FactoryPreset
     std::span<const FactoryPresetValue> values;
 };
 
-/** The factory presets (24 in 0.4.0, index 0 = "Init" = all defaults). Pure data, any thread.
+/** Genre groups (0.4.1): a factory preset belongs to a genre when its tags contain the genre's tag. The preset
+    menu lists them as extra sub-menus beside the type categories. Not stored anywhere (tags are data only). */
+struct PresetGenre
+{
+    std::string_view tag;  ///< e.g. "trap"
+    std::string_view name; ///< menu text, e.g. "Trap"
+};
+inline constexpr std::array<PresetGenre, 2> presetGenres { {
+    { "trap", "Trap" },
+    { "rnb", "R&B" },
+} };
+
+/** The factory presets (index 0 = "Init" = all defaults; 0..23 from 0.4.0, 24..39 appended in 0.4.1: Trap and
+    R&B). Only append: projects store the preset name, the golden data refer to the order. Pure data, any thread.
     Owner: agent F. */
 class FactoryPresets
 {

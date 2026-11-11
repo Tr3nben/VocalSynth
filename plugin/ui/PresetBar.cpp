@@ -7,11 +7,15 @@ namespace vocalsynth::ui
 
 namespace
 {
+juce::String fromView (std::string_view text)
+{
+    return juce::String::fromUTF8 (text.data(), static_cast<int> (text.size()));
+}
+
 juce::String categoryName (PresetCategory category)
 {
     const auto index = static_cast<std::size_t> (juce::jlimit (0, numPresetCategories - 1, static_cast<int> (category)));
-    const auto name = presetCategoryNames[index];
-    return juce::String (name.data(), name.size());
+    return fromView (presetCategoryNames[index]);
 }
 
 /** U+2026 HORIZONTAL ELLIPSIS. */
@@ -34,7 +38,7 @@ PresetBar::PresetBar (PresetManager& p)
 
     previousButton.setTooltip ("Previous preset");
     nextButton.setTooltip ("Next preset");
-    nameButton.setTooltip ("Presets: factory presets by category, your user presets, save / rename / delete");
+    nameButton.setTooltip ("Presets: factory presets by category and genre, your user presets, save / rename / delete");
     saveButton.setTooltip ("Save the current sound as a user preset (Documents/VocalSynth/Presets)");
 
     previousButton.onClick = [this] { pressPrevious(); };
@@ -145,6 +149,7 @@ juce::PopupMenu PresetBar::createMenu()
     juce::PopupMenu menu;
 
     std::array<juce::PopupMenu, numPresetCategories> factoryByCategory;
+    std::array<juce::PopupMenu, presetGenres.size()> factoryByGenre;
     juce::PopupMenu user;
     int numUser = 0;
 
@@ -163,6 +168,15 @@ juce::PopupMenu PresetBar::createMenu()
                 menu.addItem (item);
             else
                 factoryByCategory[static_cast<std::size_t> (info.category)].addItem (item);
+
+            // Genre groups (0.4.1): the same item once more under each genre its tags name, with its category
+            for (std::size_t g = 0; g < presetGenres.size(); ++g)
+                if (info.tags.contains (fromView (presetGenres[g].tag)))
+                {
+                    auto genreItem = item;
+                    genreItem.shortcutKeyDescription = categoryName (info.category);
+                    factoryByGenre[g].addItem (std::move (genreItem));
+                }
         }
         else
         {
@@ -177,6 +191,20 @@ juce::PopupMenu PresetBar::createMenu()
     for (int c = 1; c < numPresetCategories; ++c)
         if (factoryByCategory[static_cast<std::size_t> (c)].getNumItems() > 0)
             menu.addSubMenu (categoryName (static_cast<PresetCategory> (c)), factoryByCategory[static_cast<std::size_t> (c)]);
+
+    bool hasGenres = false;
+
+    for (const auto& genreMenu : factoryByGenre)
+        hasGenres = hasGenres || genreMenu.getNumItems() > 0;
+
+    if (hasGenres)
+    {
+        menu.addSectionHeader ("Genres");
+
+        for (std::size_t g = 0; g < presetGenres.size(); ++g)
+            if (factoryByGenre[g].getNumItems() > 0)
+                menu.addSubMenu (fromView (presetGenres[g].name), factoryByGenre[g]);
+    }
 
     menu.addSectionHeader ("User");
 

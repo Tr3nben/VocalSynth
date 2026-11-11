@@ -597,8 +597,9 @@ A preset with a user table embeds its data (as the state does); loading uses the
 
 ### 14.3 Factory presets (`plugin/FactoryPresets.cpp`, agent F)
 
-Data in code: name, category, tags, table A / B ids, the values that differ from the defaults. 24 presets;
-final names and order (agent F, `FactoryPresets.cpp`; mode Legato unless noted):
+Data in code: name, category, tags, table A / B ids, the values that differ from the defaults. 40 presets
+(24 in 0.4.0, 16 appended in 0.4.1); final names and order (agent F, `FactoryPresets.cpp`; mode Legato unless
+noted). **Only append**: projects store the preset name, the golden data (21.1) follow the order.
 
 | # | Category | Name (tables A / B) | Idea (voice sources in bold) |
 |---|---|---|---|
@@ -626,6 +627,22 @@ final names and order (agent F, `FactoryPresets.cpp`; mode Legato unless noted):
 | 21 | Vocal | Vibrato Wah (basic-shapes / pwm) | **Voice Pitch -> cutoff** |
 | 22 | FX | Space Drift (Poly; spectral-random / fold) | evolving pad, long delay, big reverb, **Noisiness -> noise** |
 | 23 | FX | Glitch (digital / square-stack) | S&H -> position at 1/16, synced delay, **Noisiness -> delay mix** |
+| 24 | Lead | Trap Flute (basic-shapes / formant-vowel) | sine-triangle an octave up + U formant, delayed vibrato, **Noisiness -> noise** (breath), **Level -> position** (overblow), **Brightness -> cutoff** |
+| 25 | Lead | Brass Stab (Mono) | detuned saw + octave, short Env 1 / Env 2 stab, **Level -> cutoff** |
+| 26 | Bass | 808 Glide Bass | sine + sub an octave down, glide 110 ms (sung slide = 808 slide), Env 3 -> Pitch punch on new notes, **Level -> drive**, **Brightness -> cutoff** |
+| 27 | Bass | 808 Distorted | as 26 with 20 dB drive (near square), glide 90 ms, **Level -> drive**, **Brightness -> cutoff** |
+| 28 | Pad | Dark Atmos (Poly; spectral-random / choir) | dark LP24 pad, smooth-random position, long delay + big reverb, **Brightness -> cutoff**, **Noisiness -> noise**, **Level -> Osc B** |
+| 29 | Pluck/Keys | Trap Bell (Poly; bell / basic-shapes) | bell an octave up, no sustain, Env 3 bright strike, **Brightness -> position** (brighter), **Noisiness -> delay mix** |
+| 30 | Pluck/Keys | Dark Pluck (Poly; saw-bright-dark / basic-shapes) | low LP24 pluck + octave-down Osc B, **Brightness -> cutoff** |
+| 31 | Pluck/Keys | Glass Arp (Poly; harmonic-sweep / bell) | short glassy pluck, 1/16 ping-pong delay, **Brightness -> bell layer**, **Level -> cutoff** |
+| 32 | Lead | Smooth R&B Lead | soft saw (position 32) + sine octave down, LP12, **Voice Pitch -> Pitch** (widens the sung vibrato by ~50 %), **Level -> cutoff**, **Brightness -> position** |
+| 33 | Lead | Slow Jam Lead (pwm / basic-shapes) | glide 140 ms Always, delayed vibrato, **Brightness -> pulse width**, **Level -> cutoff** |
+| 34 | Bass | 90s R&B Bass | saw-square an octave down + sub, resonant LP24 with a short Env 2 pluck, **Level + Brightness -> cutoff** |
+| 35 | Pad | Silk Pad (Poly; saw-bright-dark / basic-shapes) | 4-voice unison, slow attack, wide chorus, **Brightness -> cutoff**, **Level -> Osc B (octave)** |
+| 36 | Pad | Airy Choir (Poly; choir / formant-vowel) | **Brightness -> vowel**, **Noisiness -> noise** (air), big reverb |
+| 37 | Pluck/Keys | Neo-Soul Keys (Poly; fm-2op / basic-shapes) | Rhodes-like FM: Env 3 + velocity bark, LFO 2 -> pan (stereo tremolo), **Brightness -> FM index** |
+| 38 | Pluck/Keys | Bell Keys (Poly; bell / fm-2op) | bell + FM keys, Env 3 -> FM, **Brightness -> bell position** |
+| 39 | Vocal | Talkbox Lead (formant-vowel / basic-shapes) | **Brightness -> vowel A -> E -> I**, square octave down, **Level -> cutoff** |
 
 Changes against the draft list: Smooth Sine, Bright Saw, Square Vibrato, Riser dropped; Supersaw Lead, PWM Lead,
 Brass Lead, Space Drift added; Reese / Acid / Pluck / Organ / E-Piano renamed (Reese Bass, Acid Bass, Pluck Bass,
@@ -635,6 +652,15 @@ Drawbar Organ, FM E-Piano, Poly Pluck). Loudness: -18 LUFS +-1 LU (max momentary
 selection for the user (SYNTH-TESTING.md): Init, Voice Lead, Supersaw Lead, Reese Bass, Acid Bass, Warm Pad,
 Choir Pad, Vowel Morph, Talking Saw.
 At least 8 presets use voice sources (above: 9). Every preset: peak <= -1 dBFS, no DC, not silent (golden test).
+
+**0.4.1 (Trap / R&B, user feedback on 0.4.0):** presets 24..39 appended with the same rules (level matching,
+peaks incl. the 4-note chord, DC, every preset uses a voice source, phase random on unison / Poly); the 24 presets
+of 0.4.0 and their golden fingerprints are unchanged byte for byte (the JSON only gained entries). Genre tags:
+"trap" (24..31) and "rnb" (32..39), the genre first in the tag list; `presetGenres` (`FactoryPresets.h`) names
+the genres, the preset menu (PresetBar, 20.5) shows them as extra sub-menus "Trap" and "R&B" under a "Genres" header after the categories. Split:
+Init 1, Lead 10, Bass 8, Pad 6, Pluck/Keys 8, Vocal 5, FX 2. Each appended block is grouped by category. The
+hidden test `[.][presetmeasure]` also prints the largest |mean| and the power share above 200 Hz (bass on small
+speakers); `VOCALSYNTH_MEASURE_FROM=24` measures only the new presets.
 
 ### 14.4 Loading rules
 

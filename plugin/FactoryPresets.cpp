@@ -5,9 +5,11 @@
 namespace vocalsynth
 {
 
-// The 24 factory presets of 0.4.0 (docs/SYNTH-DESIGN.md 14.3), data only. Each preset lists ONLY the values
-// that differ from the parameter defaults (SynthSettings {}): Init is the empty list. Mix parameters (synthOn,
-// synthVolume, dryLevel) are never part of a preset.
+// The 40 factory presets (docs/SYNTH-DESIGN.md 14.3), data only: indices 0..23 from 0.4.0, 24..39 appended in
+// 0.4.1 (Trap 24..31 tagged "trap", R&B 32..39 tagged "rnb"; presetGenres in FactoryPresets.h). Never reorder
+// or change a released preset: projects store the name, the golden data the sound. Each preset lists ONLY the
+// values that differ from the parameter defaults (SynthSettings {}): Init is the empty list. Mix parameters
+// (synthOn, synthVolume, dryLevel) are never part of a preset.
 //
 // Sound design rules (agent F):
 // - Mono voices (leads, basses, vocal) stay in the default Legato (connected note changes keep the envelopes,
@@ -27,12 +29,19 @@ namespace vocalsynth
 //   constant "typical singing" expression (level 0.7, brightness 0.5, noisiness 0.2, pitch 0), synthVolume
 //   -6 dB, 48 kHz. Init stays at the defaults (ampGain 0 dB, about -16.5 LUFS). -18 leaves the headroom for the
 //   peak rule: <= -1 dBFS for every golden sequence (single notes on the mono presets, the overlapping
-//   releases of the legato run) and for a 4-note chord on the Poly presets (the worst is about -2.3 dBFS).
+//   releases of the legato run) and for a 4-note chord on the Poly presets (0.4.0: the worst is about
+//   -2.3 dBFS; 0.4.1: Glass Arp -1.6, Trap Bell / Dark Pluck -1.8 dBFS).
 //   Envelope decay / release times reach -80 dB at the set time (docs/SYNTH-DESIGN.md 8.1), so plucks need
 //   longer decay values than in synths that count a time constant.
 // - Noise colour stays mostly white: pink noise carries enough sub-audio energy to fail the DC check.
 //   Checked by GoldenPresetTests ("level-matched", "peaks below -1 dBFS"); the hidden test
-//   "[.][presetmeasure]" prints loudness, peaks, CPU, centroid and rise time per preset.
+//   "[.][presetmeasure]" prints loudness, peaks, CPU, centroid, rise time, |mean| and the power above 200 Hz.
+// - 0.4.1 (Trap / R&B, same rules): the 808s are sines (Osc A near position 0 + sub, both phase 0, through the
+//   symmetric drive: no DC) one octave below the sung note, Legato with glide so a sung slide becomes an 808
+//   slide; Env 3 -> Pitch gives the "punch" only on new notes. Drive + Voice Level -> Filter Drive add the
+//   harmonics that small speakers play (about -11 / -9 dB of the power above 200 Hz at C3). Plucks and bells
+//   keep a little sustain or reverb so their 4-note chord peak stays below -1 dBFS at -18 LUFS. The bell table
+//   darkens along its position, so bell presets modulate it negatively (Env 3 / Brightness = brighter).
 
 namespace
 {
@@ -439,10 +448,10 @@ constexpr FactoryPresetValue brassStab[] {
 
 constexpr FactoryPresetValue glide808[] {
     { "glideTime", 110.0f },
-    { "ampGain", -2.9f },
+    { "ampGain", -2.6f },
     { "oscAPosition", 4.0f }, { "oscAOctave", -1.0f }, { "oscALevel", 60.0f },
     { "subLevel", 55.0f },
-    { "filterCutoff", 1800.0f }, { "filterDrive", 9.0f }, { "filterKeytrack", 40.0f },
+    { "filterCutoff", 1800.0f }, { "filterDrive", 10.0f }, { "filterKeytrack", 40.0f },
     { "env1Attack", 1.0f }, { "env1Decay", 2500.0f }, { "env1Sustain", 55.0f }, { "env1Release", 250.0f },
     // The 808 "punch": a short pitch drop on every new note; connected (sung) slides keep it off (Legato)
     { "env3Attack", 0.0f }, { "env3Decay", 80.0f },
@@ -455,7 +464,7 @@ constexpr FactoryPresetValue glide808[] {
 constexpr FactoryPresetValue distorted808[] {
     { "glideTime", 90.0f },
     { "ampGain", 0.5f },
-    { "oscAPosition", 8.0f }, { "oscAOctave", -1.0f }, { "oscALevel", 65.0f },
+    { "oscAPosition", 15.0f }, { "oscAOctave", -1.0f }, { "oscALevel", 65.0f },
     { "subLevel", 45.0f },
     { "filterCutoff", 2600.0f }, { "filterResonance", 10.0f }, { "filterDrive", 20.0f }, { "filterKeytrack", 30.0f },
     { "env1Attack", 1.0f }, { "env1Decay", 3000.0f }, { "env1Sustain", 60.0f },

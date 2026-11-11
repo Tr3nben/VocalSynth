@@ -29,6 +29,9 @@ Zeitbedarf: Kurztest (Abschnitt 2 + Probehör-Auswahl) ca. 20 Minuten, ganze Che
 - Neuer Reiter **„Synth“** (vierter Reiter nach *Voice*, *Test & Routing*, *Capture*): 2 Wavetable-Oszillatoren
   mit Unison, Sub, Rauschen, Filter mit Drive, 3 Hüllkurven, 2 LFOs, 8 Modulations-Slots, Chorus/Delay/Reverb.
 - **24 Factory-Presets** (Init + 23 Klänge), eigene Presets speichern (Ordner `Dokumente\VocalSynth\Presets`).
+- **Neu in 0.4.1:** **16 weitere Presets für Trap und R&B** (zusammen 40). Im Preset-Menü stehen sie bei ihrer
+  Kategorie (Lead, Bass …) und zusätzlich unter **Genres → Trap** bzw. **Genres → R&B** (Abschnitt 4,
+  „Neu in 0.4.1“).
 - **14 eingebaute Wavetables** und **Import eigener WAV-Wavetables** (die Tabelle wird im Projekt gespeichert,
   das Projekt klingt also auch auf einem anderen Rechner gleich).
 - **Neue Instanzen:** Synth **an**, trockene Stimme **an** – du hörst sofort etwas. Der Reiter *Voice* sagt es
@@ -53,7 +56,7 @@ Zeitbedarf: Kurztest (Abschnitt 2 + Probehör-Auswahl) ca. 20 Minuten, ganze Che
    - Oben rechts neben **Save**: **Synth DSP** – wie viel Rechenzeit der Synth braucht (Durchschnitt und
      Spitze). Die Anzeige *VocalSynth DSP* im Reiter *Voice* zeigt das ganze Plugin (Analyse + Synth).
 6. Mit den Pfeilen **< >** neben dem Preset-Namen durch die Presets schalten, oder auf den Namen klicken
-   (Menü nach Kategorie).
+   (Menü nach Kategorie und – ab 0.4.1 – nach Genre: *Trap*, *R&B*).
 
 Tipp: Die meisten Presets sind auf **gleiche Lautheit** abgestimmt (±1 dB, Init ist etwas lauter). Wenn
 ein Preset deutlich leiser oder lauter wirkt, ist das ein Befund – bitte notieren.
@@ -140,6 +143,37 @@ zu laut / komisch* (+ ein Wort warum).
 |---|---|---|
 | Space Drift | Poly | Atmosphäre: sich ständig verändernde Fläche, langes Delay und großer Hall. Hauchen gibt Rauschen dazu. Für Intros/Übergänge. |
 | Glitch | Legato | Digitaler, rhythmischer Klang im Song-Tempo (1/16), Delay im Tempo. **Hauchen/Zischen** gibt mehr Delay. Mit laufendem Transport bei verschiedenen Tempi prüfen. |
+
+### Neu in 0.4.1: Trap und R&B
+
+Alle 16 sind gleich laut wie die anderen Presets (−18 LUFS) und reagieren auf deine Stimme. Im Menü:
+**Genres → Trap** / **Genres → R&B** (rechts steht die Kategorie). Mit **< >** kommen sie nach *Glitch*.
+Kurztest, wenn wenig Zeit ist: **808 Glide Bass**, **Trap Bell**, **Trap Flute**, **Neo-Soul Keys**,
+**Smooth R&B Lead**, **Talkbox Lead**.
+
+**Trap**
+| Preset | Kategorie / Modus | Worauf achten |
+|---|---|---|
+| Trap Flute | Lead / Legato | Flöte eine Oktave über deiner Stimme, verzögertes Vibrato. **Hauchen = mehr Atemgeräusch**, lauter = etwas „überblasen“ (heller). |
+| Brass Stab | Lead / Mono | Kurzer Blech-Stoß, **jede Note setzt neu an** (Mono). Kurze, rhythmische Silben singen („ta ta“); lauter = blechiger. |
+| ★ 808 Glide Bass | Bass / Legato | 808 eine Oktave unter deiner Stimme mit **Glide 110 ms**: **sing einen Slide** (Ton hochziehen, ohne abzusetzen) – der 808 muss mitgleiten, ohne neu anzuschlagen. Neue Töne (nach einer Pause) haben einen kurzen „Punch“. **Lauter = mehr Verzerrung** – auch auf Laptop-/Handy-Lautsprechern prüfen: bleibt der Bass hörbar und sauber? |
+| 808 Distorted | Bass / Legato | Wie oben, aber stark verzerrt (fast Rechteck), Glide 90 ms. Helle Vokale = offener. Ist es zu kratzig? |
+| Dark Atmos | Pad / Poly | Dunkle, langsame Fläche (Einschwingen ca. 1 s), wandernd, großer Hall. Helle Vokale öffnen das Filter, Hauchen gibt Rauschen dazu. |
+| ★ Trap Bell | Pluck/Keys / Poly | Helle, kurze Glocke eine Oktave höher (klingt auch bei gehaltenem Ton aus). **„ii“ = heller**, Hauchen = mehr Delay. Schnelle Melodien singen. |
+| Dark Pluck | Pluck/Keys / Poly | Dunkler, weicher Zupf-Sound mit Delay. Helle Vokale = offener. |
+| Glass Arp | Pluck/Keys / Poly | Gläserner, kurzer Pluck mit 1/16-Ping-Pong-Delay im Song-Tempo – schnelle, kurze Töne („ti-ti-ti“) singen. Helle Vokale = mehr Glas. |
+
+**R&B**
+| Preset | Kategorie / Modus | Worauf achten |
+|---|---|---|
+| ★ Smooth R&B Lead | Lead / Legato | Weiche Säge/Sinus-Mischung. **Dein Vibrato wird etwas breiter** (Voice Pitch → Pitch) – mit und ohne Vibrato singen. Lauter = heller. |
+| Slow Jam Lead | Lead / Legato | 90er-Slow-Jam-Lead: **gleitet zwischen allen Tönen** (Glide 140 ms, auch nach Pausen), verzögertes Vibrato. Helle Vokale = näselnder (schmalerer Puls). |
+| 90s R&B Bass | Bass / Legato | Runder, leicht resonanter Synth-Bass mit kurzem Filter-„Pluck“. Lauter = offener. |
+| Silk Pad | Pad / Poly | Warme, weiche Fläche mit langsamem Einsatz und breitem Chorus. Helle Vokale = offener, lauter = etwas Glanz (Oktave). |
+| Airy Choir | Pad / Poly | Luftiger Chor. **„ii“ ↔ „uu“** ändert den Vokal, **Hauchen = mehr Luft**. |
+| ★ Neo-Soul Keys | Pluck/Keys / Poly | Rhodes-artiges E-Piano: Anschlag „bellt“ kurz, **Stereo-Tremolo** (wandert links/rechts). Helle Vokale = etwas mehr Biss. |
+| Bell Keys | Pluck/Keys / Poly | Glockiges E-Piano mit Chorus, längerer Ausklang. „ii“ = heller. |
+| ★ Talkbox Lead | Vocal / Legato | Talkbox-artig: **je heller du singst, desto mehr wandert der Vokal von A über E zu I** („uu“/„oo“ → A, „ii“ → I), lauter = offener. „wa-ji-wa“ oder „you-yeah“ singen. |
 
 ---
 

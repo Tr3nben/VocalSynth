@@ -717,6 +717,86 @@ TEST_CASE ("PresetBar: the current user preset is the loaded file, not a preset 
     CHECK (bar.getCurrentUserPreset()->file == userFile);
 }
 
+TEST_CASE ("PresetBar: genre sub-menus list the factory presets tagged with the genre (0.4.1)", "[plugin][editor][synthpanel]")
+{
+    PanelFixture f;
+    auto& bar = f.panel->getPresetBar();
+    const auto list = f.presets.getPresets();
+    auto menu = bar.createMenu();
+
+    // Top level: the type categories stay, the genres follow under their own header
+    juce::StringArray topLevel;
+
+    for (juce::PopupMenu::MenuItemIterator it (menu); it.next();)
+        topLevel.add (it.getItem().text);
+
+    CHECK (topLevel.contains ("Lead"));
+    CHECK (topLevel.contains ("Pluck/Keys"));
+    CHECK (topLevel.indexOf ("Genres") > topLevel.indexOf ("FX"));
+    CHECK (topLevel.indexOf ("User") > topLevel.indexOf ("Genres"));
+
+    for (const auto& genre : presetGenres)
+    {
+        const auto genreName = juce::String::fromUTF8 (genre.name.data(), static_cast<int> (genre.name.size()));
+        const auto tag = juce::String::fromUTF8 (genre.tag.data(), static_cast<int> (genre.tag.size()));
+        CAPTURE (genreName);
+        REQUIRE (topLevel.contains (genreName));
+
+        juce::PopupMenu* sub = nullptr;
+
+        for (juce::PopupMenu::MenuItemIterator it (menu); it.next();)
+            if (it.getItem().text == genreName)
+                sub = it.getItem().subMenu.get();
+
+        REQUIRE (sub != nullptr);
+
+        // Exactly the tagged factory presets, in list order, with the preset's own item ID and its category
+        juce::StringArray expected, actual;
+
+        for (int i = 0; i < list.size(); ++i)
+            if (list[i].isFactory && list[i].tags.contains (tag))
+                expected.add (list[i].name + "|" + juce::String (ui::PresetBar::presetItemBase + i));
+
+        for (juce::PopupMenu::MenuItemIterator it (*sub); it.next();)
+        {
+            const auto& item = it.getItem();
+            actual.add (item.text + "|" + juce::String (item.itemID));
+            const auto index = item.itemID - ui::PresetBar::presetItemBase;
+            REQUIRE (index >= 0);
+            REQUIRE (index < list.size());
+            const auto category = presetCategoryNames[static_cast<std::size_t> (list[index].category)];
+            CHECK (item.shortcutKeyDescription == juce::String::fromUTF8 (category.data(), static_cast<int> (category.size())));
+        }
+
+        CHECK (expected.size() == 8);
+        CHECK (actual == expected);
+    }
+
+    // Picking a preset in a genre menu loads it; it is then ticked in its category and its genre menu
+    const auto trap = presetGenres[0];
+    const auto tag = juce::String::fromUTF8 (trap.tag.data(), static_cast<int> (trap.tag.size()));
+    int pick = -1;
+
+    for (int i = 0; i < list.size() && pick < 0; ++i)
+        if (list[i].isFactory && list[i].tags.contains (tag))
+            pick = i;
+
+    REQUIRE (pick > 0);
+    bar.handleMenuResult (ui::PresetBar::presetItemBase + pick);
+    CHECK (bar.getNameText() == list[pick].name);
+    menu = bar.createMenu();
+    int ticked = 0;
+
+    for (juce::PopupMenu::MenuItemIterator it (menu, true); it.next();)
+        if (it.getItem().isTicked)
+        {
+            ++ticked;
+            CHECK (it.getItem().itemID == ui::PresetBar::presetItemBase + pick);
+        }
+
+    CHECK (ticked == 2);
+}
+
 TEST_CASE ("SynthPanel: destroying the panel while the worker builds is safe", "[plugin][editor][synthpanel]")
 {
     for (int round = 0; round < 3; ++round)
