@@ -80,6 +80,27 @@ M0/M1 sind über PR #1, M2 (v0.2.0) über PR #2, M2.1 (v0.2.1) über PR #3, M3 (
 - **Nächste Schritte:** Commit/Push → CI (Linux + Windows; pluginval-Laufzeit mit 130 Parametern beobachten) →
   Probehör-ZIP an den Nutzer (Init + 8 Presets, SYNTH-TESTING.md Abschnitt 4) → 0.4.1 Nachstimmen nach Feedback.
 
+### 0.4.1 – kurze Noten (Segmentierung)
+
+- **Nutzer-Feedback zu 0.4.0** (FL Studio 2026, ASIO 2048, Tenor, MPM, Gate −35 dB, interner Synth): bei kurzen
+  Tönen springt es, ein Ton kommt doppelt, oder kurz vorher ein falscher Ton. **Ursache** (synthetische kurze
+  Noten mit Schleifern, Konsonanten, Plucks + vocadito/gesungener Satz): Der schnelle Notenanfang liest den
+  Schleifer von unten (oder einen Einbruch am Tonanfang) als eigene Note; der richtige Ton kam erst nach der
+  Mindest-Notenlänge (60 ms) als normaler Notenwechsel – im Synth ein zweiter Anschlag (Poly/Mono). Doppelton:
+  richtiger Start, kurz auf den Nachbarton „korrigiert“, nach 60 ms zurück.
+- **Änderung „Einschwingen“** (`NoteSegmenter`, Doku [M2-DESIGN.md](M2-DESIGN.md) Abschnitt 13): In den ersten
+  120 ms einer Note aus der Stille läuft die schnelle Tonhöhenmessung weiter; sobald die Stimme 10 ms ruhig auf
+  einem anderen Ton liegt, wird die Note sofort als **Korrektur** umgestellt (keine Mindest-Notenlänge, Flag
+  `correction`: der Synth springt nur in der Tonhöhe, kein neuer Anschlag, auch in Poly/Mono). Keine Parameter
+  und keine Standardwerte geändert; Synth-Code unverändert (die Korrektur-Regel war schon da).
+- **Vorher/nachher** (MPM): synthetische kurze Noten (1720) – zusätzliche Anschläge in Poly 149 → 10, falscher
+  Ton zuerst im Median 60 → 30 ms (und jetzt fast immer als Korrektur), verpasste Noten 68 → 33; echter Gesang
+  (vocadito_1 + gesungener Satz, 553 Noten) – zusätzliche Anschläge 166 → 71. vs-eval Note-F1: vocadito_1 A1
+  0,317 → 0,333 (YIN 0,305 → 0,309), A2 0,355 → 0,370, kurze Noten 0,839 → 0,872, Selbsttest unverändert
+  (0,832 / 0,826). **Note-On-Latenz unverändert** (Selbsttest 15,4 / 30,9 ms, Latenz-Tabelle identisch).
+  Bekannt: Ein Einbruch am Tonanfang von ≥ 1 Halbton und ≥ 30 ms wird kurz mitgespielt (jetzt als Tonhöhen-
+  sprung ohne neuen Anschlag); bei Bend Off ist das ohne Vorausschau nicht von einem Schleifer zu trennen.
+
 ## Davor: M3.1 – Take-Länge, Record-Modus, weniger Zusatznoten (v0.3.1)
 
 - Branch: `m3.1-takes` (von `master` nach v0.3.0 / PR #4). Stand im Arbeitsbaum: WIP-Commit `fe41d9e` (Design,

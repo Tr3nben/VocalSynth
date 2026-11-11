@@ -340,10 +340,11 @@ void VoicePipeline::processToSink (const float* mono, int numSamples, const Voic
             }
         }
 
-        // Provisional onsets: only while no note is on (after the full frame of this sample, if any).
+        // Provisional onsets: while no note is on (after the full frame of this sample, if any); during the
+        // onset phase of a note the segmenter records the newest pitch for the onset settling (0.4.1).
         // Below the gate a frame cannot start a note, and while the fast path is blocked the segmenter
         // reads only the level: no search then (same result for the segmenter).
-        if (fastDue && segmenter.getActiveNote() < 0)
+        if (fastDue && (segmenter.getActiveNote() < 0 || segmenter.isInOnsetPhase()))
         {
             const auto minRmsDb = segmenter.isFastPathBlocked() ? std::numeric_limits<float>::infinity()
                                                                 : s.gateThresholdDb;

@@ -267,7 +267,8 @@ never reaches the default threshold of 70 cents -> one note.
 
 `minNoteLength` bounds note **duration**, it is not an onset delay:
 
-- a note change is executed only when the current note has lasted `>= minNoteLength` (and T_min is met);
+- a note change is executed only when the current note has lasted `>= minNoteLength` (and T_min is met;
+  v0.4.1: except the onset corrections of section 13, which fix the guess of a note start from rest);
 - a note-off is deferred until the note has lasted `>= minNoteLength`; if voicing returns before that,
   the note simply continues;
 - each new note (also a legato change) restarts the age.
@@ -1127,3 +1128,169 @@ from rest plus a fast glide gives no passing notes and is block-size invariant (
 Changed on purpose: two change-delay checks in `VoicePipelineTests.cpp` (a clean step now waits the arrival
 span T_min / 2, not T_min), the arrival/T_min expectations of two older change tests, and the default-gate
 lines (-35).
+
+## 13. v0.4.1 onset settling (core: short notes, wrong note first, double notes)
+
+User report on 0.4.0 (FL Studio 2026, ASIO 2048, Tenor, MPM, gate -35 dB, default settings, the internal
+synth played live): with short notes (plucks, "da da da", consonant onsets) the synth "jumps", plays "the same
+note twice in quick succession", or "when not perfectly on pitch a different note comes right before". The
+headers (`NoteSegmenter.h`, `VoicePipeline.h`) are authoritative; this section records the evidence, the
+change and the numbers. Public API: additions only (`NoteSegmenter::isInOnsetPhase()`, constants); no
+parameter, range or default changed.
+
+### 13.1 Reproduction
+
+- **Synthetic short notes** (scratch generator, not in the repository): glottal-like harmonic source (tilt
+  -10..-12 dB/oct, jitter, shimmer) through vowel formants; notes of 70-260 ms at 90-160 BPM (8ths / 16ths)
+  in phrases, attack 3-15 ms, staccato release or pluck decay (tau 50-150 ms), consonant onsets (t/k/s/p noise
+  bursts, d/b with a voice bar, nasal murmur), levels -14..-36 dBFS, noise floor -62 dBFS. Sets: clean
+  staccato, consonants, scoops from below (50-150 cents over 20-60 ms, linear or ease-out, +-30 cents
+  detune), detune only, plucks, repeated same notes with 20-80 ms gaps, amplitude bumps, short legato notes
+  (80-200 ms, 15-40 ms transitions), soft attacks near the gate, nasal codas, breathy, diphthongs, onset
+  transients (overshoot, falling in from above, dip and return, wobble; 40-120 cents over 20-60 ms), and a
+  mix. Tenor 2 files per set (1720 notes) plus Bass / Baritone / Alto (999 notes). Labels: onset = start of
+  the pitched part, the intended note.
+- **Real singing**: vocadito_1 (A1 labels) and the semi-synthetic sung set of section 12 (553 notes together);
+  the local Dagstuhl excerpts have no note labels.
+- **Measured per intended note** (scratch analyser; each note-on is assigned to the label note it falls in,
+  and replayed through `synth::VoiceAllocator` to see what the synth does): extra note-ons, a wrong pitch before
+  the right one ("pre", symptom b) and whether the right one came as a correction or as a note change, the same
+  pitch twice ("double", symptom a), a wrong pitch after the right one ("post", c), the time a wrong pitch
+  sounds inside the note, missed notes, envelope starts in Poly ("extra attacks"), latency of the first
+  right-pitch note-on and of the first note-on.
+
+### 13.2 Root causes (evidence)
+
+1. **The onset guess was a note of its own.** The provisional (fast) start reads the pitch of the first
+   ~2 periods: on a scoop from below that is the semitone below the target (synthetic scoops: 50 % of the
+   notes; vocadito_1: 25 of 59 notes start on a wrong pitch, mostly scoops of 1-4 semitones). The full window then confirmed the
+   stale reading at the end of the settle time (its window still holds the scoop) or did not see the target
+   yet, and from there only the normal change path could fix it: T_min / arrival, the onset glide hold
+   and **minNoteLength (60 ms)**. Typical: start 66 at +9 ms, change to 67 at +66 ms (median wrong part
+   60 ms in every synthetic set, 86 ms on real singing). That change was an ordinary note change (flag
+   `noteChange`, more than 40 ms after the note-on), so the synth (docs/SYNTH-DESIGN.md 10.2) treated it
+   as a new note: **a second envelope start in Poly and Mono**, a glide in Legato presets with glide. Of the
+   wrong-first notes only 73 of 211 (synthetic, MPM) and 13 of 160 (real) were corrections; the rest were
+   note changes. In 23 of 143 scooped notes the right note never came (the sung note ended within
+   minNoteLength of its wrong start).
+2. **Same note twice** (symptom a): a note that started right was "corrected" by a single strong full frame
+   during the settle time (the 2 h rule) to the pitch of an onset dip or of the stale scoop start, and came
+   back by the normal path after minNoteLength: X, Y for 60 ms, X again (vocadito_1 13.94 s: 46 -> 45 -> 46;
+   21.88 s: 48 -> 46 -> 48; synthetic onset dips: 8 of 204 notes, all with a second attack of X in Poly).
+   Re-onsets of the same note after a release inside one sung note (consonant, amplitude bump, pluck tail,
+   nasal coda, breath) did not occur: 0-1 in every synthetic set, 1 in the sung set (a real gap).
+3. Both look like "jumping" (c) on short notes, where the wrong part is a large fraction of the note.
+
+Not the cause: the release rule, the dropout hold, the fast-path re-arming, block sizes (event lists
+identical for blocks 1 / 37 / 512 / 2048 / 4096) and the synth's 40 ms rule as such: with minNoteLength >= 40 ms
+the pipeline sends no unflagged change within 40 ms of a note-on (octave-shift changes aside), so the window
+and the pipeline agree; the long wrong parts were simply outside it and unflagged.
+
+### 13.3 Change: onset settling (NoteSegmenter, VoicePipeline)
+
+- **Onset phase.** After a note start from rest (provisional or by the full window) and for at most
+  `onsetSettleMaxMs` = `onsetGlideHoldMs` = 120 ms, the pipeline keeps running the FastOnsetDetector every
+  1 ms (it already did while idle) and passes its frames to `processOnsetFrame()`, which now only **records**
+  them while a note is on (confidence >= `onsetTrackConfidence` 0.9 and level >= gate; any other frame
+  restarts the record). It never emits there, so the event bound of `maxEventsForSamples()` is unchanged.
+- **Correction.** At each full frame (before the provisional / normal handling) the newest
+  `onsetSettleSpanMs` = 10 ms of recorded frames decide when they are steady (spread <= 0.25 st, least-squares
+  slope <= 12 st/s): if their mean pitch wins by 2 h against the current note (the stickiness change
+  condition, but without T_min and minNoteLength) and lies within 5 semitones, the note is **corrected** to
+  it: legato / retrigger order as a change, the timing of the original note-on with
+  `EventTimingFlags::correction` on both events (as the v0.2.1 provisional correction), the original
+  velocity, age (minNoteLength counts from the start) and start from rest; a provisional note stays
+  provisional (false-start rule). The phase continues, so a long scoop that settles in steps is followed by
+  corrections (one envelope).
+- **Confirmation.** A steady span that keeps the note (no 2 h winner) ends the phase only once it has lasted
+  `onsetConfirmSpanMs` = 20 ms (slope <= 6 st/s): a short steady stretch may be a pause within a scoop.
+  Changes after the phase (or when the note changed by the normal path) are ordinary changes as before.
+- Octave / range decisions stay with the full window and the octave guard (no fast correction beyond 5 st).
+  The v0.2.1 provisional rules (settle time, nearest note, false start) are unchanged; a provisional
+  correction restarts the onset phase from the original start.
+- **Synth side: no change needed.** The flag already makes every such change a `correction` command in
+  Mono, Legato and Poly (pitch jumps on the same voice, no envelope restart, no glide, velocity and random
+  value kept); the 40 ms time rule stays the primary rule for unflagged sources (test pattern). Capture:
+  Clean merges the corrected note with the guess from the original start, as for v0.2.1 corrections.
+
+Tried and rejected (same inputs):
+
+| Variant | Result |
+|---|---|
+| Wait with the provisional start while the fast pitch rises (scoop detection, 10-25 st/s over 4-6 ms, max wait 25 ms) | no fewer wrong starts, +1..1.5 ms median onset on clean notes, later right notes |
+| correction span 5-8 ms / 15-20 ms | 8 ms: more misses (mid-scoop "settles"), 15-20 ms: wrong part +5..10 ms, more extra attacks |
+| one steady span both corrects and confirms (no separate confirm span) | 23 -> 14 missed scooped notes only (a pause inside a scoop ended the phase) |
+| end the phase after the first correction | extra attacks on real singing 79 -> 85 (scoops in steps went back to note changes) |
+| veto a full-window settle correction that the newest fast frame does not read; leave near corrections to the fast frames | no measurable change / doubles 24 -> 19 but wrong part +0.5 ms per note: not taken |
+| flag every normal-path change inside the onset phase | no measurable change |
+| onset phase 60 / 100 / 150 ms | 60: real extra attacks 135, 100: 79, 120: 71, 150: 66 (120 = the existing onset glide window) |
+
+### 13.4 Before / after
+
+Scratch analyser, block 512, gate -35 dB, defaults, Poly allocator for "extra attacks"; before = 0.4.0
+(6489ce7), after = 0.4.1. "Wrong first" = notes whose first note-on has another pitch (in brackets: how many
+of them reach the right pitch by a correction), "wrong ms" = mean time per note in which a wrong pitch sounds.
+
+| Input (MPM) | notes | missed | wrong first (as correction) | wrong first, median length | same note twice (with a 2nd attack) | wrong ms / note | extra attacks (Poly) |
+|---|---|---|---|---|---|---|---|
+| synthetic Tenor, all sets | 1720 | 68 -> **33** | 211 (73) -> 245 (**237**) | 60 -> **30 ms** | 9 (8) -> 25 (**0**) | 6.1 -> **4.8** | 149 -> **10** |
+| synthetic scoops | 143 | 23 -> **3** | 71 (30) -> 88 (86) | 60 -> 31 ms | 0 -> 0 | 21.8 -> 19.9 | 41 -> **2** |
+| synthetic onset transients | 204 | 17 -> **5** | 86 (29) -> 100 (99) | 60 -> 24 ms | 8 (8) -> 23 (**0**) | 23.2 -> **16.6** | 66 -> **1** |
+| synthetic Bass / Baritone / Alto | 999 | 34 -> **12** | 226 (96) -> 246 (240) | 60 -> 31 ms | 11 -> 19 (0) | 11.1 -> **8.5** | 141 -> **6** |
+| real (vocadito_1 + sung set) | 553 | 12 -> 12 | 160 (13) -> 160 (**107**) | 86 -> **65 ms** | 3 -> 3 | 27.5 -> **23.5** | 166 -> **71** |
+
+YIN: synthetic Tenor missed 87 -> 37, wrong first as correction 50 of 193 -> 234 of 241, median 61 -> 34 ms,
+wrong ms 6.3 -> 5.0, extra attacks 158 -> 10; real 169 -> 69 extra attacks, wrong ms 28.2 -> 23.7. Clean
+staccato, consonants, detune, plucks, bumps, breathy, diphthong, soft and coda sets: identical events before
+and after except 4 notes (YIN staccato and pluck: a wrong start corrected 30 ms earlier; a coda note that a
+settle correction had moved to the semitone above now comes back). The "same note twice" count rises on onset dips because a note that dipped and
+stayed on the wrong note before now comes back to it; those are corrections now (one envelope, a pitch blip
+of ~25 ms instead of 60 ms and a second attack). A dip of >= 1 semitone that lasts >= ~30 ms is still
+followed (with Bend Off there is no way to tell it from a scoop without lookahead).
+
+vs-eval (block 512; P / R / F1 note metrics as in 12.3; every note-on counts, corrections too):
+
+| Input | Algo | P | R | F1 | onset ms (matched) |
+|---|---|---|---|---|---|
+| vocadito_1 A1 | MPM | 0.248 -> 0.257 | 0.441 -> 0.475 | 0.317 -> **0.333** | 21.8 -> 22.6 |
+| vocadito_1 A2 | MPM | 0.286 -> 0.294 | 0.469 -> 0.500 | 0.355 -> **0.370** | 20.0 -> 20.8 |
+| vocadito_1 f0 notes | MPM | 0.343 -> 0.339 | 0.554 -> 0.569 | 0.423 -> 0.425 | 28.2 -> 28.4 |
+| vocadito_1 A1 | YIN | 0.238 -> 0.238 | 0.424 -> 0.441 | 0.305 -> 0.309 | 18.1 -> 19.0 |
+| vocadito_1 A2 | YIN | 0.276 -> 0.275 | 0.453 -> 0.469 | 0.343 -> 0.347 | 19.3 -> 20.0 |
+| vocadito_1 f0 notes | YIN | 0.324 -> 0.321 | 0.523 -> 0.538 | 0.400 -> 0.402 | 26.6 -> 26.9 |
+| sung set (494 notes) | MPM / YIN | 0.435 -> 0.433 / 0.387 -> 0.392 | 0.581 -> 0.587 / 0.514 -> 0.526 | 0.497 -> 0.499 / 0.442 -> 0.449 | 33.9 -> 34.0 / 33.8 -> 34.1 |
+| self-test (43 files) | MPM / YIN | 0.829 / 0.824 | 0.834 / 0.828 | **0.832 / 0.826 (identical)** | 17.4 / 17.2 (identical) |
+| short notes, Tenor (1720) | MPM / YIN | 0.794 -> 0.813 / 0.784 -> 0.812 | 0.888 -> 0.941 / 0.871 -> 0.933 | 0.839 -> **0.872** / 0.825 -> **0.869** | 14.2 -> 16.1 / 14.0 -> 15.9 |
+| short notes, Bass / Baritone / Alto (999) | MPM / YIN | 0.674 -> 0.713 / 0.651 -> 0.695 | 0.832 -> 0.909 / 0.791 -> 0.883 | 0.745 -> **0.799** / 0.714 -> **0.778** | 17.7 -> 19.7 / 16.3 -> 19.0 |
+
+The matched-onset mean rises because notes that were missed before are now matched by their correction
+(10-40 ms after the onset); the first note-on is not later.
+
+**Onset latency (note-on from rest).** Unchanged: the onset paths are untouched; latency model and the
+latency test table (11.4) give identical values (Tenor worst 21.44 ms, typical 10.69 ms), self-test rest
+latency 15.37 / 30.94 ms (mean / p95) before and after, clean synthetic sets identical event lists. Over all
+synthetic notes from rest (first note-on without change / correction flag, 2256 notes): MPM median 12.93 ->
+12.85 ms, mean 17.43 -> 16.16 ms; YIN 13.33 -> 13.21 / 18.53 -> 17.50 ms (a few notes that followed a held
+wrong note now start from rest). Latency of the **right** pitch on scooped notes: p90 80 -> 62 ms.
+
+**CPU.** The fast detector now also runs during the first 120 ms of a note: a hop then costs what an idle
+hop above the gate costs (full + fast frame), so the worst block is unchanged (`[pipeline][cpu]`: worst 3.3 %
+voiced / 3.9 % idle at 48 kHz, 128 samples, as before); the mean rises by that share of the time.
+
+### 13.5 Tests
+
+`NoteSegmenterTests.cpp` (`[segmentation][onsetsettling]`): a scoop is corrected once the fast frames are
+steady (not while rising, before minNoteLength, within the span + 2 hops, flag correction and the note-on's
+timing on both events, original velocity, minNoteLength from the original start; 3 rates, legato and
+retrigger); a steady start is confirmed after the confirm span and a later step is a normal change after
+minNoteLength; a short steady stretch inside a scoop does not end the phase; no winner by 2 h keeps the
+guess; a moving pitch (20 st/s), unconfident fast frames, the end of the phase and octave distances never
+correct; a full-window start settles the same way; a change has no onset phase. `VoicePipelineTests.cpp`
+(`[pipeline][segmentation][short]`, audio with a vowel-like source and consonant bursts, YIN / MPM x 3 rates):
+staccato eighths with scoops of 60-150 cents over 20-50 ms and +-25 cents detune (staccato and pluck) end on
+the target within scoop + 30 ms, every later note-on of a sung note is a correction, one envelope start per
+sung note through `synth::VoiceAllocator` in Poly and Mono, block-size invariant events and timings (37, 4096,
+variable); onset dips of 80-120 cents give no second attack; clean staccato, plucks and repeated notes after
+20-80 ms gaps with consonants give exactly one uncorrected note per syllable within the fast-onset latency
+model + 2 ms. The scoop and dip cases fail on 0.4.0 (136 failed checks: unflagged changes, wrong parts of
+60 ms, 2 attacks per note); the clean case passes on both. No existing test changed.

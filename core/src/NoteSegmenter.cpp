@@ -51,6 +51,11 @@ void NoteSegmenter::reset() noexcept
     historyNext = 0;
     noteFromRest = false;
     restStartSample = 0;
+    activeVelocity = 100;
+    onsetPhase = false;
+    onsetPhaseStart = 0;
+    trackCount = 0;
+    trackNext = 0;
     dropoutHeld = false;
     reentryPending = false;
     reentryDeadline = 0;
@@ -156,7 +161,21 @@ void NoteSegmenter::processOnsetFrame (const PitchFrame& frame, int64_t absolute
     lastTiming = {};
 
     if (activeOutputNote >= 0)
+    {
+        // Onset settling (0.4.1): only record the newest pitch here; processFrame() decides (event bound)
+        if (onsetPhase)
+        {
+            const auto tracked = frame.frequencyHz > 0.0f && std::isfinite (frame.frequencyHz)
+                                 && frame.confidence >= onsetTrackConfidence && frame.rmsDb >= gateThresholdDb;
+
+            if (tracked)
+                pushOnsetTrack (frequencyToMidiNote (static_cast<double> (frame.frequencyHz)), absoluteSample);
+            else
+                trackCount = 0; // the steady span must be consecutive
+        }
+
         return;
+    }
 
     // After a false start the fast path waits for a gap (a level below the gate). Such a frame is
     // never fast-strong, so isFastPathBlocked() callers may pass an RMS-only frame (same result).
@@ -215,6 +234,7 @@ void NoteSegmenter::processOnsetFrame (const PitchFrame& frame, int64_t absolute
                onsetTiming (absoluteSample, true, p));
     noteFromRest = true;
     restStartSample = absoluteSample;
+    beginOnsetPhase (absoluteSample);
     provisional = true;
     provisionalStartSample = absoluteSample;
     provisionalSeenStrong = false;
@@ -240,6 +260,9 @@ void NoteSegmenter::setSettings (const VoiceSettings& settings) noexcept
     onsetGlideWindowSamples = toSamples (onsetGlideWindowMs);
     minNoteSamples = toSamples (static_cast<double> (settings.minNoteLengthMs));
     dropoutHoldSamples = toSamples (dropoutHoldMs);
+    onsetSettleMaxSamples = toSamples (onsetSettleMaxMs);
+    onsetSettleSpanSamples = toSamples (onsetSettleSpanMs);
+    onsetConfirmSpanSamples = toSamples (onsetConfirmSpanMs);
     dropoutLevelWindowSamples = toSamples (dropoutLevelWindowMs);
     octaveShift = settings.octaveShift;
     velocitySensitivityPercent = static_cast<double> (settings.velocitySensitivityPercent);
@@ -259,10 +282,135 @@ void NoteSegmenter::processFrame (const PitchFrame& frame, int64_t absoluteSampl
     lastTiming = {};
     pushLevelHistory (frame.rmsDb, absoluteSample);
 
+    if (activeOutputNote >= 0 && onsetPhase && settleOnset (frame, absoluteSample, sampleOffset, bend, out))
+        return;
+
     if (activeOutputNote < 0)
         processIdleFrame (frame, strong, p, absoluteSample, sampleOffset, bend, out);
     else if (! provisional || ! processProvisionalFrame (frame, strong, weak, p, absoluteSample, sampleOffset, bend, out))
         processNoteFrame (frame, weak, p, absoluteSample, sampleOffset, bend, out);
+}
+
+void NoteSegmenter::beginOnsetPhase (int64_t absoluteSample) noexcept
+{
+    onsetPhase = true;
+    onsetPhaseStart = absoluteSample;
+    trackCount = 0;
+}
+
+void NoteSegmenter::pushOnsetTrack (double p, int64_t absoluteSample) noexcept
+{
+    const auto index = static_cast<std::size_t> (trackNext);
+    trackPitch[index] = p;
+    trackSample[index] = absoluteSample;
+    trackNext = trackNext + 1 < onsetTrackFrames ? trackNext + 1 : 0;
+    trackCount = std::min (trackCount + 1, onsetTrackFrames);
+}
+
+bool NoteSegmenter::isOnsetPitchSteady (int64_t absoluteSample, int64_t spanSamples, double maxSlope,
+                                        double& mean) const noexcept
+{
+    // Least squares over (t, p) of the fast frames within spanSamples, t in seconds (newest first)
+    double sumT = 0.0, sumP = 0.0, sumTT = 0.0, sumTP = 0.0;
+    auto lo = std::numeric_limits<double>::max();
+    auto hi = std::numeric_limits<double>::lowest();
+    auto covered = false;
+    int n = 0;
+
+    for (int i = 0; i < trackCount; ++i)
+    {
+        const auto index = static_cast<std::size_t> ((trackNext - 1 - i + onsetTrackFrames) % onsetTrackFrames);
+        const auto age = absoluteSample - trackSample[index];
+
+        if (age > spanSamples)
+        {
+            covered = true; // the consecutive frames reach back over the whole span
+            break;
+        }
+
+        const auto t = -static_cast<double> (age) / sampleRate;
+        const auto v = trackPitch[index];
+        sumT += t;
+        sumP += v;
+        sumTT += t * t;
+        sumTP += t * v;
+        lo = std::min (lo, v);
+        hi = std::max (hi, v);
+        ++n;
+    }
+
+    if (! covered || n < 3 || hi - lo > onsetSteadySpreadSemitones + stickinessEpsilonSemitones)
+        return false;
+
+    const auto count = static_cast<double> (n);
+    const auto denominator = count * sumTT - sumT * sumT;
+    const auto slope = denominator > 0.0 ? (count * sumTP - sumT * sumP) / denominator : 0.0;
+    mean = sumP / count;
+    return std::abs (slope) <= maxSlope;
+}
+
+bool NoteSegmenter::settleOnset (const PitchFrame& frame, int64_t absoluteSample, int sampleOffset, BendGenerator& bend,
+                                 VsEventSink out) noexcept
+{
+    if (absoluteSample - onsetPhaseStart > onsetSettleMaxSamples)
+    {
+        onsetPhase = false;
+        return false;
+    }
+
+    double mean = 0.0;
+
+    if (! isOnsetPitchSteady (absoluteSample, onsetSettleSpanSamples, onsetSettleSlopeSemitonesPerSecond, mean))
+        return false;
+
+    // Where the voice has settled: the change condition of a held note (the candidate wins by 2 h), without
+    // T_min / minNoteLength (the guess was never a note of its own)
+    const auto candidate = quantizer.quantize (mean, activeQuantisedNote);
+    const auto q = static_cast<double> (activeQuantisedNote);
+    const auto advantage = std::abs (mean - q) - std::abs (mean - static_cast<double> (candidate));
+
+    if (candidate == activeQuantisedNote || advantage < 2.0 * hysteresisSemitones - stickinessEpsilonSemitones)
+    {
+        // Settled on the note (or between two notes without a clear winner): once that has lasted the longer
+        // confirm span the onset is over; a short steady stretch may be a pause within a scoop
+        double confirmMean = 0.0;
+
+        if (isOnsetPitchSteady (absoluteSample, onsetConfirmSpanSamples, onsetConfirmSlopeSemitonesPerSecond, confirmMean))
+            onsetPhase = false;
+
+        return false;
+    }
+
+    // Octave and range decisions stay with the full window and the octave guard
+    if (static_cast<double> (std::abs (candidate - activeQuantisedNote)) > onsetMaxCorrectionSemitones
+        || ! isPlayable (candidate + 12 * octaveShift) || ! isPlayable (activeQuantisedNote + 12 * octaveShift))
+        return false;
+
+    correctOnset (candidate, frame, mean, absoluteSample, sampleOffset, bend, out);
+    return true;
+}
+
+void NoteSegmenter::correctOnset (int q, const PitchFrame& frame, double p, int64_t absoluteSample, int sampleOffset,
+                                  BendGenerator& bend, VsEventSink out) noexcept
+{
+    // The same note with another pitch: the timing of its note-on (flag correction), its velocity, its age
+    // (minNoteLength), its start from rest; a provisional note stays provisional (false-start rule)
+    auto correction = noteOnTiming;
+    correction.flags = static_cast<uint8_t> (correction.flags | EventTimingFlags::correction);
+    const auto estimatedStart = noteEstimatedStart;
+    const auto startSample = noteStartSample;
+    const auto restStart = restStartSample;
+    const auto phaseStart = onsetPhaseStart;
+    const auto wasProvisional = provisional;
+    unvoicedFrames = 0;
+    changeNote (q, q + 12 * octaveShift, frame, p, absoluteSample, sampleOffset, bend, out, correction, activeVelocity);
+    noteEstimatedStart = estimatedStart;
+    noteStartSample = startSample;
+    noteFromRest = true;
+    restStartSample = restStart;
+    provisional = wasProvisional;
+    onsetPhase = true; // the voice may still be moving (a long scoop in steps): the phase goes on
+    onsetPhaseStart = phaseStart;
 }
 
 bool NoteSegmenter::processProvisionalFrame (const PitchFrame& frame, bool strong, bool weak, double p,
@@ -314,6 +462,7 @@ bool NoteSegmenter::processProvisionalFrame (const PitchFrame& frame, bool stron
                         correction);
             noteEstimatedStart = provisionalStart; // the corrected note is the provisional one
             noteFromRest = true;                   // ... and still the start from rest (onset glide hold)
+            beginOnsetPhase (provisionalStartSample); // ... whose pitch may still be settling (0.4.1)
             return true; // a normal note from now on (startNote() cleared provisional)
         }
 
@@ -361,6 +510,7 @@ void NoteSegmenter::processIdleFrame (const PitchFrame& frame, bool strong, doub
                onsetTiming (absoluteSample, false, p));
     noteFromRest = true;
     restStartSample = absoluteSample;
+    beginOnsetPhase (absoluteSample);
     fastBlocked = false; // the full window agrees with a voice again: the false start was a one-off
 }
 
@@ -675,6 +825,9 @@ void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float le
     changeTimerRunning = false;
     historyCount = 0;
     noteFromRest = false; // the callers that start from rest set it again
+    onsetPhase = false;   // ... and the onset phase
+    trackCount = 0;
+    activeVelocity = velocity;
     dropoutHeld = false;
     reentryPending = false;
     onsetFrames = 0;
@@ -688,7 +841,8 @@ void NoteSegmenter::startNote (int q, int outputNote, uint8_t velocity, float le
 }
 
 void NoteSegmenter::changeNote (int q, int outputNote, const PitchFrame& frame, double p, int64_t absoluteSample,
-                                int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing) noexcept
+                                int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing,
+                                int velocityOverride) noexcept
 {
     // The old note ends where the new one starts (same estimate)
     lastTiming.noteOff = timing;
@@ -697,8 +851,10 @@ void NoteSegmenter::changeNote (int q, int outputNote, const PitchFrame& frame, 
 
     const auto oldNote = static_cast<uint8_t> (activeOutputNote);
     const auto oldChannel = activeChannel;
-    const auto velocity = velocityFor (static_cast<double> (frame.rmsDb), static_cast<double> (gateThresholdDb),
-                                       velocitySensitivityPercent);
+    const auto velocity = velocityOverride > 0 ? static_cast<uint8_t> (velocityOverride)
+                                               : velocityFor (static_cast<double> (frame.rmsDb),
+                                                              static_cast<double> (gateThresholdDb),
+                                                              velocitySensitivityPercent);
 
     if (! legato)
         out.push (VsEvent::makeNoteOff (sampleOffset, oldChannel, oldNote));
@@ -729,6 +885,7 @@ void NoteSegmenter::endNote (int64_t absoluteSample, int sampleOffset, BendGener
     onsetMaxRmsDb = PitchFrame::silenceDb;
     lastFrameVoiced = false;
     provisional = false;
+    onsetPhase = false;
 }
 
 void NoteSegmenter::flush (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out) noexcept

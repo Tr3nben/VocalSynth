@@ -161,8 +161,9 @@ struct AnalysisFrameInfo
     + NoteSegmenter::maxEventsPerOnsetFrame events (< 1024 for numSamples <= 4096 at any rate >= 8 kHz).
     Why the fast path adds only one onset: per hop interval (previous hop sample, hop sample] at most
     3 events, because a provisional onset (2) inside an interval makes the segmenter ignore the full
-    frame at its end (provisionalIgnoreSamples = 1 hop), the fast path does not run while a note is on,
-    and it cannot fire right after a note ends (not armed); a call can end with one more interval that
+    frame at its end (provisionalIgnoreSamples = 1 hop), fast frames never emit while a note is on (during
+    the onset phase they are only recorded, 0.4.1; the onset correction happens in the full frame), and the
+    fast path cannot fire right after a note ends (not armed); a call can end with one more interval that
     holds only a fast onset. Events that do not fit are dropped.
 
     Real-time safe after prepare(): process(), flush(), reset() and getSnapshot() never allocate, lock or
@@ -179,8 +180,10 @@ public:
     static constexpr int latencyBudgetHops =
         1 + PitchPostProcessor::defaultMedianLength / 2 + (NoteSegmenter::onsetConfirmFrames - 1);
 
-    /** Provisional onsets (docs/M2-DESIGN.md 11): while no note is on, the FastOnsetDetector runs every
-        getFastHopSamples() = max (1, hop / fastHopDivisor) analysis samples (1 ms) on the Framer window. */
+    /** Provisional onsets (docs/M2-DESIGN.md 11): while no note is on, and during the onset phase of a note
+        started from rest (NoteSegmenter::isInOnsetPhase(), 0.4.1 onset settling, docs/M2-DESIGN.md 13), the
+        FastOnsetDetector runs every getFastHopSamples() = max (1, hop / fastHopDivisor) analysis samples
+        (1 ms) on the Framer window. */
     static constexpr int fastHopDivisor = 2;
 
     /** A provisional note that the full window has not confirmed (strong frame) after

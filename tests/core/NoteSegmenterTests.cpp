@@ -2358,3 +2358,250 @@ TEST_CASE ("NoteSegmenter timing: provisional start (fast model), correction and
         CHECK (! a.events.empty());
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// 0.4.1 onset settling (docs/M2-DESIGN.md 13): the newest-sample fast frames correct the onset guess of a
+// note started from rest as soon as the voice has settled, as a flagged correction.
+
+namespace
+{
+
+/** Starts a provisional note with two fast frames at startPitch; the full frames of these hops are held
+    (not voiced yet: the window is still filling, as in the pipeline). Returns the start position. */
+int64_t startProvisional (SegmenterRig& rig, double startPitch)
+{
+    rig.onsetFrame (voicedAt (startPitch, 0.97f));
+    rig.frame (unvoiced (-20.0f));
+    rig.onsetFrame (voicedAt (startPitch, 0.97f));
+    REQUIRE (rig.noteOns().size() == 1);
+    REQUIRE (rig.segmenter.isProvisional());
+    REQUIRE (rig.segmenter.isInOnsetPhase());
+    return rig.noteOns().back().position;
+}
+
+/** One hop: fast frame at fastPitch (newest samples), full frame weak voiced at fullPitch (the lagging
+    window). Returns the events of the full frame and keeps the timing of the call that produced them. */
+std::vector<VsEvent> settleHop (SegmenterRig& rig, double fastPitch, double fullPitch, VsEventTiming* noteOnTiming = nullptr,
+                                VsEventTiming* noteOffTiming = nullptr, float fastConfidence = 0.97f)
+{
+    REQUIRE (rig.onsetFrame (voicedAt (fastPitch, fastConfidence)).empty()); // never emits while a note is on
+    const auto produced = rig.frame (voicedAt (fullPitch, 0.7f));
+
+    if (! produced.empty() && noteOnTiming != nullptr)
+        *noteOnTiming = rig.segmenter.getLastEventTiming().noteOn;
+
+    if (! produced.empty() && noteOffTiming != nullptr)
+        *noteOffTiming = rig.segmenter.getLastEventTiming().noteOff;
+
+    return produced;
+}
+
+double msBetween (const SegmenterRig& rig, int64_t from, int64_t to)
+{
+    return 1000.0 * static_cast<double> (to - from) / rig.sampleRate;
+}
+
+} // namespace
+
+TEST_CASE ("NoteSegmenter 0.4.1: a scoop from below is corrected once the voice settles, as a correction",
+           "[segmentation][onsetsettling]")
+{
+    // Symptom (b) of the 0.4.1 report: a short sung note started on the scoop (62) and changed to the
+    // target (63) only after minNoteLength (60 ms) as an ordinary note change: a second attack in Poly / Mono.
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto legato = GENERATE (false, true);
+    CAPTURE (sr, legato);
+    VoiceSettings s;
+    s.legato = legato;
+    SegmenterRig rig (s, sr);
+    rig.segmenter.setDetectionDelayModel ({ 0.0, 1000, nullptr, nullptr, 0 });
+    const auto start = startProvisional (rig, 62.2);
+    const auto velocity = rig.noteOns().back().event.data2;
+
+    // Rising 62.2 -> 62.95 at 37.5 st/s (too fast to be steady), then steady at 62.95
+    double pitch = 62.2;
+    int guard = 0;
+
+    while (pitch < 62.95 && ++guard < 100)
+    {
+        pitch = std::min (62.95, pitch + 0.075);
+        REQUIRE (settleHop (rig, pitch, pitch - 0.4).empty()); // no correction while the pitch moves
+    }
+
+    const auto steadyFrom = rig.now();
+    VsEventTiming on {}, off {};
+
+    for (int i = 0; i < rig.framesIn (40.0) && rig.noteOns().size() == 1; ++i)
+        settleHop (rig, 62.95, 62.6, &on, &off);
+
+    const auto ons = rig.noteOns();
+    REQUIRE (ons.size() == 2);
+    CHECK (ons[1].event.data1 == 63);
+    CHECK (ons[1].event.data2 == velocity);                                     // the note's velocity
+    CHECK (msBetween (rig, steadyFrom, ons[1].position) <= NoteSegmenter::onsetSettleSpanMs + 4.0 + 1.0e-9);
+    CHECK (msBetween (rig, start, ons[1].position) < static_cast<double> (s.minNoteLengthMs)); // before: >= 60 ms
+    CHECK ((on.flags & EventTimingFlags::correction) != 0);
+    CHECK ((off.flags & EventTimingFlags::correction) != 0);
+    CHECK (on == VsEventTiming { 1000, EventTimingKind::model, EventTimingFlags::correction }); // as the note-on's
+    CHECK (off == on);
+    CHECK (rig.segmenter.getActiveNote() == 63);
+
+    // The phase goes on while the pitch stays (a long scoop may settle in steps), and it ends once the
+    // note has been steady for the confirm span
+    rig.hops (voicedAt (62.95), voicedAt (62.95), rig.framesIn (NoteSegmenter::onsetConfirmSpanMs + 4.0));
+    CHECK_FALSE (rig.segmenter.isInOnsetPhase());
+    CHECK (rig.noteOns().size() == 2);
+
+    // A correction is the same note: minNoteLength counts from the original start
+    rig.frames (unvoiced(), 3 * NoteSegmenter::releaseFrames + rig.framesIn (s.minNoteLengthMs));
+    REQUIRE (rig.noteOffs().size() == 2);
+    CHECK (msBetween (rig, start, rig.noteOffs().back().position) >= static_cast<double> (s.minNoteLengthMs));
+    checkMidiInvariants (rig.events);
+}
+
+TEST_CASE ("NoteSegmenter 0.4.1: onset settling confirms a steady start; later moves are normal changes",
+           "[segmentation][onsetsettling]")
+{
+    VoiceSettings s;
+    SegmenterRig rig (s);
+    const auto start = startProvisional (rig, 62.0);
+
+    SECTION ("steady on the guess for the confirm span: the phase ends, no correction")
+    {
+        rig.hops (voicedAt (62.05, 0.97f), voicedAt (62.05, 0.7f), rig.framesIn (NoteSegmenter::onsetConfirmSpanMs + 4.0));
+        CHECK_FALSE (rig.segmenter.isInOnsetPhase());
+        CHECK (rig.noteOns().size() == 1);
+
+        // A clear step to 63 afterwards: the normal change path (minNoteLength, arrival), flag noteChange
+        VsEventTiming on {};
+
+        for (int i = 0; i < rig.framesIn (120.0) && rig.noteOns().size() == 1; ++i)
+        {
+            rig.onsetFrame (voicedAt (63.0));
+            if (! rig.frame (voicedAt (63.0)).empty())
+                on = rig.segmenter.getLastEventTiming().noteOn;
+        }
+
+        const auto ons = rig.noteOns();
+        REQUIRE (ons.size() == 2);
+        CHECK (ons[1].event.data1 == 63);
+        CHECK (msBetween (rig, start, ons[1].position) >= static_cast<double> (s.minNoteLengthMs));
+        CHECK ((on.flags & EventTimingFlags::correction) == 0);
+    }
+
+    SECTION ("a short steady stretch inside a scoop does not end the phase")
+    {
+        rig.hops (voicedAt (62.1, 0.97f), voicedAt (61.8, 0.7f), rig.framesIn (NoteSegmenter::onsetConfirmSpanMs - 8.0));
+        CHECK (rig.segmenter.isInOnsetPhase());
+        CHECK (rig.noteOns().size() == 1);
+
+        for (double p = 62.2; p < 63.0; p += 0.1)
+            settleHop (rig, p, p - 0.3);
+
+        for (int i = 0; i < rig.framesIn (30.0) && rig.noteOns().size() == 1; ++i)
+            settleHop (rig, 63.0, 62.7);
+
+        REQUIRE (rig.noteOns().size() == 2);
+        CHECK (rig.noteOns()[1].event.data1 == 63);
+        CHECK (msBetween (rig, start, rig.noteOns()[1].position) < static_cast<double> (s.minNoteLengthMs));
+    }
+
+    SECTION ("between two notes without a clear winner (2 h) the guess stays")
+    {
+        for (int i = 0; i < rig.framesIn (NoteSegmenter::onsetSettleMaxMs + 10.0); ++i)
+            settleHop (rig, 62.6, 62.6); // 63 wins by 0.2 < 2 h = 0.4
+
+        CHECK (rig.noteOns().size() == 1);
+        CHECK_FALSE (rig.segmenter.isInOnsetPhase());
+    }
+}
+
+TEST_CASE ("NoteSegmenter 0.4.1: onset settling needs steady, confident fast frames within the onset phase",
+           "[segmentation][onsetsettling]")
+{
+    VoiceSettings s;
+
+    SECTION ("a pitch that keeps moving (glide faster than the slope limit) is never corrected by it")
+    {
+        SegmenterRig rig (s);
+        startProvisional (rig, 62.0);
+
+        // 0.04 st per 2 ms hop = 20 st/s for 50 ms: within the spread over 10 ms (0.2 st) but too steep
+        double p = 62.0;
+
+        for (int i = 0; i < rig.framesIn (50.0); ++i)
+        {
+            p += 0.04;
+            CHECK (settleHop (rig, p, 62.0).empty());
+        }
+    }
+
+    SECTION ("fast frames below onsetTrackConfidence restart the steady span")
+    {
+        SegmenterRig rig (s);
+        startProvisional (rig, 62.2);
+
+        for (int i = 0; i < rig.framesIn (40.0); ++i)
+        {
+            const auto confident = i % 4 != 3; // every 8 ms one weak frame: never 10 ms of consecutive frames
+            CHECK (settleHop (rig, 63.0, 62.0, nullptr, nullptr, confident ? 0.97f : 0.85f).empty());
+        }
+
+        CHECK (rig.noteOns().size() == 1);
+    }
+
+    SECTION ("after onsetSettleMaxMs the onset phase is over")
+    {
+        SegmenterRig rig (s);
+        const auto start = startProvisional (rig, 62.2);
+
+        // Unsteady (alternating) until the phase is over, then steady on 63: no correction from the phase
+        for (int i = 0; rig.segmenter.isInOnsetPhase() && i < 200; ++i)
+            settleHop (rig, i % 2 == 0 ? 62.1 : 62.5, 62.2);
+
+        CHECK (msBetween (rig, start, rig.now()) >= NoteSegmenter::onsetSettleMaxMs);
+        CHECK (msBetween (rig, start, rig.now()) <= NoteSegmenter::onsetSettleMaxMs + 6.0);
+
+        rig.onsetFrame (voicedAt (63.0));
+        rig.frame (voicedAt (62.2, 0.7f));
+        CHECK (rig.noteOns().size() == 1);
+    }
+
+    SECTION ("octave decisions stay with the full window: no correction beyond onsetMaxCorrectionSemitones")
+    {
+        SegmenterRig rig (s);
+        startProvisional (rig, 62.0);
+
+        for (int i = 0; i < rig.framesIn (40.0); ++i)
+            CHECK (settleHop (rig, 74.0, 62.0).empty());
+    }
+
+    SECTION ("a note started by the full window settles the same way")
+    {
+        SegmenterRig rig (s);
+        rig.frame (voicedAt (62.1));
+        REQUIRE (rig.noteOns().size() == 1);
+        REQUIRE_FALSE (rig.segmenter.isProvisional());
+        REQUIRE (rig.segmenter.isInOnsetPhase());
+
+        for (int i = 0; i < rig.framesIn (30.0) && rig.noteOns().size() == 1; ++i)
+        {
+            rig.onsetFrame (voicedAt (60.9, 0.97f));
+            rig.frame (voicedAt (61.3));
+        }
+
+        REQUIRE (rig.noteOns().size() == 2);
+        CHECK (rig.noteOns()[1].event.data1 == 61);
+    }
+
+    SECTION ("a note change (not from rest) has no onset phase")
+    {
+        SegmenterRig rig (s);
+        rig.frame (voicedAt (62.0));
+        rig.hops (voicedAt (62.0), voicedAt (62.0), rig.framesIn (NoteSegmenter::onsetConfirmSpanMs + 4.0));
+        REQUIRE_FALSE (rig.segmenter.isInOnsetPhase());
+        rig.framesFor (voicedAt (64.0), 100.0);
+        REQUIRE (rig.noteOns().size() == 2);
+        CHECK_FALSE (rig.segmenter.isInOnsetPhase());
+    }
+}

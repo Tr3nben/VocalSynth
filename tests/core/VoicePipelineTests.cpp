@@ -1,6 +1,7 @@
 #include "vocalsynth/VoicePipeline.h"
 
 #include "vocalsynth/Pitch.h"
+#include "vocalsynth/synth/VoiceAllocator.h"
 
 #include "TestSignals.h"
 
@@ -2368,5 +2369,331 @@ TEST_CASE ("Pipeline timing: settings flushes and flush() are kind none; a low t
         const auto& t = r.timings[static_cast<std::size_t> (on - r.events.begin())];
         CHECK (t.kind == EventTimingKind::measured);
         CHECK (std::abs (t.estimate - onset) <= hop);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// 0.4.1 short notes (docs/M2-DESIGN.md 13): staccato / plucky sung notes with consonant onsets, scoops and
+// onset transients. User report: a short wrong note before the right one, the same note twice in quick
+// succession, jumping.
+
+namespace
+{
+
+/** One sung short note: pitch target (MIDI, with detune), an onset transient (scoop from below or a dip
+    that comes back), envelope (staccato with a 15 ms release, or a pluck decaying with tau 70 ms) and an
+    optional consonant (12 ms noise burst before the voiced onset). */
+struct SungNote
+{
+    double onsetSeconds = 0.0;
+    double seconds = 0.15;
+    double target = 57.0;
+    double scoopCents = 0.0; ///< starts this far below the target, reaches it after transientMs
+    double dipCents = 0.0;   ///< starts on the target, dips this far (half sine over transientMs)
+    double transientMs = 0.0;
+    bool pluck = false;
+    bool consonant = true;
+};
+
+/** Harmonics 1..10 with a falling tilt and a broad emphasis on harmonics 2-4 (vowel-like). */
+double sungShape (double phase)
+{
+    constexpr double weights[] = { 1.0, 0.9, 0.8, 0.55, 0.3, 0.2, 0.13, 0.09, 0.06, 0.04 };
+    double v = 0.0;
+
+    for (std::size_t h = 0; h < std::size (weights); ++h)
+        v += weights[h] * std::sin (2.0 * std::numbers::pi * static_cast<double> (h + 1) * phase);
+
+    return 0.35 * v;
+}
+
+test::Signal sungPhrase (double sr, std::span<const SungNote> notes, double totalSeconds)
+{
+    auto out = test::silence (sr, totalSeconds);
+    uint64_t seed = 41;
+
+    for (const auto& n : notes)
+    {
+        const auto transient = 0.001 * n.transientMs;
+        const auto pitchAt = [&n, transient] (double t)
+        {
+            if (transient <= 0.0 || t >= transient)
+                return n.target;
+
+            return n.target - 0.01 * n.scoopCents * (1.0 - t / transient)
+                   - 0.01 * n.dipCents * std::sin (std::numbers::pi * t / transient);
+        };
+        auto tone = test::oscillator (sr, n.seconds, 0.25f, [&] (double t) { return midiNoteToFrequency (pitchAt (t)); }, sungShape);
+
+        for (std::size_t i = 0; i < tone.size(); ++i)
+        {
+            const auto t = static_cast<double> (i) / sr;
+            const auto attack = std::min (1.0, t / 0.004);
+            const auto body = n.pluck ? std::exp (-t / 0.07) : std::clamp ((n.seconds - t) / 0.015, 0.0, 1.0);
+            tone[i] = static_cast<float> (static_cast<double> (tone[i]) * attack * body);
+        }
+
+        const auto at = test::numSamplesFor (n.onsetSeconds, sr);
+
+        for (std::size_t i = 0; i < tone.size() && at + i < out.size(); ++i)
+            out[at + i] += tone[i];
+
+        if (n.consonant)
+        {
+            // "t" / "d": a high-passed noise burst right before the voice
+            const auto burst = test::whiteNoise (sr, 0.012, 0.05f, ++seed);
+            const auto from = at - std::min (at, burst.size());
+            float previous = 0.0f;
+
+            for (std::size_t i = 0; i < burst.size() && from + i < at; ++i)
+            {
+                out[from + i] += burst[i] - previous;
+                previous = burst[i];
+            }
+        }
+    }
+
+    return out;
+}
+
+/** The note-ons of a timed run with their correction flags, grouped by sung note: every note-on from
+    5 ms before a sung onset to the next sung onset belongs to that note. */
+struct SungNoteResult
+{
+    std::vector<int> notes;              ///< note numbers in order
+    std::vector<bool> corrections;       ///< per note-on: EventTimingFlags::correction
+    std::vector<int64_t> positions;
+};
+
+std::vector<SungNoteResult> groupBySungNote (const TimingRun& run, std::span<const SungNote> sung, double sr)
+{
+    std::vector<SungNoteResult> result (sung.size());
+
+    for (std::size_t i = 0; i < run.events.size(); ++i)
+    {
+        const auto& e = run.events[i];
+
+        if (e.event.type != VsEventType::noteOn)
+            continue;
+
+        for (std::size_t k = sung.size(); k-- > 0;)
+        {
+            const auto from = static_cast<int64_t> (test::numSamplesFor (sung[k].onsetSeconds - 0.005, sr));
+
+            if (e.position >= from)
+            {
+                result[k].notes.push_back (e.event.data1);
+                result[k].corrections.push_back ((run.timings[i].flags & EventTimingFlags::correction) != 0);
+                result[k].positions.push_back (e.position);
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
+/** Note-on commands that start an envelope (start / steal) in a synth::VoiceAllocator fed with the run
+    (Poly: every unflagged connected change is a new voice; docs/SYNTH-DESIGN.md 10.1). */
+int synthAttacks (const TimingRun& run, double sr, synth::PlayMode mode)
+{
+    synth::VoiceAllocator allocator;
+    allocator.prepare (sr);
+    synth::AllocatorSettings settings;
+    settings.playMode = mode;
+    std::array<bool, synth::VoiceAllocator::maxVoices> active {};
+    active.fill (true);
+    int attacks = 0;
+    std::size_t i = 0;
+
+    while (i < run.events.size())
+    {
+        std::vector<synth::NoteInput> group;
+        const auto position = run.events[i].position;
+
+        for (; i < run.events.size() && run.events[i].position == position; ++i)
+        {
+            const auto& e = run.events[i].event;
+
+            if (e.type == VsEventType::noteOn || e.type == VsEventType::noteOff)
+                group.push_back ({ e.type == VsEventType::noteOn, e.data1, e.data2,
+                                   (run.timings[i].flags & EventTimingFlags::correction) != 0 });
+        }
+
+        if (group.empty())
+            continue;
+
+        synth::VoiceCommandList commands;
+        allocator.processGroup (group, position, settings, active, commands);
+
+        for (const auto& c : commands.view())
+            attacks += c.type == synth::VoiceCommandType::start || c.type == synth::VoiceCommandType::steal ? 1 : 0;
+    }
+
+    return attacks;
+}
+
+/** Staccato eighths at 140 BPM (214 ms grid, 150 ms notes), Tenor, with consonants. */
+std::vector<SungNote> staccato (std::initializer_list<std::tuple<double, double, double, double>> targetScoopDipMs,
+                                bool pluck = false)
+{
+    std::vector<SungNote> notes;
+    double t = 0.15;
+
+    for (const auto& [target, scoop, dip, ms] : targetScoopDipMs)
+    {
+        SungNote n;
+        n.onsetSeconds = t;
+        n.target = target;
+        n.scoopCents = scoop;
+        n.dipCents = dip;
+        n.transientMs = ms;
+        n.pluck = pluck;
+        notes.push_back (n);
+        t += 0.214;
+    }
+
+    return notes;
+}
+
+} // namespace
+
+TEST_CASE ("Pipeline 0.4.1: short scooped notes end on the target with one attack each, block-size invariant",
+           "[pipeline][segmentation][short]")
+{
+    // Symptom (b): the scoop's note started the note and the target came as an ordinary note change after
+    // minNoteLength (60 ms): two different notes in quick succession, a second attack in Poly / Mono.
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto pluck = GENERATE (false, true);
+    CAPTURE (algorithmName (algorithm), sr, pluck);
+
+    // target (detuned by up to +-25 cents), scoop cents, -, scoop ms
+    const auto sung = staccato ({ { 57.0, 60.0, 0.0, 20.0 }, { 59.2, 100.0, 0.0, 30.0 }, { 60.0, 150.0, 0.0, 40.0 },
+                                  { 56.8, 80.0, 0.0, 50.0 }, { 62.15, 120.0, 0.0, 40.0 }, { 64.0, 100.0, 0.0, 25.0 } },
+                                pluck);
+    const auto input = sungPhrase (sr, sung, 1.6);
+    const auto s = settingsFor (VoiceRange::tenor, algorithm);
+    const auto run = runTimed (input, sr, s, 512);
+    const auto groups = groupBySungNote (run, sung, sr);
+
+    REQUIRE (run.mismatches == 0);
+    CHECK (midiInvariantViolations (run.events) == 0);
+
+    for (std::size_t k = 0; k < sung.size(); ++k)
+    {
+        const auto& g = groups[k];
+        const auto target = static_cast<int> (std::lround (sung[k].target));
+        CAPTURE (k, g.notes, g.corrections);
+        REQUIRE_FALSE (g.notes.empty());
+        CHECK (g.notes.back() == target);         // ends on the target
+        CHECK (g.notes.size() <= 3);
+
+        for (std::size_t j = 1; j < g.notes.size(); ++j)
+            CHECK (g.corrections[j]);              // every later note-on corrects the onset guess
+
+        // The target sounds within the scoop + 30 ms (fast span 10 ms + detection), not after minNoteLength
+        const auto onset = static_cast<int64_t> (test::numSamplesFor (sung[k].onsetSeconds, sr));
+        CHECK (static_cast<double> (g.positions.back() - onset) * 1000.0 / sr <= sung[k].transientMs + 30.0);
+    }
+
+    // One envelope start per sung note in Poly and Mono (a correction moves the pitch of the same voice)
+    CHECK (synthAttacks (run, sr, synth::PlayMode::poly) == static_cast<int> (sung.size()));
+    CHECK (synthAttacks (run, sr, synth::PlayMode::mono) == static_cast<int> (sung.size()));
+
+    for (const auto block : { 37, 4096, 0 })
+    {
+        CAPTURE (block);
+        const auto other = runTimed (input, sr, s, block);
+        CHECK (other.events == run.events);
+        CHECK (other.timings == run.timings);
+    }
+}
+
+TEST_CASE ("Pipeline 0.4.1: an onset dip back to the note gives no second attack of the same note",
+           "[pipeline][segmentation][short]")
+{
+    // Symptom (a): the note started right, a full frame during the dip corrected it to the semitone below
+    // and the normal path came back to the first note after minNoteLength: the same note twice.
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    CAPTURE (algorithmName (algorithm), sr);
+
+    const auto sung = staccato ({ { 64.0, 0.0, 100.0, 40.0 }, { 59.0, 0.0, 120.0, 50.0 }, { 62.0, 0.0, 80.0, 30.0 },
+                                  { 57.1, 0.0, 100.0, 60.0 } });
+    const auto input = sungPhrase (sr, sung, 1.1);
+    const auto s = settingsFor (VoiceRange::tenor, algorithm);
+    const auto run = runTimed (input, sr, s, 512);
+    const auto groups = groupBySungNote (run, sung, sr);
+    REQUIRE (run.mismatches == 0);
+    CHECK (midiInvariantViolations (run.events) == 0);
+
+    for (std::size_t k = 0; k < sung.size(); ++k)
+    {
+        const auto& g = groups[k];
+        CAPTURE (k, g.notes, g.corrections);
+        REQUIRE_FALSE (g.notes.empty());
+        CHECK (g.notes.back() == static_cast<int> (std::lround (sung[k].target)));
+        CHECK (g.notes.size() <= 3);
+
+        for (std::size_t j = 1; j < g.notes.size(); ++j)
+            CHECK (g.corrections[j]);
+
+        // A wrong pitch lasts at most the dip + 30 ms
+        if (g.notes.size() > 1)
+        {
+            const auto onset = static_cast<int64_t> (test::numSamplesFor (sung[k].onsetSeconds, sr));
+            CHECK (static_cast<double> (g.positions.back() - onset) * 1000.0 / sr <= sung[k].transientMs + 30.0);
+        }
+    }
+
+    CHECK (synthAttacks (run, sr, synth::PlayMode::poly) == static_cast<int> (sung.size()));
+}
+
+TEST_CASE ("Pipeline 0.4.1: clean staccato, plucks and repeated notes: one note each, no corrections, fast onsets",
+           "[pipeline][segmentation][short]")
+{
+    // Clean onsets must keep the 0.2.1 latency and give exactly one note per syllable ("da da da"), also
+    // for the same pitch after 20-80 ms gaps with a consonant in the gap.
+    const auto algorithm = GENERATE (PitchAlgorithm::yin, PitchAlgorithm::mpm);
+    const auto sr = GENERATE (44100.0, 48000.0, 96000.0);
+    const auto pluck = GENERATE (false, true);
+    CAPTURE (algorithmName (algorithm), sr, pluck);
+
+    std::vector<SungNote> sung;
+    double t = 0.15;
+
+    for (const auto& [target, gapMs] : { std::pair { 57.0, 80.0 }, std::pair { 57.0, 40.0 }, std::pair { 57.0, 20.0 },
+                                         std::pair { 60.0, 60.0 }, std::pair { 59.2, 60.0 }, std::pair { 62.0, 30.0 },
+                                         std::pair { 62.0, 50.0 } })
+    {
+        SungNote n;
+        n.onsetSeconds = t;
+        n.seconds = 0.12;
+        n.target = target;
+        n.pluck = pluck;
+        sung.push_back (n);
+        t += n.seconds + 0.001 * gapMs;
+    }
+
+    const auto input = sungPhrase (sr, sung, t + 0.2);
+    const auto run = runTimed (input, sr, settingsFor (VoiceRange::tenor, algorithm), 512);
+    const auto groups = groupBySungNote (run, sung, sr);
+    REQUIRE (run.mismatches == 0);
+    CHECK (midiInvariantViolations (run.events) == 0);
+
+    for (std::size_t k = 0; k < sung.size(); ++k)
+    {
+        const auto& g = groups[k];
+        CAPTURE (k, g.notes, g.corrections);
+        REQUIRE (g.notes.size() == 1);
+        CHECK (g.notes[0] == static_cast<int> (std::lround (sung[k].target)));
+        CHECK_FALSE (g.corrections[0]);
+
+        // The provisional path: within its model at the sung pitch + 2 ms (the consonant before the voice
+        // and the 4 ms attack), as in 0.4.0
+        const auto onset = static_cast<int64_t> (test::numSamplesFor (sung[k].onsetSeconds, sr));
+        const auto model = VoicePipeline::computeFastOnsetLatencyMs (sr, VoiceRange::tenor, midiNoteToFrequency (sung[k].target));
+        CHECK (static_cast<double> (g.positions[0] - onset) * 1000.0 / sr <= model + 2.0);
     }
 }

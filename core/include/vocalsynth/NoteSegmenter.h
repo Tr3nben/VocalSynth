@@ -131,6 +131,27 @@ struct StickinessParams
       as the gap, a noise floor just below the gate kept the fast path off for the whole session after
       one short blip.)
 
+    Onset settling (0.4.1, docs/M2-DESIGN.md 13): the first guess of a note started from rest (provisional
+    or by the full window) is often a scoop into the note, an onset transient or an unsteady attack; the
+    normal change path then kept the wrong note for minNoteLength (and T_min / arrival / glide hold): a
+    short wrong note before the right one, as a real note change (a second attack in Poly / Mono). So for
+    up to onsetSettleMaxMs after the start from rest (onset phase) the pipeline keeps passing the newest-
+    sample FastOnsetDetector frames, which processOnsetFrame() records (consecutive frames with confidence
+    >= onsetTrackConfidence and rmsDb >= gate; never emits). On each full-window frame (processFrame, before
+    everything else) the newest onsetSettleSpanMs of them decide, if they are steady (spread <=
+    onsetSteadySpreadSemitones, |least-squares slope| <= onsetSettleSlopeSemitonesPerSecond):
+    - their mean pitch m has a candidate quantize (m, q) that wins by 2 h (the stickiness change condition,
+      without T_min and minNoteLength: the guess was never a note of its own), within
+      onsetMaxCorrectionSemitones: the note is CORRECTED to it (legato/retrigger order, timing of the
+      original note-on with flag correction, the original velocity, age and start from rest; a provisional
+      note stays provisional). The phase goes on (a long scoop may settle in steps);
+    - otherwise, once the frames have also been steady over onsetConfirmSpanMs (slope <=
+      onsetConfirmSlopeSemitonesPerSecond), the note is confirmed and the phase ends; a shorter steady
+      stretch on the guess may be a pause within a scoop.
+    The phase also ends at onsetSettleMaxMs, at any other note change and at the note end. A synth treats
+    the flagged change as a correction (pitch jump, no new attack, docs/SYNTH-DESIGN.md 10.2). Octave and
+    range decisions stay with the full window and the octave guard.
+
     Event order at one sample (binding):
     - note start:            bend.noteStarted, note-on
     - retrigger change:      note-off (old), bend.noteStarted (new q), note-on (new)     [legato == false]
@@ -204,6 +225,18 @@ public:
         at the pipeline's 2 ms hop twice over. */
     static constexpr int pitchHistoryFrames = 32;
 
+    // Onset settling (0.4.1, see class comment and docs/M2-DESIGN.md 13)
+    static constexpr double onsetSettleMaxMs = onsetGlideHoldMs;            ///< onset phase after a start from rest
+    static constexpr double onsetSettleSpanMs = 10.0;                       ///< steady span that corrects the guess
+    static constexpr double onsetConfirmSpanMs = 20.0;                      ///< steady span that confirms it (phase ends)
+    static constexpr double onsetSteadySpreadSemitones = 0.25;              ///< max - min of a steady span
+    static constexpr double onsetSettleSlopeSemitonesPerSecond = 12.0;      ///< |least-squares slope| of a correcting span
+    static constexpr double onsetConfirmSlopeSemitonesPerSecond = 6.0;      ///< ... of a confirming span
+    static constexpr float onsetTrackConfidence = 0.9f;                     ///< fast frames below: the span restarts
+    static constexpr double onsetMaxCorrectionSemitones = 5.0;              ///< farther: full window / octave guard decide
+    /** Fast-frame history: covers onsetConfirmSpanMs (+ one older frame) at the pipeline's 1 ms fast hop with room. */
+    static constexpr int onsetTrackFrames = 32;
+
     /** Timing of the events emitted by the most recent processFrame / processOnsetFrame / flush call
         (M3, see class comment): noteOn = a note-on of this call and a bend sent right before it (note
         start bend); noteOff = a note-off of this call and a bend centre sent right after it; update = any
@@ -276,10 +309,16 @@ public:
     void setOnsetTiming (int64_t provisionalIgnoreSamples, int64_t provisionalTimeoutSamples,
                          int64_t provisionalSettleSamples = 0) noexcept;
 
-    /** One FastOnsetDetector frame (only used while idle, see class comment). Same arguments as
-        processFrame(). Emits at most maxEventsPerOnsetFrame events. */
+    /** One FastOnsetDetector frame: while idle it may start a provisional note, during the onset phase it is
+        only recorded (see class comment), otherwise ignored. Same arguments as processFrame(). Emits at most
+        maxEventsPerOnsetFrame events (none while a note is on). */
     void processOnsetFrame (const PitchFrame& frame, int64_t absoluteSample, int sampleOffset, BendGenerator& bend,
                             VsEventSink out) noexcept;
+
+    /** True while the active note started from rest and its pitch has not settled yet (onset settling, see
+        class comment): the caller keeps passing FastOnsetDetector frames to processOnsetFrame(), which only
+        records them then (never emits). */
+    bool isInOnsetPhase() const noexcept { return onsetPhase; }
 
     /** True while the active note was started by processOnsetFrame() and not yet confirmed. */
     bool isProvisional() const noexcept { return provisional; }
@@ -328,7 +367,19 @@ private:
     /** max - min of the frame levels within windowSamples up to absoluteSample (0 without frames). */
     float levelRange (int64_t absoluteSample, int64_t windowSamples) const noexcept;
     void changeNote (int q, int outputNote, const PitchFrame& frame, double p, int64_t absoluteSample,
-                     int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing) noexcept;
+                     int sampleOffset, BendGenerator& bend, VsEventSink out, const VsEventTiming& timing,
+                     int velocityOverride = -1) noexcept;
+    /** Onset settling: corrects or confirms the onset guess from the fast-frame history; true if it changed the note. */
+    bool settleOnset (const PitchFrame& frame, int64_t absoluteSample, int sampleOffset, BendGenerator& bend,
+                      VsEventSink out) noexcept;
+    /** True if the consecutive fast frames cover spanSamples before absoluteSample, spread <=
+        onsetSteadySpreadSemitones and |least-squares slope| <= maxSlope; mean = their mean pitch. */
+    bool isOnsetPitchSteady (int64_t absoluteSample, int64_t spanSamples, double maxSlope, double& mean) const noexcept;
+    /** Changes the onset guess to q as a correction (see class comment). */
+    void correctOnset (int q, const PitchFrame& frame, double p, int64_t absoluteSample, int sampleOffset,
+                       BendGenerator& bend, VsEventSink out) noexcept;
+    void beginOnsetPhase (int64_t absoluteSample) noexcept;
+    void pushOnsetTrack (double p, int64_t absoluteSample) noexcept;
     void endNote (int64_t absoluteSample, int sampleOffset, BendGenerator& bend, VsEventSink out,
                   const VsEventTiming& timing) noexcept;
 
@@ -393,6 +444,18 @@ private:
     std::array<int64_t, pitchHistoryFrames> historySample {};
     int historyCount = 0;
     int historyNext = 0;                        ///< ring index of the next push
+    uint8_t activeVelocity = 100;               ///< note-on velocity of the active note
+
+    // Onset settling (0.4.1)
+    bool onsetPhase = false;                    ///< see isInOnsetPhase()
+    int64_t onsetPhaseStart = 0;                ///< the start from rest (corrections keep it)
+    int64_t onsetSettleMaxSamples = 0;
+    int64_t onsetSettleSpanSamples = 0;
+    int64_t onsetConfirmSpanSamples = 0;
+    std::array<double, onsetTrackFrames> trackPitch {};    ///< consecutive tracked fast-frame pitches (ring)
+    std::array<int64_t, onsetTrackFrames> trackSample {};
+    int trackCount = 0;
+    int trackNext = 0;
     bool noteFromRest = false;                  ///< the active note started from rest (not by a change)
     int64_t restStartSample = 0;                ///< its start (a provisional correction keeps it)
 
