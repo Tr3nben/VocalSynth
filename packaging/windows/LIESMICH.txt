@@ -8,7 +8,7 @@ Inhalt dieses Pakets
   VST3\                      VocalSynth FX.vst3, VocalSynth Instrument.vst3
   CLAP\                      VocalSynth FX.clap, VocalSynth Instrument.clap
   Standalone\                VocalSynth FX.exe (zum Testen ohne DAW)
-  SYNTH-TESTING.md           Anleitung: den eigenen Synth testen (0.4.0)
+  SYNTH-TESTING.md           Anleitung: den eigenen Synth testen (0.4.1)
   M3-TESTING.md              Anleitung: Aufnahme und Drag & Drop testen (0.3.1)
   M2-TESTING.md              Anleitung: Singen -> MIDI in FL Studio testen
   FL-ROUTING.md              Anleitung zum MIDI-Routing-Test (Version 0.1.0)
@@ -30,7 +30,12 @@ Installation
    FL Studio durchsucht auch Unterordner, der Ordner "VocalSynth" wird also
    gefunden.
 
-Was ist das für eine Version? (0.4.0 "Eigener Klang")
+Was ist das für eine Version? (0.4.1)
+
+Neu in 0.4.1: 16 neue Presets für Trap und R&B (im Preset-Menü unter
+"Genres"), und kurze gesungene Töne lösen seltener Doppel- oder Vortöne aus.
+
+(0.4.0 "Eigener Klang")
 -----------------------------------------------------
 Neu in 0.4.0: VocalSynth hat einen eigenen Wavetable-Synth. Du singst,
 VocalSynth macht daraus Noten (wie bisher) und spielt sie direkt im
