@@ -401,7 +401,268 @@ constexpr FactoryPresetValue glitch[] {
     { "reverbOn", on }, { "reverbMix", 15.0f },
 };
 
-constexpr std::array<FactoryPreset, 24> presets { {
+//==============================================================================
+// 0.4.1: Trap (indices 24..31, tag "trap"), grouped by category like the list above
+
+constexpr FactoryPresetValue trapFlute[] {
+    { "glideTime", 70.0f },
+    { "ampGain", -5.3f },
+    { "oscAPosition", 18.0f }, { "oscAOctave", 1.0f },
+    { "oscBOn", on }, { "oscBPosition", 100.0f }, { "oscBLevel", 20.0f },
+    { "noiseLevel", 5.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 4500.0f }, { "filterResonance", 10.0f }, { "filterKeytrack", 60.0f },
+    { "env1Attack", 45.0f }, { "env1Release", 220.0f },
+    { "lfo1Rate", 5.2f }, { "lfo1Retrig", on }, { "lfo1Fade", 600.0f },
+    // Breath: the sung "hh" / airy voice blows noise into the tone; louder singing overblows towards the triangle
+    { "mod1Source", e (ModSource::voiceNoisiness) }, { "mod1Dest", e (ModDest::noiseLevel) }, { "mod1Amount", 35.0f },
+    { "mod2Source", e (ModSource::voiceLevel) }, { "mod2Dest", e (ModDest::oscAPosition) }, { "mod2Amount", 15.0f },
+    { "mod3Source", e (ModSource::lfo1) }, { "mod3Dest", e (ModDest::pitch) }, { "mod3Amount", 1.2f },
+    { "mod4Source", e (ModSource::voiceBrightness) }, { "mod4Dest", e (ModDest::filterCutoff) }, { "mod4Amount", 12.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_4) }, { "delayFeedback", 30.0f }, { "delayPingPong", on },
+    { "delayMix", 15.0f },
+    { "reverbOn", on }, { "reverbSize", 65.0f },
+};
+
+constexpr FactoryPresetValue brassStab[] {
+    { "playMode", mono },
+    { "ampGain", 3.3f },
+    { "oscAUnison", 3.0f }, { "oscADetune", 16.0f }, { "oscASpread", 40.0f }, { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 62.0f }, { "oscBOctave", -1.0f }, { "oscBLevel", 40.0f },
+    { "filterCutoff", 600.0f }, { "filterResonance", 15.0f }, { "filterKeytrack", 50.0f }, { "filterEnvAmount", 45.0f },
+    { "env1Attack", 3.0f }, { "env1Decay", 600.0f }, { "env1Sustain", 35.0f }, { "env1Release", 150.0f },
+    { "env2Attack", 0.0f }, { "env2Decay", 350.0f }, { "env2Sustain", 20.0f },
+    { "mod1Source", e (ModSource::voiceLevel) }, { "mod1Dest", e (ModDest::filterCutoff) }, { "mod1Amount", 30.0f },
+    { "mod2Source", e (ModSource::velocity) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 10.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_8) }, { "delayFeedback", 20.0f }, { "delayMix", 10.0f },
+    { "reverbOn", on }, { "reverbSize", 40.0f }, { "reverbMix", 15.0f },
+};
+
+constexpr FactoryPresetValue glide808[] {
+    { "glideTime", 110.0f },
+    { "ampGain", -2.9f },
+    { "oscAPosition", 4.0f }, { "oscAOctave", -1.0f }, { "oscALevel", 60.0f },
+    { "subLevel", 55.0f },
+    { "filterCutoff", 1800.0f }, { "filterDrive", 9.0f }, { "filterKeytrack", 40.0f },
+    { "env1Attack", 1.0f }, { "env1Decay", 2500.0f }, { "env1Sustain", 55.0f }, { "env1Release", 250.0f },
+    // The 808 "punch": a short pitch drop on every new note; connected (sung) slides keep it off (Legato)
+    { "env3Attack", 0.0f }, { "env3Decay", 80.0f },
+    { "mod1Source", e (ModSource::env3) }, { "mod1Dest", e (ModDest::pitch) }, { "mod1Amount", 15.0f },
+    // Louder singing drives the sine harder: harmonics that small speakers can play
+    { "mod2Source", e (ModSource::voiceLevel) }, { "mod2Dest", e (ModDest::filterDrive) }, { "mod2Amount", 25.0f },
+    { "mod3Source", e (ModSource::voiceBrightness) }, { "mod3Dest", e (ModDest::filterCutoff) }, { "mod3Amount", 15.0f },
+};
+
+constexpr FactoryPresetValue distorted808[] {
+    { "glideTime", 90.0f },
+    { "ampGain", 0.5f },
+    { "oscAPosition", 8.0f }, { "oscAOctave", -1.0f }, { "oscALevel", 65.0f },
+    { "subLevel", 45.0f },
+    { "filterCutoff", 2600.0f }, { "filterResonance", 10.0f }, { "filterDrive", 20.0f }, { "filterKeytrack", 30.0f },
+    { "env1Attack", 1.0f }, { "env1Decay", 3000.0f }, { "env1Sustain", 60.0f },
+    { "env3Attack", 0.0f }, { "env3Decay", 50.0f },
+    { "mod1Source", e (ModSource::env3) }, { "mod1Dest", e (ModDest::pitch) }, { "mod1Amount", 20.0f },
+    { "mod2Source", e (ModSource::voiceLevel) }, { "mod2Dest", e (ModDest::filterDrive) }, { "mod2Amount", 15.0f },
+    { "mod3Source", e (ModSource::voiceBrightness) }, { "mod3Dest", e (ModDest::filterCutoff) }, { "mod3Amount", 20.0f },
+};
+
+constexpr FactoryPresetValue darkAtmos[] {
+    { "playMode", poly }, { "ampVelocity", 30.0f },
+    { "ampGain", -8.6f },
+    { "oscAPosition", 40.0f }, { "oscALevel", 55.0f }, { "oscAUnison", 4.0f }, { "oscADetune", 22.0f },
+    { "oscASpread", 85.0f }, { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 30.0f }, { "oscBOctave", -1.0f }, { "oscBLevel", 35.0f }, { "oscBUnison", 2.0f },
+    { "oscBDetune", 12.0f }, { "oscBPhaseRand", 100.0f },
+    { "filterCutoff", 900.0f }, { "filterResonance", 20.0f }, { "filterKeytrack", 20.0f },
+    { "env1Attack", 1200.0f }, { "env1Decay", 2000.0f }, { "env1Sustain", 85.0f }, { "env1Release", 3000.0f },
+    { "lfo1Shape", e (LfoShape::smoothRandom) }, { "lfo1Rate", 0.3f },
+    { "lfo2Rate", 0.1f },
+    { "mod1Source", e (ModSource::lfo1) }, { "mod1Dest", e (ModDest::oscAPosition) }, { "mod1Amount", 30.0f },
+    { "mod2Source", e (ModSource::lfo2) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 8.0f },
+    { "mod3Source", e (ModSource::voiceBrightness) }, { "mod3Dest", e (ModDest::filterCutoff) }, { "mod3Amount", 25.0f },
+    { "mod4Source", e (ModSource::voiceNoisiness) }, { "mod4Dest", e (ModDest::noiseLevel) }, { "mod4Amount", 12.0f },
+    { "mod5Source", e (ModSource::voiceLevel) }, { "mod5Dest", e (ModDest::oscBLevel) }, { "mod5Amount", 20.0f },
+    { "chorusOn", on }, { "chorusMix", 30.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_2) }, { "delayFeedback", 50.0f }, { "delayPingPong", on },
+    { "delayMix", 20.0f },
+    { "reverbOn", on }, { "reverbSize", 90.0f }, { "reverbDamping", 65.0f }, { "reverbMix", 45.0f },
+};
+
+constexpr FactoryPresetValue trapBell[] {
+    { "playMode", poly }, { "ampVelocity", 40.0f },
+    { "ampGain", -0.2f },
+    { "oscAPosition", 35.0f }, { "oscAOctave", 1.0f }, { "oscALevel", 65.0f }, { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 0.0f }, { "oscBOctave", 1.0f }, { "oscBLevel", 25.0f }, { "oscBPhaseRand", 100.0f },
+    { "env1Attack", 0.0f }, { "env1Decay", 1400.0f }, { "env1Sustain", 0.0f }, { "env1Release", 900.0f },
+    { "env3Attack", 0.0f }, { "env3Decay", 400.0f },
+    // The bell table darkens along its position: Env 3 starts every strike bright, a bright voice keeps it bright
+    { "mod1Source", e (ModSource::env3) }, { "mod1Dest", e (ModDest::oscAPosition) }, { "mod1Amount", -25.0f },
+    { "mod2Source", e (ModSource::voiceBrightness) }, { "mod2Dest", e (ModDest::oscAPosition) }, { "mod2Amount", -20.0f },
+    { "mod3Source", e (ModSource::voiceNoisiness) }, { "mod3Dest", e (ModDest::delayMix) }, { "mod3Amount", 20.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_8D) }, { "delayPingPong", on }, { "delayMix", 20.0f },
+    { "reverbOn", on }, { "reverbSize", 55.0f }, { "reverbMix", 22.0f },
+};
+
+constexpr FactoryPresetValue darkPluck[] {
+    { "playMode", poly },
+    { "ampGain", 0.1f },
+    { "oscAPosition", 40.0f }, { "oscALevel", 65.0f }, { "oscAUnison", 2.0f }, { "oscADetune", 10.0f },
+    { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 62.0f }, { "oscBOctave", -1.0f }, { "oscBLevel", 20.0f }, { "oscBPhaseRand", 100.0f },
+    { "filterCutoff", 420.0f }, { "filterResonance", 18.0f }, { "filterKeytrack", 40.0f }, { "filterEnvAmount", 25.0f },
+    { "env1Attack", 1.0f }, { "env1Decay", 2500.0f }, { "env1Sustain", 20.0f }, { "env1Release", 400.0f },
+    { "env2Attack", 0.0f }, { "env2Decay", 450.0f }, { "env2Release", 300.0f },
+    { "mod1Source", e (ModSource::voiceBrightness) }, { "mod1Dest", e (ModDest::filterCutoff) }, { "mod1Amount", 20.0f },
+    { "mod2Source", e (ModSource::velocity) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 10.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_4) }, { "delayFeedback", 25.0f }, { "delayMix", 18.0f },
+    { "reverbOn", on }, { "reverbSize", 55.0f }, { "reverbDamping", 70.0f }, { "reverbMix", 30.0f },
+};
+
+constexpr FactoryPresetValue glassArp[] {
+    { "playMode", poly },
+    { "ampGain", -1.7f },
+    { "oscAPosition", 30.0f }, { "oscALevel", 60.0f }, { "oscAUnison", 2.0f }, { "oscADetune", 8.0f },
+    { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 60.0f }, { "oscBOctave", 1.0f }, { "oscBLevel", 25.0f }, { "oscBPhaseRand", 100.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 3000.0f }, { "filterResonance", 15.0f }, { "filterKeytrack", 50.0f },
+    { "filterEnvAmount", 30.0f },
+    { "env1Attack", 0.0f }, { "env1Decay", 1600.0f }, { "env1Sustain", 8.0f }, { "env1Release", 300.0f },
+    { "env2Attack", 0.0f }, { "env2Decay", 350.0f },
+    { "mod1Source", e (ModSource::voiceBrightness) }, { "mod1Dest", e (ModDest::oscBLevel) }, { "mod1Amount", 30.0f },
+    { "mod2Source", e (ModSource::voiceLevel) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 15.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_16) }, { "delayFeedback", 45.0f }, { "delayPingPong", on },
+    { "reverbOn", on }, { "reverbSize", 60.0f }, { "reverbDamping", 30.0f }, { "reverbMix", 30.0f },
+};
+
+//==============================================================================
+// 0.4.1: R&B (indices 32..39, tag "rnb")
+
+constexpr FactoryPresetValue smoothRnbLead[] {
+    { "glideTime", 60.0f },
+    { "ampGain", -4.4f },
+    { "oscAPosition", 32.0f }, { "oscAUnison", 2.0f }, { "oscADetune", 8.0f }, { "oscASpread", 30.0f },
+    { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 0.0f }, { "oscBOctave", -1.0f }, { "oscBLevel", 30.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 2200.0f }, { "filterResonance", 8.0f }, { "filterKeytrack", 40.0f },
+    { "env1Attack", 20.0f }, { "env1Release", 300.0f },
+    // The singer's own vibrato (Voice Pitch) widened by about half on top of the bend
+    { "mod1Source", e (ModSource::voicePitch) }, { "mod1Dest", e (ModDest::pitch) }, { "mod1Amount", 4.0f },
+    { "mod2Source", e (ModSource::voiceLevel) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 20.0f },
+    { "mod3Source", e (ModSource::voiceBrightness) }, { "mod3Dest", e (ModDest::oscAPosition) }, { "mod3Amount", 20.0f },
+    { "chorusOn", on }, { "chorusRate", 0.5f }, { "chorusDepth", 30.0f }, { "chorusMix", 25.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_4) }, { "delayFeedback", 25.0f }, { "delayPingPong", on },
+    { "delayMix", 14.0f },
+    { "reverbOn", on }, { "reverbSize", 55.0f }, { "reverbMix", 22.0f },
+};
+
+constexpr FactoryPresetValue slowJamLead[] {
+    { "glideTime", 140.0f }, { "glideMode", always },
+    { "ampGain", -6.2f },
+    { "oscAPosition", 20.0f },
+    { "oscBOn", on }, { "oscBPosition", 0.0f }, { "oscBOctave", 1.0f }, { "oscBLevel", 20.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 2600.0f }, { "filterResonance", 12.0f }, { "filterKeytrack", 50.0f },
+    { "env1Attack", 15.0f }, { "env1Release", 350.0f },
+    { "lfo1Rate", 4.8f }, { "lfo1Retrig", on }, { "lfo1Fade", 900.0f },
+    { "mod1Source", e (ModSource::voiceBrightness) }, { "mod1Dest", e (ModDest::oscAPosition) }, { "mod1Amount", 35.0f },
+    { "mod2Source", e (ModSource::voiceLevel) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 15.0f },
+    { "mod3Source", e (ModSource::lfo1) }, { "mod3Dest", e (ModDest::pitch) }, { "mod3Amount", 1.5f },
+    { "chorusOn", on }, { "chorusRate", 0.3f }, { "chorusMix", 20.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_4D) }, { "delayFeedback", 30.0f }, { "delayMix", 15.0f },
+    { "reverbOn", on }, { "reverbSize", 60.0f }, { "reverbMix", 22.0f },
+};
+
+constexpr FactoryPresetValue rnbBass90s[] {
+    { "glideTime", 35.0f },
+    { "ampGain", -4.7f },
+    { "oscAPosition", 60.0f }, { "oscAOctave", -1.0f }, { "oscALevel", 65.0f },
+    { "subLevel", 40.0f },
+    { "filterCutoff", 380.0f }, { "filterResonance", 30.0f }, { "filterDrive", 4.0f }, { "filterKeytrack", 40.0f },
+    { "filterEnvAmount", 30.0f },
+    { "env1Attack", 2.0f }, { "env1Decay", 900.0f }, { "env1Sustain", 70.0f }, { "env1Release", 140.0f },
+    { "env2Attack", 0.0f }, { "env2Decay", 350.0f }, { "env2Sustain", 25.0f },
+    { "mod1Source", e (ModSource::voiceLevel) }, { "mod1Dest", e (ModDest::filterCutoff) }, { "mod1Amount", 20.0f },
+    { "mod2Source", e (ModSource::voiceBrightness) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 10.0f },
+};
+
+constexpr FactoryPresetValue silkPad[] {
+    { "playMode", poly }, { "ampVelocity", 30.0f },
+    { "ampGain", -5.4f },
+    { "oscAPosition", 45.0f }, { "oscALevel", 60.0f }, { "oscAUnison", 4.0f }, { "oscASpread", 75.0f },
+    { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 25.0f }, { "oscBOctave", 1.0f }, { "oscBLevel", 20.0f }, { "oscBPhaseRand", 100.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 2000.0f }, { "filterResonance", 5.0f }, { "filterKeytrack", 30.0f },
+    { "env1Attack", 900.0f }, { "env1Decay", 1500.0f }, { "env1Sustain", 85.0f }, { "env1Release", 2400.0f },
+    { "lfo2Rate", 0.15f },
+    { "mod1Source", e (ModSource::lfo2) }, { "mod1Dest", e (ModDest::oscAPosition) }, { "mod1Amount", 10.0f },
+    { "mod2Source", e (ModSource::voiceBrightness) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 20.0f },
+    { "mod3Source", e (ModSource::voiceLevel) }, { "mod3Dest", e (ModDest::oscBLevel) }, { "mod3Amount", 20.0f },
+    { "chorusOn", on }, { "chorusRate", 0.3f }, { "chorusDepth", 60.0f }, { "chorusMix", 45.0f },
+    { "reverbOn", on }, { "reverbSize", 75.0f }, { "reverbDamping", 60.0f }, { "reverbMix", 35.0f },
+};
+
+constexpr FactoryPresetValue airyChoir[] {
+    { "playMode", poly },
+    { "ampGain", -4.5f },
+    { "oscAPosition", 45.0f }, { "oscALevel", 60.0f }, { "oscAUnison", 3.0f }, { "oscADetune", 14.0f },
+    { "oscASpread", 65.0f }, { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBOctave", 1.0f }, { "oscBLevel", 20.0f }, { "oscBPhaseRand", 100.0f },
+    { "noiseLevel", 4.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 7500.0f },
+    { "env1Attack", 600.0f }, { "env1Decay", 1000.0f }, { "env1Sustain", 85.0f }, { "env1Release", 1800.0f },
+    { "mod1Source", e (ModSource::voiceBrightness) }, { "mod1Dest", e (ModDest::oscAPosition) }, { "mod1Amount", 40.0f },
+    { "mod2Source", e (ModSource::voiceNoisiness) }, { "mod2Dest", e (ModDest::noiseLevel) }, { "mod2Amount", 25.0f },
+    { "chorusOn", on }, { "chorusMix", 30.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_4D) }, { "delayPingPong", on }, { "delayMix", 12.0f },
+    { "reverbOn", on }, { "reverbSize", 85.0f }, { "reverbDamping", 35.0f }, { "reverbMix", 40.0f },
+};
+
+constexpr FactoryPresetValue neoSoulKeys[] {
+    { "playMode", poly }, { "ampVelocity", 70.0f },
+    { "ampGain", -6.7f },
+    { "oscAPosition", 12.0f }, { "oscALevel", 65.0f }, { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 0.0f }, { "oscBFine", 4.0f }, { "oscBLevel", 35.0f }, { "oscBPhaseRand", 100.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 6000.0f },
+    { "env1Attack", 2.0f }, { "env1Decay", 3500.0f }, { "env1Sustain", 30.0f }, { "env1Release", 450.0f },
+    { "env3Attack", 0.0f }, { "env3Decay", 500.0f },
+    { "lfo2Rate", 3.5f },
+    // Tine bark (Env 3 + velocity -> FM index), stereo tremolo (LFO 2 -> pan)
+    { "mod1Source", e (ModSource::env3) }, { "mod1Dest", e (ModDest::oscAPosition) }, { "mod1Amount", 22.0f },
+    { "mod2Source", e (ModSource::velocity) }, { "mod2Dest", e (ModDest::oscAPosition) }, { "mod2Amount", 12.0f },
+    { "mod3Source", e (ModSource::voiceBrightness) }, { "mod3Dest", e (ModDest::oscAPosition) }, { "mod3Amount", 12.0f },
+    { "mod4Source", e (ModSource::lfo2) }, { "mod4Dest", e (ModDest::pan) }, { "mod4Amount", 35.0f },
+    { "chorusOn", on }, { "chorusRate", 0.7f }, { "chorusDepth", 30.0f }, { "chorusMix", 25.0f },
+    { "reverbOn", on }, { "reverbSize", 40.0f }, { "reverbMix", 16.0f },
+};
+
+constexpr FactoryPresetValue bellKeys[] {
+    { "playMode", poly }, { "ampVelocity", 60.0f },
+    { "ampGain", -5.4f },
+    { "oscAPosition", 30.0f }, { "oscALevel", 60.0f }, { "oscAPhaseRand", 100.0f },
+    { "oscBOn", on }, { "oscBPosition", 25.0f }, { "oscBLevel", 30.0f }, { "oscBPhaseRand", 100.0f },
+    { "filterMode", lp12 }, { "filterCutoff", 8000.0f },
+    { "env1Attack", 1.0f }, { "env1Decay", 2800.0f }, { "env1Sustain", 20.0f }, { "env1Release", 700.0f },
+    { "env3Attack", 0.0f }, { "env3Decay", 600.0f },
+    { "mod1Source", e (ModSource::env3) }, { "mod1Dest", e (ModDest::oscBPosition) }, { "mod1Amount", 25.0f },
+    { "mod2Source", e (ModSource::voiceBrightness) }, { "mod2Dest", e (ModDest::oscAPosition) }, { "mod2Amount", -25.0f },
+    { "chorusOn", on }, { "chorusRate", 0.9f }, { "chorusDepth", 40.0f }, { "chorusMix", 30.0f },
+    { "reverbOn", on }, { "reverbSize", 55.0f }, { "reverbMix", 22.0f },
+};
+
+constexpr FactoryPresetValue talkboxLead[] {
+    { "glideTime", 45.0f },
+    { "ampGain", -3.6f },
+    { "oscAPosition", 0.0f },
+    { "oscBOn", on }, { "oscBPosition", 75.0f }, { "oscBOctave", -1.0f }, { "oscBLevel", 25.0f },
+    { "filterCutoff", 3500.0f }, { "filterResonance", 20.0f }, { "filterDrive", 3.0f }, { "filterKeytrack", 30.0f },
+    { "env1Attack", 6.0f }, { "env1Release", 180.0f },
+    // Voice Brightness opens the "mouth" from A (dark voice) over E to I (bright voice), Level -> cutoff
+    { "mod1Source", e (ModSource::voiceBrightness) }, { "mod1Dest", e (ModDest::oscAPosition) }, { "mod1Amount", 50.0f },
+    { "mod2Source", e (ModSource::voiceLevel) }, { "mod2Dest", e (ModDest::filterCutoff) }, { "mod2Amount", 20.0f },
+    { "chorusOn", on }, { "chorusMix", 15.0f },
+    { "delayOn", on }, { "delaySync", e (TempoDivision::d1_8) }, { "delayFeedback", 20.0f }, { "delayMix", 10.0f },
+    { "reverbOn", on }, { "reverbMix", 15.0f },
+};
+
+constexpr std::array<FactoryPreset, 40> presets { {
     { "Init", PresetCategory::init, "", "basic-shapes", "basic-shapes", {} },
 
     { "Voice Lead", PresetCategory::lead, "voice,saw,warm", "basic-shapes", "saw-bright-dark", voiceLead },
@@ -432,6 +693,26 @@ constexpr std::array<FactoryPreset, 24> presets { {
 
     { "Space Drift", PresetCategory::fx, "atmos,evolving,space", "spectral-random", "fold", spaceDrift },
     { "Glitch", PresetCategory::fx, "glitch,digital,rhythmic", "digital", "square-stack", glitch },
+
+    // 0.4.1: Trap
+    { "Trap Flute", PresetCategory::lead, "trap,flute,breath", "basic-shapes", "formant-vowel", trapFlute },
+    { "Brass Stab", PresetCategory::lead, "trap,brass,stab", "basic-shapes", "basic-shapes", brassStab },
+    { "808 Glide Bass", PresetCategory::bass, "trap,808,glide,sub", "basic-shapes", "basic-shapes", glide808 },
+    { "808 Distorted", PresetCategory::bass, "trap,808,distorted", "basic-shapes", "basic-shapes", distorted808 },
+    { "Dark Atmos", PresetCategory::pad, "trap,dark,atmos", "spectral-random", "choir", darkAtmos },
+    { "Trap Bell", PresetCategory::pluckKeys, "trap,bell,bright", "bell", "basic-shapes", trapBell },
+    { "Dark Pluck", PresetCategory::pluckKeys, "trap,pluck,dark", "saw-bright-dark", "basic-shapes", darkPluck },
+    { "Glass Arp", PresetCategory::pluckKeys, "trap,glass,arp", "harmonic-sweep", "bell", glassArp },
+
+    // 0.4.1: R&B
+    { "Smooth R&B Lead", PresetCategory::lead, "rnb,smooth,vibrato", "basic-shapes", "basic-shapes", smoothRnbLead },
+    { "Slow Jam Lead", PresetCategory::lead, "rnb,slowjam,portamento", "pwm", "basic-shapes", slowJamLead },
+    { "90s R&B Bass", PresetCategory::bass, "rnb,90s,synthbass", "basic-shapes", "basic-shapes", rnbBass90s },
+    { "Silk Pad", PresetCategory::pad, "rnb,silk,warm", "saw-bright-dark", "basic-shapes", silkPad },
+    { "Airy Choir", PresetCategory::pad, "rnb,choir,airy", "choir", "formant-vowel", airyChoir },
+    { "Neo-Soul Keys", PresetCategory::pluckKeys, "rnb,keys,rhodes", "fm-2op", "basic-shapes", neoSoulKeys },
+    { "Bell Keys", PresetCategory::pluckKeys, "rnb,bell,keys", "bell", "fm-2op", bellKeys },
+    { "Talkbox Lead", PresetCategory::vocal, "rnb,talkbox,formant", "formant-vowel", "basic-shapes", talkboxLead },
 } };
 } // namespace
 

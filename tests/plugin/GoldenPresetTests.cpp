@@ -325,6 +325,36 @@ std::vector<Features> fingerprint (const Render& r)
     return result;
 }
 
+/** Share of the power above 200 Hz (dB) in the 100 ms window at 1.0 s of m = (L + R) / 2: how much of a bass
+    preset is left on small speakers that roll off below ~200 Hz (measurement only). */
+double powerAbove200HzDb (const Render& r)
+{
+    sy::RealFft fft (fftOrder);
+    std::vector<double> input (static_cast<std::size_t> (fft.getSize()), 0.0);
+    std::vector<std::complex<double>> bins (static_cast<std::size_t> (fft.getNumBins()));
+    const auto start = static_cast<std::size_t> (seconds (1.0));
+
+    for (int i = 0; i < windowSamples && start + static_cast<std::size_t> (i) < r.left.size(); ++i)
+    {
+        const auto j = start + static_cast<std::size_t> (i);
+        const double hann = 0.5 - 0.5 * std::cos (2.0 * std::numbers::pi * i / (windowSamples - 1));
+        input[static_cast<std::size_t> (i)] = 0.5 * (static_cast<double> (r.left[j]) + static_cast<double> (r.right[j])) * hann;
+    }
+
+    fft.forward (input, bins);
+    const double binHz = sampleRate / fft.getSize();
+    double total = 1.0e-30, above = 1.0e-30;
+
+    for (std::size_t k = 1; k < bins.size(); ++k)
+    {
+        const double p = std::norm (bins[k]);
+        total += p;
+        above += static_cast<double> (k) * binHz > 200.0 ? p : 0.0;
+    }
+
+    return 10.0 * std::log10 (above / total);
+}
+
 double peakDb (const Render& r)
 {
     float peak = 0.0f;
@@ -611,13 +641,17 @@ TEST_CASE ("GoldenPreset: presets are level-matched with ampGain", "[plugin][syn
 
 TEST_CASE ("GoldenPreset: measure loudness, peaks and CPU per preset", "[.][presetmeasure]")
 {
-    std::printf ("%-16s %-6s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "preset", "mode", "LUFS", "pkHeld", "pkLeg",
-                 "pkRest", "pkChd4", "cpu%", "cpuChd%", "centrHz", "riseMs");
+    std::printf ("%-16s %-6s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n", "preset", "mode", "LUFS", "pkHeld", "pkLeg",
+                 "pkRest", "pkChd4", "cpu%", "cpuChd%", "centrHz", "riseMs", "dcMax", ">200Hz");
 
     double heaviest = 0.0;
     std::string heaviestName;
 
-    for (int i = 0; i < FactoryPresets::getNumPresets(); ++i)
+    // VOCALSYNTH_MEASURE_FROM=<index>: measure only the presets from that index on (sound design of new presets)
+    const char* fromValue = std::getenv ("VOCALSYNTH_MEASURE_FROM");
+    const int first = fromValue != nullptr ? std::clamp (std::atoi (fromValue), 0, FactoryPresets::getNumPresets()) : 0;
+
+    for (int i = first; i < FactoryPresets::getNumPresets(); ++i)
     {
         const auto& preset = FactoryPresets::getPreset (i);
         const auto settings = settingsOf (preset);
@@ -628,7 +662,8 @@ TEST_CASE ("GoldenPreset: measure loudness, peaks and CPU per preset", "[.][pres
 
         // Timbre and envelope shape of the held note with the singing expression: mean centroid of the windows
         // within 20 dB of the loudest one, and the time until the RMS is within 3 dB of its maximum
-        const auto windows = fingerprint (render (preset, heldSequence(), ExpressionKind::singing));
+        const auto singing = render (preset, heldSequence(), ExpressionKind::singing);
+        const auto windows = fingerprint (singing);
         double loudest = floorDb, centroidSum = 0.0, riseMs = 0.0;
         int centroidCount = 0;
 
@@ -664,9 +699,19 @@ TEST_CASE ("GoldenPreset: measure loudness, peaks and CPU per preset", "[.][pres
         const double cpu = cpuOf (legatoSequence());
         double chordPeak = floorDb, cpuChord = 0.0;
 
+        // Largest |mean| of a channel over the renders the DC check looks at (limit 1e-3)
+        double dcMax = 0.0;
+        const auto addDc = [&dcMax] (const Render& r)
+        { dcMax = std::max ({ dcMax, std::abs (meanOf (r.left)), std::abs (meanOf (r.right)) }); };
+        addDc (held);
+        addDc (legato);
+        addDc (rest);
+
         if (isPoly (settings))
         {
-            chordPeak = peakDb (render (preset, chordSequence ({ 60, 64, 67, 72 }, "chord4"), ExpressionKind::golden));
+            const auto chord4 = render (preset, chordSequence ({ 60, 64, 67, 72 }, "chord4"), ExpressionKind::golden);
+            chordPeak = peakDb (chord4);
+            addDc (chord4);
             cpuChord = cpuOf (chordSequence ({ 60, 64, 67, 72 }, "chord4"));
         }
 
@@ -676,10 +721,10 @@ TEST_CASE ("GoldenPreset: measure loudness, peaks and CPU per preset", "[.][pres
             heaviestName = std::string (preset.name);
         }
 
-        std::printf ("%-16s %-6s %8.2f %8.2f %8.2f %8.2f %8.2f %8.3f %8.3f %8.0f %8.0f\n",
+        std::printf ("%-16s %-6s %8.2f %8.2f %8.2f %8.2f %8.2f %8.3f %8.3f %8.0f %8.0f %8.1e %8.1f\n",
                      std::string (preset.name).c_str(), playModeName (settings), loudness, peakDb (held), peakDb (legato),
                      peakDb (rest), chordPeak, cpu, cpuChord, centroidCount > 0 ? centroidSum / centroidCount : 0.0,
-                     riseMs);
+                     riseMs, dcMax, powerAbove200HzDb (singing));
     }
 
     std::printf ("heaviest: %s %.3f %%\n", heaviestName.c_str(), heaviest);
